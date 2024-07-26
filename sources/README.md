@@ -20,6 +20,13 @@ The source code for ERNIE is organized in the `ERNIE/sources/` directory.
   - Used for training a language model from scratch
   - Serves as a sample dataset for initial model development and testing
 
+- **Pre-calculated BPE Tokenizer Models**:
+  - `.model` and `.vocab` files for BPE (Byte Pair Encoding) tokenizers
+  - Includes models for:
+    - French language (3k vocabulary)
+    - English language (3k vocabulary)
+    - Multilingual (100k vocabulary)
+
 ### Notes:
 
 1. The main program (`vslm.cpp`) currently includes its own implementation for creating and using a SentencePiece tokenizer, independent of `tokenizer.hpp`.
