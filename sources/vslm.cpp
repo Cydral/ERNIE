@@ -1428,8 +1428,8 @@ int main(int argc, char* argv[]) {
             true,       // 4: mean_matrix()
             true,       // 5: attention mechanism
             true,       // 6: add_prev1 layer
-            true,       // 7: simple network
-            true,       // 8: multihead attention model
+            false,      // 7: simple network
+            false,      // 8: multihead attention model
             false       // 9: "shakespeare" example
         };
 
@@ -1504,11 +1504,11 @@ int main(int argc, char* argv[]) {
 
                 // Input tensor
                 dlib::rand rnd;
-                const long nr = 2, nc = 3;
-                constexpr int num_samples = 3, k = 1;
-                std::vector<matrix<float>> x(num_samples);
+                const int nr = 2, nc = 3;
+                constexpr int n_samples = 3, k = 1;
+                std::vector<matrix<float>> x(n_samples);
                 matrix<float> xtmp(nr, nc);
-                for (int ii = 0; ii < num_samples; ++ii) {
+                for (int ii = 0; ii < n_samples; ++ii) {
                     for (int jj = 0; jj < nr; ++jj)
                         for (int kk = 0; kk < nc; ++kk)
                             xtmp(jj, kk) = rnd.get_random_gaussian();
@@ -1517,7 +1517,7 @@ int main(int argc, char* argv[]) {
 
                 // Convert input matrix to tensor
                 resizable_tensor input_tensor;
-                net.to_tensor(&x[0], &x[0] + num_samples, input_tensor);
+                net.to_tensor(&x[0], &x[0] + n_samples, input_tensor);
                 net.forward(input_tensor);
                 if (display_debug_info) DBG_INFO("input_output: ", input_tensor, true);
 
@@ -1525,7 +1525,7 @@ int main(int argc, char* argv[]) {
                 resizable_tensor expected_output;
                 expected_output.copy_size(input_tensor);
                 tt::copy_tensor(false, expected_output, 0, input_tensor, 0, input_tensor.k());
-                for (int ii = 0; ii < num_samples; ++ii) {
+                for (int ii = 0; ii < n_samples; ++ii) {
                     expected_output.host()[tensor_index(expected_output, ii, 0, 0, 1)] = neg_inf;
                     expected_output.host()[tensor_index(expected_output, ii, 0, 0, 2)] = neg_inf;
                     expected_output.host()[tensor_index(expected_output, ii, 0, 1, 2)] = neg_inf;
@@ -1548,10 +1548,10 @@ int main(int argc, char* argv[]) {
                 // Input tensor
                 dlib::rand rnd;
                 const long nr = 2, nc = 3;
-                constexpr int num_samples = 3, k = 1;
-                std::vector<matrix<float>> x(num_samples);
+                constexpr int n_samples = 3, k = 1;
+                std::vector<matrix<float>> x(n_samples);
                 matrix<float> xtmp(nr, nc);
-                for (int ii = 0; ii < num_samples; ++ii) {
+                for (int ii = 0; ii < n_samples; ++ii) {
                     for (int jj = 0; jj < nr; ++jj)
                         for (int kk = 0; kk < nc; ++kk) {
                             float r = rnd.get_random_gaussian();
@@ -1563,14 +1563,14 @@ int main(int argc, char* argv[]) {
 
                 // Convert input matrix to tensor
                 resizable_tensor input_tensor;
-                net.to_tensor(&x[0], &x[0] + num_samples, input_tensor);
+                net.to_tensor(&x[0], &x[0] + n_samples, input_tensor);
                 net.forward(input_tensor);
                 if (display_debug_info) DBG_INFO("input_tensor: ", input_tensor, true);
 
                 // Expected output tensor
                 resizable_tensor expected_output;
                 expected_output.copy_size(input_tensor);
-                for (int ii = 0; ii < num_samples; ++ii) {
+                for (int ii = 0; ii < n_samples; ++ii) {
                     for (int jj = 0; jj < nr; ++jj) {
                         matrix<float> m(1, nc);
                         bool all_neg_inf = true;
@@ -1707,12 +1707,12 @@ int main(int argc, char* argv[]) {
 
                 // Convert X into a tensor
                 const long nr = X.nr(), nc = X.nc();
-                constexpr int num_samples = 1, k = 1;
-                std::vector<matrix<float>> xx(num_samples);
+                constexpr int n_samples = 1, k = 1;
+                std::vector<matrix<float>> xx(n_samples);
                 matrix<float> xtmp(nr, nc);
-                for (int ii = 0; ii < num_samples; ++ii) xx[ii] = X;
+                for (int ii = 0; ii < n_samples; ++ii) xx[ii] = X;
                 resizable_tensor input_tensor;
-                net.to_tensor(&xx[0], &xx[0] + num_samples, input_tensor);
+                net.to_tensor(&xx[0], &xx[0] + n_samples, input_tensor);
                 net.forward(input_tensor);
 
                 // Initialise network weights
@@ -1754,8 +1754,8 @@ int main(int argc, char* argv[]) {
                 net_type net;
 
                 // Input tensor
-                constexpr int num_samples = 1, k = 1;
-                std::vector<matrix<float>> x(num_samples);
+                constexpr int n_samples = 1, k = 1;
+                std::vector<matrix<float>> x(n_samples);
                 matrix<float> xtmp(2, 4);
                 xtmp = 1.0f, 2.0f, 3.0f, 4.0f,
                     5.0f, 6.0f, 7.0f, 8.0f;
@@ -1763,7 +1763,7 @@ int main(int argc, char* argv[]) {
 
                 // Convert input matrix to tensor
                 resizable_tensor input_tensor;
-                net.to_tensor(&x[0], &x[0] + num_samples, input_tensor);
+                net.to_tensor(&x[0], &x[0] + n_samples, input_tensor);
                 net.forward(input_tensor);
 
                 // Get the internal linear weights
@@ -1792,10 +1792,10 @@ int main(int argc, char* argv[]) {
         if (display_debug_info) cout << "\ntest: training attention models\n";
         {
             // Define the network
-            constexpr int batch_size = 4;
-            constexpr int num_samples = (1450 / batch_size) * batch_size;
+            int num_samples = (1450 / mini_batch_size) * mini_batch_size;
             constexpr int num_classes = 256;           
-            constexpr int num_epochs = 1000;
+            constexpr int num_epochs = 500;
+            constexpr int iter_wo_progress = 500;
 
             // Shakespeare's text sample
             const string shakespeare_text = R"(To be, or not to be, that is the question:
@@ -1867,9 +1867,9 @@ Be all my sins remember'd.)";
             // Split data into batches
             std::vector<std::vector<matrix<float>>> batches;
             std::vector<std::vector<unsigned long>> label_batches;
-            for (int i = 0; i < num_samples; i += batch_size) {
-                std::vector<matrix<float>> batch_samples(samples.begin() + i, samples.begin() + i + batch_size);
-                std::vector<unsigned long> batch_labels(labels.begin() + i, labels.begin() + i + batch_size);
+            for (int i = 0; i < num_samples; i += mini_batch_size) {
+                std::vector<matrix<float>> batch_samples(samples.begin() + i, samples.begin() + i + mini_batch_size);
+                std::vector<unsigned long> batch_labels(labels.begin() + i, labels.begin() + i + mini_batch_size);
                 batches.push_back(batch_samples);
                 label_batches.push_back(batch_labels);
             }
@@ -1879,10 +1879,10 @@ Be all my sins remember'd.)";
                 dnn_trainer<net_type_a, adam> trainer_a(net_a, adam(0.004, 0.9, 0.998));
                 trainer_a.set_learning_rate(1e-3);
                 trainer_a.set_min_learning_rate(1e-6);
-                trainer_a.set_mini_batch_size(batch_size);
+                trainer_a.set_mini_batch_size(mini_batch_size);
                 trainer_a.be_verbose();
-                trainer_a.set_iterations_without_progress_threshold(500);
-                for (int epoch = 0; epoch < num_epochs && trainer_a.get_learning_rate() >= trainer_a.get_min_learning_rate() && !g_interrupt_signal_received; ++epoch) {
+                trainer_a.set_iterations_without_progress_threshold(iter_wo_progress);
+                for (int epoch = 0; epoch < (2 * num_epochs) && trainer_a.get_learning_rate() >= trainer_a.get_min_learning_rate() && !g_interrupt_signal_received; ++epoch) {
                     for (size_t i = 0; i < batches.size(); ++i) trainer_a.train_one_step(batches[i], label_batches[i]);
                 }
                 g_interrupt_signal_received = false;
@@ -1904,10 +1904,10 @@ Be all my sins remember'd.)";
                 dnn_trainer<net_type_b, adam> trainer_b(net_b, adam(0.001, 0.9, 0.98));
                 trainer_b.set_learning_rate(1e-3);
                 trainer_b.set_min_learning_rate(1e-6);
-                trainer_b.set_mini_batch_size(batch_size);
+                trainer_b.set_mini_batch_size(mini_batch_size);
                 trainer_b.be_verbose();
-                trainer_b.set_iterations_without_progress_threshold(1000);
-                for (int epoch = 0; epoch < num_epochs && trainer_b.get_learning_rate() >= trainer_b.get_min_learning_rate() && !g_interrupt_signal_received; ++epoch) {
+                trainer_b.set_iterations_without_progress_threshold(2 * iter_wo_progress);
+                for (int epoch = 0; epoch < (2 * num_epochs) && trainer_b.get_learning_rate() >= trainer_b.get_min_learning_rate() && !g_interrupt_signal_received; ++epoch) {
                     for (size_t i = 0; i < batches.size(); ++i) trainer_b.train_one_step(batches[i], label_batches[i]);
                 }
                 g_interrupt_signal_received = false;
@@ -1941,7 +1941,7 @@ Be all my sins remember'd.)";
                 };
                 // Tokenize the Shakespeare text
                 std::vector<matrix<int, 0, 1>> samples_txt = tokenize_text(shakespeare_text, sequence_size);
-                cout << "batch size: " << batch_size << endl;
+                cout << "batch size: " << mini_batch_size << endl;
                 cout << "samples used for the training: " << num_samples << " (extracted from text: " << samples_txt.size() << ")" << endl;
                 if (samples_txt.size() > num_samples) samples_txt.resize(num_samples);
                 std::vector<unsigned long> labels_txt;
@@ -1951,9 +1951,9 @@ Be all my sins remember'd.)";
                 // Split data into batches
                 std::vector<std::vector<matrix<int, 0, 1>>> batches_txt;
                 std::vector<std::vector<unsigned long>> label_batches_txt;
-                for (size_t i = 0; i < samples_txt.size() - 1; i += batch_size) {
-                    std::vector<matrix<int, 0, 1>> batch_samples(samples_txt.begin() + i, samples_txt.begin() + i + batch_size);
-                    std::vector<unsigned long> batch_labels(labels_txt.begin() + i, labels_txt.begin() + i + batch_size);
+                for (size_t i = 0; i < samples_txt.size() - 1; i += mini_batch_size) {
+                    std::vector<matrix<int, 0, 1>> batch_samples(samples_txt.begin() + i, samples_txt.begin() + i + mini_batch_size);
+                    std::vector<unsigned long> batch_labels(labels_txt.begin() + i, labels_txt.begin() + i + mini_batch_size);
                     batches_txt.push_back(batch_samples);
                     label_batches_txt.push_back(batch_labels);
                 }
@@ -1965,10 +1965,10 @@ Be all my sins remember'd.)";
                 dnn_trainer<net_type_c, adam> trainer_c(net_c, adam(0.001, 0.9, 0.98));
                 trainer_c.set_learning_rate(1e-3);
                 trainer_c.set_min_learning_rate(1e-6);
-                trainer_c.set_mini_batch_size(batch_size);
+                trainer_c.set_mini_batch_size(mini_batch_size);
                 trainer_c.be_verbose();
-                trainer_c.set_iterations_without_progress_threshold(2500);
-                for (int epoch = 0; epoch < num_epochs && trainer_c.get_learning_rate() >= trainer_c.get_min_learning_rate() && !g_interrupt_signal_received; ++epoch) {
+                trainer_c.set_iterations_without_progress_threshold(30 * iter_wo_progress);
+                for (int epoch = 0; epoch < (5 * num_epochs) && trainer_c.get_learning_rate() >= trainer_c.get_min_learning_rate() && !g_interrupt_signal_received; ++epoch) {
                     for (size_t i = 0; i < batches_txt.size(); ++i) trainer_c.train_one_step(batches_txt[i], label_batches_txt[i]);
                 }
                 g_interrupt_signal_received = false;
