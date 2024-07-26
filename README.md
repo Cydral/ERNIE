@@ -1,5 +1,6 @@
 # ERNIE
 <p><i>This README provides a comprehensive overview of the ERNIE project, including its background, key features, installation instructions, usage examples, and acknowledgments. It highlights the custom layers developed for the project and emphasizes its role in extending Dlib's capabilities for NLP tasks. The content is structured to be informative and engaging for potential users and contributors on GitHub.</i></p>
+<p align="center"><img src="https://github.com/Cydral/ERNIE/blob/main/ERNIE_logo.png" alt=""></p>
 
 ## Introduction
 Large Language Models (LLMs) have revolutionized natural language processing, demonstrating remarkable capabilities in understanding and generating human-like text. However, they come with significant challenges:
