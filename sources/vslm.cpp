@@ -1413,15 +1413,17 @@ public:
             }
         } else {
             if (pre_samples_.size() == 0) {
-                for (const auto& sentence : source_tokens_) {
-                    int nb_samples = 0;
-                    for (int i = 0; i < (int)(sentence.size()) - (sequence_size_ + 1); ++i) {
-                        matrix<int> sample(sequence_size_, 1);
-                        for (size_t j = 0; j < sequence_size_; ++j) sample(j, 0) = sentence[i + j];
-                        pre_samples_.push_back(std::move(sample));
-                        nb_samples++;
-                    }
-                    for (int i = 0; i < nb_samples; ++i) pre_labels_.push_back(static_cast<unsigned long>(sentence[(i + 1) * sequence_size_]));                    
+                for (const auto& sentence : source_tokens_) {                    
+                    if (sentence.size() > (sequence_size_ + 1)) {
+                        int nb_samples = 0;
+                        for (int i = 0; i < (int)(sentence.size()) - (sequence_size_ + 1); ++i) {
+                            matrix<int> sample(sequence_size_, 1);
+                            for (size_t j = 0; j < sequence_size_; ++j) sample(j, 0) = sentence[i + j];
+                            pre_samples_.push_back(std::move(sample));
+                            nb_samples++;
+                        }
+                        for (int i = 0; i < nb_samples; ++i) pre_labels_.push_back(static_cast<unsigned long>(sentence[(i + 1) * sequence_size_]));
+                    }                    
                 }
             }
             if (pre_samples_.size() > 0) {
@@ -2074,11 +2076,13 @@ Be all my sins remember'd.)";
                 // Lambda function for tokenizing text
                 auto tokenize_text = [](const string& text, int sequence_len) -> std::vector<matrix<int, 0, 1>> {
                     std::vector<matrix<int, 0, 1>> tokens;
-                    for (int i = 0; i < (int)(text.size()) - (sequence_len + 1); ++i) {
-                        matrix<int> sample(sequence_len, 1);
-                        for (size_t j = 0; j < sequence_len; ++j) sample(j, 0) = static_cast<unsigned char>(text[i + j]);
-                        tokens.push_back(sample);
-                    }
+                    if (text.size() > (sequence_len + 1)) {
+                        for (int i = 0; i < (int)(text.size()) - (sequence_len + 1); ++i) {
+                            matrix<int> sample(sequence_len, 1);
+                            for (size_t j = 0; j < sequence_len; ++j) sample(j, 0) = static_cast<unsigned char>(text[i + j]);
+                            tokens.push_back(sample);
+                        }
+                    }                                        
                     return tokens;
                 };
                 // Tokenize the Shakespeare text
@@ -2198,9 +2202,9 @@ Be all my sins remember'd.)";
             " --character_coverage=1.0" +
             " --max_sentence_length=16768" +
             " --split_by_unicode_script=false" +
+            " --input_sentence_size=3500000" +
             " --shuffle_input_sentence=true" +
-            " --train_extremely_large_corpus=true" +
-            " --input_sentence_size=1500000" +
+            " --train_extremely_large_corpus=true" +            
             " --vocab_size=" + to_string(vocab_size);
         status = sentencepiece::SentencePieceTrainer::Train(train_args);
         if (!status.ok()) {
