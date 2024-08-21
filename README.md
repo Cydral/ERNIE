@@ -26,15 +26,16 @@ ERNIE is an ongoing development project that demonstrates the implementation of 
 
 The source code for ERNIE is organized in the `ERNIE/sources/` directory. This structure keeps the codebase clean and easy to navigate.
 
-📂 ERNIE
- ┣ 📂 sources
- ┃ ┣ 📜 vslm.cpp
- ┃ ┣ 📜 tokenizer.hpp
- ┃ ┣ 📜 data_fr.h
- ┃ ┣ 📜 *.model
- ┃ ┗ 📜 *.vocab
- ┣ 📜 README.md
- ┗ 📜 LICENSE
+📂 ERNIE<br>
+ ┣ 📂 sources<br>
+ ┃ ┣ 📜 vslm.cpp<br>
+ ┃ ┣ 📜 tokenizer.hpp<br>
+ ┃ ┣ 📜 data_fr.h<br>
+ ┣ 📂 models<br>
+ ┃ ┣ 📜 *.model<br>
+ ┃ ┗ 📜 *.vocab<br>
+ ┣ 📜 README.md<br>
+ ┗ 📜 LICENSE<br>
 
 ### Key Files:
 
