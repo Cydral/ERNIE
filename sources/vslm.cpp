@@ -2004,7 +2004,7 @@ int main(int argc, char* argv[]) {
             // Define the network
             int num_samples = (500 / mini_batch_size) * mini_batch_size;
             constexpr int num_classes = 256;           
-            constexpr int num_epochs = 3500;
+            constexpr int num_epochs = 3000;
             constexpr int iter_wo_progress = 2000;
 
             // Shakespeare's text sample
