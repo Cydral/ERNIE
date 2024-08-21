@@ -1533,7 +1533,7 @@ int main(int argc, char* argv[]) {
     bool do_benchmark = false, text_generation = false;
     bool voc_training = false, model_training = false, model_prompting = false, use_sync_file = false;
     double learning_rate = 1e-3, min_learning_rate = 1e-6, weight_decay = 0.005, beta1 = 0.9, beta2 = 0.998, temperature = 0.9;
-    long mini_batch_size = 4, iterations_without_progress_threshold = 20000, top_k = 3;
+    long mini_batch_size = 16, iterations_without_progress_threshold = 20000, top_k = 3;
     std::vector<int> gpus = { 0 };
     set_dnn_prefer_fastest_algorithms();
        
@@ -2091,7 +2091,7 @@ Be all my sins remembered.)";
                 trainer_a.set_mini_batch_size(mini_batch_size);
                 trainer_a.be_verbose();
                 trainer_a.set_iterations_without_progress_threshold(iter_wo_progress);
-                for (int epoch = 0; epoch < num_epochs && !g_interrupt_signal_received; ++epoch) {
+                for (int epoch = 0; epoch < num_epochs && trainer_a.get_learning_rate() >= trainer_a.get_min_learning_rate() && !g_interrupt_signal_received; ++epoch) {
                     for (size_t i = 0; i < batches.size(); ++i) trainer_a.train_one_step(batches[i], label_batches[i]);
                 }
                 trainer_a.get_net();
