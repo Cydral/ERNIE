@@ -2002,7 +2002,7 @@ int main(int argc, char* argv[]) {
         if (display_debug_info) cout << "\ntest: training attention models\n";
         {
             // Define the network
-            int num_samples = (800 / mini_batch_size) * mini_batch_size;
+            int num_samples = (500 / mini_batch_size) * mini_batch_size;
             constexpr int num_classes = 256;           
             constexpr int num_epochs = 3500;
             constexpr int iter_wo_progress = 2000;
