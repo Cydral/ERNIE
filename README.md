@@ -30,10 +30,11 @@ The source code for ERNIE is organized in the `ERNIE/sources/` directory. This s
  ┣ 📂 sources<br>
  ┃ ┣ 📜 vslm.cpp<br>
  ┃ ┣ 📜 tokenizer.hpp<br>
- ┃ ┣ 📜 data_fr.h<br>
- ┣ 📂 models<br>
+ ┃ ┣ 📜 data_fr.h<br> 
  ┃ ┣ 📜 *.model<br>
  ┃ ┗ 📜 *.vocab<br>
+ ┣ 📂 models<br>
+ ┃ ┣ 📜 *.dat<br>
  ┣ 📜 README.md<br>
  ┗ 📜 LICENSE<br>
 
