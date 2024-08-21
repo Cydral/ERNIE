@@ -63,9 +63,9 @@ using namespace dlib;
 // Global parameters for the Transformer network
 constexpr int vocab_size = 8000;                                            // Size of the vocabulary
 constexpr int sequence_size = 16;                                           // Length of the sequence
-constexpr int number_of_heads = 4;                                          // Number of attention heads
+constexpr int number_of_heads = 8;                                          // Number of attention heads
 constexpr int number_of_blocks = 12;                                        // Number of transformer blocks
-constexpr int embedding_size = (64 / number_of_heads) * number_of_heads;    // Size of the embedding
+constexpr int embedding_size = (128 / number_of_heads) * number_of_heads;    // Size of the embedding
 constexpr int bos_id = 0, eos_id = 1, unk_id = 2, pad_id = 3;
 
 // Other global parameters
@@ -401,7 +401,7 @@ namespace dlib {
                             for (int c = 0; c < gradient_input.nc(); ++c) {
                                 embeddings_data[tensor_index(embeddings, token_idx, c, 0, 0)] -=
                                     (learning_rate_multiplier * gradient_input_data[tensor_index(gradient_input, s, 0, r, c)]);
-                            }
+                            }                            
                         } else {
                             cout << "Warning: token_idx (" << token_idx << ") exceeds num_embeddings (" << num_embeddings << ")" << endl;
                         }
@@ -1250,7 +1250,7 @@ namespace dlib {
     using single_head_attention_block =
         layer_norm<add_prev3<
         dropout_10<linear_no_bias<embedding_size,
-        core_masked_attention_block<embedding_size, 4,
+        core_masked_attention_block<embedding_size, number_of_heads,
         tag3<
         SUBNET>>>>>>;
     
@@ -1262,7 +1262,7 @@ namespace dlib {
         layer_norm<add_prev3<
         dropout_10<linear_no_bias<embedding_size,
         hstack<
-        multihead_4<iblock, iblock, iblock, iblock,
+        multihead_8<iblock, iblock, iblock, iblock, iblock, iblock, iblock, iblock,
         tag3<SUBNET>>>>>>>;
 
     // Feedforward blocks
@@ -1479,7 +1479,7 @@ public:
                         for (i = 0; i < (int)(sentence.size()) - (sequence_size_ + 1); ++i) {
                             matrix<int> sample(sequence_size_, 1);
                             for (j = 0; j < (int)sequence_size_; ++j) sample(j, 0) = sentence[i + j];
-                            pre_samples_.push_back(std::move(sample));
+                            pre_samples_.push_back(sample);
                             pre_labels_.push_back(static_cast<unsigned long>(sentence[i + j]));
                         }
                     }                    
@@ -1606,8 +1606,8 @@ int main(int argc, char* argv[]) {
             true,      // 5: mean_matrix()
             true,      // 6: attention mechanism
             true,      // 7: add_prev1 layer
-            true,      // 8: simple network
-            true,      // 9: multihead attention model
+            false,      // 8: simple network
+            false,      // 9: multihead attention model
             false      // 10: "shakespeare" example
         };
 
