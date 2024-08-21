@@ -1130,19 +1130,49 @@ namespace dlib {
         template<typename> class TAG7, template<typename> class TAG8,
         template<typename> class TAG9, template<typename> class TAG10, typename SUBNET>
     using head10 = add_layer<concat_<TAG1, TAG2, TAG3, TAG4, TAG5, TAG6, TAG7, TAG8, TAG9, TAG10>, SUBNET>;
+    template <template<typename> class TAG1, template<typename> class TAG2,
+        template<typename> class TAG3, template<typename> class TAG4,
+        template<typename> class TAG5, template<typename> class TAG6,
+        template<typename> class TAG7, template<typename> class TAG8,
+        template<typename> class TAG9, template<typename> class TAG10,
+        template<typename> class TAG11, template<typename> class TAG12, typename SUBNET>
+    using head12 = add_layer<concat_<TAG1, TAG2, TAG3, TAG4, TAG5, TAG6, TAG7, TAG8, TAG9, TAG10, TAG11, TAG12>, SUBNET>;
+    template <template<typename> class TAG1, template<typename> class TAG2,
+        template<typename> class TAG3, template<typename> class TAG4,
+        template<typename> class TAG5, template<typename> class TAG6,
+        template<typename> class TAG7, template<typename> class TAG8,
+        template<typename> class TAG9, template<typename> class TAG10,
+        template<typename> class TAG11, template<typename> class TAG12,
+        template<typename> class TAG13, template<typename> class TAG14, typename SUBNET>
+    using head14 = add_layer<concat_<TAG1, TAG2, TAG3, TAG4, TAG5, TAG6, TAG7, TAG8, TAG9, TAG10, TAG11, TAG12, TAG13, TAG14>, SUBNET>;
+    template <template<typename> class TAG1, template<typename> class TAG2,
+        template<typename> class TAG3, template<typename> class TAG4,
+        template<typename> class TAG5, template<typename> class TAG6,
+        template<typename> class TAG7, template<typename> class TAG8,
+        template<typename> class TAG9, template<typename> class TAG10,
+        template<typename> class TAG11, template<typename> class TAG12,
+        template<typename> class TAG13, template<typename> class TAG14,
+        template<typename> class TAG15, template<typename> class TAG16, typename SUBNET>
+    using head16 = add_layer<concat_<TAG1, TAG2, TAG3, TAG4, TAG5, TAG6, TAG7, TAG8, TAG9, TAG10, TAG11, TAG12, TAG13, TAG14, TAG15, TAG16>, SUBNET>;
 
-    template <typename SUBNET> using htag0 = add_tag_layer< 1500 + 0, SUBNET>;
-    template <typename SUBNET> using htag1 = add_tag_layer< 1500 + 1, SUBNET>;
-    template <typename SUBNET> using htag2 = add_tag_layer< 1500 + 2, SUBNET>;
-    template <typename SUBNET> using htag3 = add_tag_layer< 1500 + 3, SUBNET>;
-    template <typename SUBNET> using htag4 = add_tag_layer< 1500 + 4, SUBNET>;
-    template <typename SUBNET> using htag5 = add_tag_layer< 1500 + 5, SUBNET>;
-    template <typename SUBNET> using htag6 = add_tag_layer< 1500 + 6, SUBNET>;
-    template <typename SUBNET> using htag7 = add_tag_layer< 1500 + 7, SUBNET>;
-    template <typename SUBNET> using htag8 = add_tag_layer< 1500 + 8, SUBNET>;
-    template <typename SUBNET> using htag9 = add_tag_layer< 1500 + 9, SUBNET>;
-    template <typename SUBNET> using htag10 = add_tag_layer< 1500 + 10, SUBNET>;
-    template <typename SUBNET> using hskip = add_skip_layer< htag0, SUBNET>;
+    template <typename SUBNET> using htag0 = add_tag_layer<1500 + 0, SUBNET>;
+    template <typename SUBNET> using htag1 = add_tag_layer<1500 + 1, SUBNET>;
+    template <typename SUBNET> using htag2 = add_tag_layer<1500 + 2, SUBNET>;
+    template <typename SUBNET> using htag3 = add_tag_layer<1500 + 3, SUBNET>;
+    template <typename SUBNET> using htag4 = add_tag_layer<1500 + 4, SUBNET>;
+    template <typename SUBNET> using htag5 = add_tag_layer<1500 + 5, SUBNET>;
+    template <typename SUBNET> using htag6 = add_tag_layer<1500 + 6, SUBNET>;
+    template <typename SUBNET> using htag7 = add_tag_layer<1500 + 7, SUBNET>;
+    template <typename SUBNET> using htag8 = add_tag_layer<1500 + 8, SUBNET>;
+    template <typename SUBNET> using htag9 = add_tag_layer<1500 + 9, SUBNET>;
+    template <typename SUBNET> using htag10 = add_tag_layer<1500 + 10, SUBNET>;
+    template <typename SUBNET> using htag11 = add_tag_layer<1500 + 11, SUBNET>;
+    template <typename SUBNET> using htag12 = add_tag_layer<1500 + 12, SUBNET>;
+    template <typename SUBNET> using htag13 = add_tag_layer<1500 + 13, SUBNET>;
+    template <typename SUBNET> using htag14 = add_tag_layer<1500 + 14, SUBNET>;
+    template <typename SUBNET> using htag15 = add_tag_layer<1500 + 15, SUBNET>;
+    template <typename SUBNET> using htag16 = add_tag_layer<1500 + 16, SUBNET>;
+    template <typename SUBNET> using hskip = add_skip_layer<htag0, SUBNET>;
 
     template <template<typename>class B1, template<typename>class B2, typename SUBNET>
     using multihead_2 = head2<htag1, htag2,
@@ -1169,6 +1199,33 @@ namespace dlib {
         template<typename>class B9, template<typename>class B10, typename SUBNET>
     using multihead_10 = head10<htag1, htag2, htag3, htag4, htag5, htag6, htag7, htag8, htag9, htag10,
         htag1<B1<hskip< htag2<B2<hskip< htag3<B3<hskip< htag4<B4<hskip< htag5<B5<hskip< htag6<B6<hskip< htag7<B7<hskip< htag8<B8<hskip< htag9<B9<hskip< htag10<B10< htag0<SUBNET>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>;
+    template <template<typename>class B1, template<typename>class B2,
+        template<typename>class B3, template<typename>class B4,
+        template<typename>class B5, template<typename>class B6,
+        template<typename>class B7, template<typename>class B8,
+        template<typename>class B9, template<typename>class B10,
+        template<typename>class B11, template<typename>class B12, typename SUBNET>
+    using multihead_12 = head12<htag1, htag2, htag3, htag4, htag5, htag6, htag7, htag8, htag9, htag10, htag11, htag12,
+        htag1<B1<hskip< htag2<B2<hskip< htag3<B3<hskip< htag4<B4<hskip< htag5<B5<hskip< htag6<B6<hskip< htag7<B7<hskip< htag8<B8<hskip< htag9<B9<hskip< htag10<B10<hskip< htag11<B11<hskip< htag12<B12< htag0<SUBNET>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>;
+    template <template<typename>class B1, template<typename>class B2,
+        template<typename>class B3, template<typename>class B4,
+        template<typename>class B5, template<typename>class B6,
+        template<typename>class B7, template<typename>class B8,
+        template<typename>class B9, template<typename>class B10,
+        template<typename>class B11, template<typename>class B12,
+        template<typename>class B13, template<typename>class B14, typename SUBNET>
+    using multihead_14 = head14<htag1, htag2, htag3, htag4, htag5, htag6, htag7, htag8, htag9, htag10, htag11, htag12, htag13, htag14,
+        htag1<B1<hskip< htag2<B2<hskip< htag3<B3<hskip< htag4<B4<hskip< htag5<B5<hskip< htag6<B6<hskip< htag7<B7<hskip< htag8<B8<hskip< htag9<B9<hskip< htag10<B10<hskip< htag11<B11<hskip< htag12<B12<hskip< htag13<B13<hskip< htag14<B14< htag0<SUBNET>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>;
+    template <template<typename>class B1, template<typename>class B2,
+        template<typename>class B3, template<typename>class B4,
+        template<typename>class B5, template<typename>class B6,
+        template<typename>class B7, template<typename>class B8,
+        template<typename>class B9, template<typename>class B10,
+        template<typename>class B11, template<typename>class B12,
+        template<typename>class B13, template<typename>class B14,
+        template<typename>class B15, template<typename>class B16, typename SUBNET>
+    using multihead_16 = head16<htag1, htag2, htag3, htag4, htag5, htag6, htag7, htag8, htag9, htag10, htag11, htag12, htag13, htag14, htag15, htag16,
+        htag1<B1<hskip< htag2<B2<hskip< htag3<B3<hskip< htag4<B4<hskip< htag5<B5<hskip< htag6<B6<hskip< htag7<B7<hskip< htag8<B8<hskip< htag9<B9<hskip< htag10<B10<hskip< htag11<B11<hskip< htag12<B12<hskip< htag13<B13<hskip< htag14<B14<hskip< htag15<B15<hskip< htag16<B16< htag0<SUBNET>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>;
 
     // Basic layers for Query, Key, and Value
     template <int num_filters_out, typename SUBNET>
