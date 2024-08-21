@@ -529,7 +529,7 @@ namespace dlib {
     template <int sequence_length, int nb_embeddings, int embedding_length, typename SUBNET>
     using embeddings = layer_norm<add_prev9<positional_encoding<sequence_length, embedding_length, tag9<embedding<nb_embeddings, embedding_length, tag10<SUBNET>>>>>>;
     template <int sequence_length, int nb_embeddings, int embedding_length, typename SUBNET>
-    using static_embeddings = layer_norm < add_prev9<positional_encoding<sequence_length, embedding_length, tag9<static_embedding<nb_embeddings, embedding_length, tag10<SUBNET>>>>>>;
+    using static_embeddings = layer_norm<add_prev9<positional_encoding<sequence_length, embedding_length, tag9<static_embedding<nb_embeddings, embedding_length, tag10<SUBNET>>>>>>;
 
     enum linear_bias_mode { LINEAR_HAS_BIAS = 0, LINEAR_NO_BIAS = 1 };
     struct num_linear_outputs {
@@ -1121,7 +1121,7 @@ namespace dlib {
         template<typename> class TAG5, template<typename> class TAG6,
         template<typename> class TAG7, template<typename> class TAG8, typename SUBNET>
     using head8 = add_layer<concat_<TAG1, TAG2, TAG3, TAG4, TAG5, TAG6, TAG7, TAG8>, SUBNET>;
-    template <template<typename> class TAG1, template<typename> class TAG2,
+    /*template <template<typename> class TAG1, template<typename> class TAG2,
         template<typename> class TAG3, template<typename> class TAG4,
         template<typename> class TAG5, template<typename> class TAG6,
         template<typename> class TAG7, template<typename> class TAG8,
@@ -1150,7 +1150,7 @@ namespace dlib {
         template<typename> class TAG11, template<typename> class TAG12,
         template<typename> class TAG13, template<typename> class TAG14,
         template<typename> class TAG15, template<typename> class TAG16, typename SUBNET>
-    using head16 = add_layer<concat_<TAG1, TAG2, TAG3, TAG4, TAG5, TAG6, TAG7, TAG8, TAG9, TAG10, TAG11, TAG12, TAG13, TAG14, TAG15, TAG16>, SUBNET>;
+    using head16 = add_layer<concat_<TAG1, TAG2, TAG3, TAG4, TAG5, TAG6, TAG7, TAG8, TAG9, TAG10, TAG11, TAG12, TAG13, TAG14, TAG15, TAG16>, SUBNET>;*/
 
     template <typename SUBNET> using htag0 = add_tag_layer<1500 + 0, SUBNET>;
     template <typename SUBNET> using htag1 = add_tag_layer<1500 + 1, SUBNET>;
@@ -1189,7 +1189,7 @@ namespace dlib {
         template<typename>class B7, template<typename>class B8, typename SUBNET>
     using multihead_8 = head8<htag1, htag2, htag3, htag4, htag5, htag6, htag7, htag8,
         htag1<B1<hskip< htag2<B2<hskip< htag3<B3<hskip< htag4<B4<hskip< htag5<B5<hskip< htag6<B6<hskip< htag7<B7<hskip< htag8<B8< htag0<SUBNET>>>>>>>>>>>>>>>>>>>>>>>>>;
-    template <template<typename>class B1, template<typename>class B2,
+    /*template <template<typename>class B1, template<typename>class B2,
         template<typename>class B3, template<typename>class B4,
         template<typename>class B5, template<typename>class B6,
         template<typename>class B7, template<typename>class B8,
@@ -1222,7 +1222,7 @@ namespace dlib {
         template<typename>class B13, template<typename>class B14,
         template<typename>class B15, template<typename>class B16, typename SUBNET>
     using multihead_16 = head16<htag1, htag2, htag3, htag4, htag5, htag6, htag7, htag8, htag9, htag10, htag11, htag12, htag13, htag14, htag15, htag16,
-        htag1<B1<hskip< htag2<B2<hskip< htag3<B3<hskip< htag4<B4<hskip< htag5<B5<hskip< htag6<B6<hskip< htag7<B7<hskip< htag8<B8<hskip< htag9<B9<hskip< htag10<B10<hskip< htag11<B11<hskip< htag12<B12<hskip< htag13<B13<hskip< htag14<B14<hskip< htag15<B15<hskip< htag16<B16< htag0<SUBNET>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>;
+        htag1<B1<hskip< htag2<B2<hskip< htag3<B3<hskip< htag4<B4<hskip< htag5<B5<hskip< htag6<B6<hskip< htag7<B7<hskip< htag8<B8<hskip< htag9<B9<hskip< htag10<B10<hskip< htag11<B11<hskip< htag12<B12<hskip< htag13<B13<hskip< htag14<B14<hskip< htag15<B15<hskip< htag16<B16< htag0<SUBNET>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>;*/
 
     // Basic layers for Query, Key, and Value
     template <int num_filters_out, typename SUBNET>
@@ -1276,9 +1276,9 @@ namespace dlib {
     template <int embedding_dim, typename SUBNET>
     using feed_forward_linear =
         layer_norm<add_prev5<
-        dropout_10<linear<embedding_size,
+        linear<embedding_size,
         dropout_10<gelu<linear<embedding_size * 4,
-        tag5<SUBNET>>>>>>>>;
+        tag5<SUBNET>>>>>>>;
 
     // Transformer block
     template <typename SUBNET>
@@ -1473,16 +1473,15 @@ public:
             }
         } else {
             if (pre_samples_.size() == 0) {
+                int i, j;
                 for (const auto& sentence : source_tokens_) {                    
-                    if (sentence.size() > (sequence_size_ + 1)) {
-                        int nb_samples = 0;
-                        for (int i = 0; i < (int)(sentence.size()) - (sequence_size_ + 1); ++i) {
+                    if (sentence.size() > (sequence_size_ + 1)) {                        
+                        for (i = 0; i < (int)(sentence.size()) - (sequence_size_ + 1); ++i) {
                             matrix<int> sample(sequence_size_, 1);
-                            for (size_t j = 0; j < sequence_size_; ++j) sample(j, 0) = sentence[i + j];
+                            for (j = 0; j < (int)sequence_size_; ++j) sample(j, 0) = sentence[i + j];
                             pre_samples_.push_back(std::move(sample));
-                            nb_samples++;
+                            pre_labels_.push_back(static_cast<unsigned long>(sentence[i + j]));
                         }
-                        for (int i = 0; i < nb_samples; ++i) pre_labels_.push_back(static_cast<unsigned long>(sentence[(i + 1) * sequence_size_]));
                     }                    
                 }
             }
@@ -1517,7 +1516,7 @@ private:
     }
 
     std::vector<int> preprocess_sentence(const std::string& sentence, bool add_eos_id = false) {
-        std::string cleaned_sentence = dlib::trim(replace_html_entities(std::regex_replace(sentence, std::regex(" {2,}"), " ")));       
+        std::string cleaned_sentence = dlib::trim(replace_html_entities(std::regex_replace(sentence, std::regex("(.)\\1{4,}"), "$1$1$1$1")));
         std::vector<int> tokens;
         if (!use_letter_tokenization_) {
             sp_.Encode(cleaned_sentence, &tokens);
@@ -1599,21 +1598,25 @@ int main(int argc, char* argv[]) {
     if (do_benchmark) {
         constexpr bool display_debug_info = false;
         constexpr bool skip_tests[] = {
-            false,      // 0: tokenization
-            false,      // 1: extract_matrix() & update_matrix()
-            false,      // 2: linear layer
-            false,      // 3: masked attention layer
-            false,      // 4: softmax layer
-            false,      // 5: mean_matrix()
-            false,      // 6: attention mechanism
-            false,      // 7: add_prev1 layer
-            false,      // 8: simple network
-            false,      // 9: multihead attention model
-            false       // 10: "shakespeare" example
+            false,      // 0: strings & tokenization
+            true,      // 1: extract_matrix() & update_matrix()
+            true,      // 2: linear layer
+            true,      // 3: masked attention layer
+            true,      // 4: softmax layer
+            true,      // 5: mean_matrix()
+            true,      // 6: attention mechanism
+            true,      // 7: add_prev1 layer
+            true,      // 8: simple network
+            true,      // 9: multihead attention model
+            false      // 10: "shakespeare" example
         };
 
         // test: tokenization
         if (!skip_tests[0]) {
+            std::string sentence = "  &nbsp;&lt;p&gt;Hellooooooo     frieeeends !!!!!! This is sooooooo coooool &amp; awesoooooome !&lt;/p&gt;  ";
+            std::string cleaned_sentence = dlib::trim(replace_html_entities(std::regex_replace(sentence, std::regex("(.)\\1{4,}"), "$1$1$1$1")));
+            cout << "string normalisation: [" << sentence << "] => [" << cleaned_sentence << "]" << endl;
+
             if (fs::exists(vocabulary_prefix + ".model")) status = sp.Load(vocabulary_prefix + ".model");
             else {
                 cerr << "vocabulary file not found! (<" << (vocabulary_prefix + ".model|.vocab") << ">)" << endl;
@@ -2094,6 +2097,7 @@ Be all my sins remembered.)";
                 trainer_a.get_net();
                 net_a.clean();
                 cout << "single-head attention model parameters: " << count_parameters(net_a) << endl;
+                g_interrupt_signal_received = false;
 
                 // Test the network with the same data to ensure it has learned something
                 std::vector<unsigned long> predicted_labels_a = net_a(samples);
@@ -2118,6 +2122,7 @@ Be all my sins remembered.)";
                 trainer_b.get_net();
                 net_b.clean();
                 cout << "multihead attention model parameters: " << count_parameters(net_b) << endl;
+                g_interrupt_signal_received = false;
                 std::vector<unsigned long> predicted_labels_b = net_b(samples);
                 int num_correct_b = 0;
                 for (size_t i = 0; i < labels.size(); ++i) if (predicted_labels_b[i] == labels[i]) ++num_correct_b;
@@ -2152,13 +2157,11 @@ Be all my sins remembered.)";
                 cout << "batch size: " << mini_batch_size << endl;
                 cout << "samples used for the training: " << samples_txt.size() << endl;
                 std::vector<unsigned long> labels_txt;
-                for (size_t i = 0; i < samples_txt.size(); ++i) {
-                    labels_txt.push_back(static_cast<unsigned long>(shakespeare_text[(i + 1) * sequence_size])); // Next character as label
-                }
+                for (size_t i = 0; i < samples_txt.size(); ++i) labels_txt.push_back(static_cast<unsigned long>(shakespeare_text[(i + 1) * sequence_size])); // Next character as label
                 // Train the network representing a model for integrating knowledge and completing texts
-                if (fs::exists("llm_shakespeare_model.dat")) {
-                    deserialize("llm_shakespeare_model.dat") >> net_c;
-                    cout << "shakespeare model loaded: llm_shakespeare_model.dat" << endl;
+                if (fs::exists("llm_shakespeare_model_a.dat")) {
+                    deserialize("llm_shakespeare_model_a.dat") >> net_c;
+                    cout << "shakespeare model loaded: llm_shakespeare_model_a.dat" << endl;
                 }
                 dnn_trainer<net_type_c, adam> trainer_c(net_c, adam(0.005, 0.9, 0.998));
                 trainer_c.set_learning_rate(1e-3);
@@ -2166,19 +2169,18 @@ Be all my sins remembered.)";
                 trainer_c.set_mini_batch_size(mini_batch_size);
                 trainer_c.be_verbose();
                 trainer_c.set_iterations_without_progress_threshold(30 * iter_wo_progress);
-                for (int epoch = 0; epoch < (5 * num_epochs) && trainer_c.get_learning_rate() >= trainer_c.get_min_learning_rate() && !g_interrupt_signal_received; ++epoch) {
-                    std::vector<matrix<int, 0, 1>> samples;
-                    std::vector<unsigned long> labels;
-                    for (size_t i = 0; i < samples_txt.size(); ++i) {
-                        data.generate_samples(mini_batch_size, samples, labels, true);
-                        trainer_c.train_one_step(samples, labels);
-                    }
+                std::vector<matrix<int, 0, 1>> samples;
+                std::vector<unsigned long> labels;
+                while (trainer_c.get_learning_rate() >= trainer_c.get_min_learning_rate() && !g_interrupt_signal_received) {                                       
+                    if (data.generate_samples(mini_batch_size, samples, labels, false)) trainer_c.train_one_step(samples, labels);
+                    else g_interrupt_signal_received = true;
                 }
                 trainer_c.get_net();
                 net_c.clean();
-                serialize("llm_shakespeare_model.dat") << net_c;
-                cout << "shakespeare model saved: llm_shakespeare_model.dat" << endl;
-                cout << "shakespeare model parameters: " << count_parameters(net_c) << endl;
+                serialize("llm_shakespeare_model_a.dat") << net_c;
+                cout << "shakespeare model A saved: llm_shakespeare_model_a.dat" << endl;
+                cout << "shakespeare model A parameters: " << count_parameters(net_c) << endl;
+                g_interrupt_signal_received = false;
 
                 // Test the network with the same data to ensure it has learned something
                 std::vector<unsigned long> predicted_labels_c = net_c(samples_txt);
@@ -2277,33 +2279,7 @@ Be all my sins remembered.)";
             cerr << "vocabulary file not found! (<" << (vocabulary_prefix + ".model|.vocab") << ">)" << endl;
             return 1;
         }
-        // TEST: document class        
-        /*
-        {
-            documents data;
-            string initial_raw_data = fs::current_path().string() + "/ernie_raw_data.txt";
-            write_raw_data(initial_raw_data);
-            data.load_documents(initial_raw_data);
-            fs::remove(initial_raw_data);            
-            std::vector<matrix<int, 0, 1>> samples;
-            std::vector<unsigned long> labels;
-            if (data.generate_samples(30, samples, labels)) {
-                size_t l = 0;
-                for (const auto& input_tokens : samples) {
-                    std::cout << "input tokens:\n" << input_tokens;
-                    std::cout << "label: " << labels[l] << std::endl;
-                    std::vector<int> token_ids;
-                    for (const auto& id : input_tokens) token_ids.push_back(id);
-                    token_ids.push_back(labels[l]);
-                    string tokens_str;
-                    sp.Decode(token_ids, &tokens_str);
-                    std::cout << "[Source:] " << tokens_str << std::endl;
-                    l++;
-                }
-            }            
-            return 1;
-        }
-        */
+        
         const string model_sync_filename = fs::current_path().string() + "/ernie_checkpoint.dat";        
         mh_llm_net net;
         adam solver(weight_decay, beta1, beta2);
