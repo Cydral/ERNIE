@@ -314,12 +314,12 @@ namespace dlib {
         }
     }
 
-    class dropout_c_ : public dropout_ {
+    class dropout_10_ : public dropout_ {
     public:
-        explicit dropout_c_() : dropout_(0.10f) { }
+        explicit dropout_10_() : dropout_(0.10f) { }
     };
     template <typename SUBNET>
-    using dropout_c = add_layer<dropout_c_, SUBNET>;
+    using dropout_10 = add_layer<dropout_10_, SUBNET>;
 
     template<int num_embeddings_, int embedding_dim_, bool is_trainable_>
     class embedding_ {
@@ -994,19 +994,16 @@ namespace dlib {
     template <typename SUBNET>
     using hstack = add_layer<hstack_, SUBNET>;
 
+    template <unsigned long number_of_heads_, unsigned long embedding_dim_>
     class scale_weights_ : public multiply_ {
-    public:
-        explicit scale_weights_() : multiply_(1.0f / std::sqrt(static_cast<float>(number_of_heads > 0 ? (embedding_size / number_of_heads) : embedding_size))) {}
-    };
-    template <typename SUBNET>
-    using scale_weights = add_layer<scale_weights_, SUBNET>;
+        static_assert(number_of_heads_ > 0, "The number of heads must be > 0");
+        static_assert(embedding_dim_ > 0, "The embeddind size must be > 0");
 
-    class tmp_scale_ : public multiply_ {
     public:
-        explicit tmp_scale_() : multiply_(1.0f / std::sqrt(3)) {}
+        explicit scale_weights_() : multiply_(1.0f / std::sqrt(static_cast<float>(embedding_dim_ / number_of_heads_))) {}
     };
-    template <typename SUBNET>
-    using tmp_scale = add_layer<tmp_scale_, SUBNET>;
+    template <unsigned long num_heads, unsigned long embedding_length, typename SUBNET>
+    using scale_weights = add_layer<scale_weights_<num_heads, embedding_length>, SUBNET>;
 
     class softmaxm_ {
     public:
@@ -1239,9 +1236,9 @@ namespace dlib {
     template <int embedding_dim, int nb_heads, typename SUBNET>
     using core_masked_attention_block =
         multm_prev1<
-        dropout_c<softmaxm<
+        dropout_10<softmaxm<
         masked_attention<
-        scale_weights<
+        scale_weights<nb_heads, embedding_dim,
         multm_prev2<
         query<embedding_dim/nb_heads, skip3<
         tag2<transpose<key<embedding_dim/nb_heads, skip3<
@@ -1252,7 +1249,7 @@ namespace dlib {
     template <int embedding_dim, typename SUBNET>
     using single_head_attention_block =
         layer_norm<add_prev3<
-        dropout_c<linear_no_bias<embedding_size,
+        dropout_10<linear_no_bias<embedding_size,
         core_masked_attention_block<embedding_size, 4,
         tag3<
         SUBNET>>>>>>;
@@ -1263,7 +1260,7 @@ namespace dlib {
     template <typename SUBNET>
     using multihead_attention_block =
         layer_norm<add_prev3<
-        dropout_c<linear_no_bias<embedding_size,
+        dropout_10<linear_no_bias<embedding_size,
         hstack<
         multihead_4<iblock, iblock, iblock, iblock,
         tag3<SUBNET>>>>>>>;
@@ -1274,13 +1271,13 @@ namespace dlib {
         layer_norm<add_prev5<
         scale5<con<1, 1, 1, 1, 1,
         fc<embedding_size,
-        dropout_c<gelu<bn_fc<fc<embedding_size * 4,
+        dropout_10<gelu<bn_fc<fc<embedding_size * 4,
         tag5<SUBNET>>>>>>>>>>;
     template <int embedding_dim, typename SUBNET>
     using feed_forward_linear =
         layer_norm<add_prev5<
-        dropout_c<linear<embedding_size,
-        dropout_c<gelu<linear<embedding_size * 4,
+        dropout_10<linear<embedding_size,
+        dropout_10<gelu<linear<embedding_size * 4,
         tag5<SUBNET>>>>>>>>;
 
     // Transformer block
@@ -1385,12 +1382,16 @@ public:
         } else {         
             is_initialized_ = true;
         }
-        total_tokens_ = 0;
-        pre_samples_.clear();
-        pre_labels_.clear();
-        samples_idx_ = 0;
+        clear_all();
     }
     size_t get_total_tokens(void) { return total_tokens_; }
+    void clear_all(void) {        
+        source_tokens_.clear();
+        pre_samples_.clear();
+        pre_labels_.clear();
+        total_tokens_ = 0;
+        samples_idx_ = 0;
+    }
 
     void load_text(const std::string& text, bool split_sentences) {
         if (!is_initialized_) return;        
@@ -1410,9 +1411,11 @@ public:
                 total_tokens_ += tokens.size();
             }
         }
-        pre_samples_.clear();
-        pre_labels_.clear();
-        samples_idx_ = 0;
+        if (pre_samples_.size() > 0) {
+            pre_samples_.clear();
+            pre_labels_.clear();
+            samples_idx_ = 0;
+        }        
     }
 
     void load_documents(const std::string& path, bool split_sentences = true) {
@@ -1491,8 +1494,7 @@ public:
                     samples_idx_++;
                 }
             }
-        }
-        
+        }        
         return (samples.size() > 0);
     }
 
@@ -1534,6 +1536,7 @@ int main(int argc, char* argv[]) {
     double learning_rate = 1e-3, min_learning_rate = 1e-6, weight_decay = 0.005, beta1 = 0.9, beta2 = 0.998, temperature = 0.9;
     long mini_batch_size = 4, iterations_without_progress_threshold = 20000, top_k = 3;
     std::vector<int> gpus = { 0 };
+    set_dnn_prefer_fastest_algorithms();
        
     configure_console();
     cout << endl <<
@@ -1597,15 +1600,15 @@ int main(int argc, char* argv[]) {
         constexpr bool display_debug_info = false;
         constexpr bool skip_tests[] = {
             false,      // 0: tokenization
-            true,       // 1: extract_matrix() & update_matrix()
-            true,       // 2: linear layer
-            true,       // 3: masked attention layer
-            true,       // 4: softmax layer
-            true,       // 5: mean_matrix()
-            true,       // 6: attention mechanism
-            true,       // 7: add_prev1 layer
-            true,       // 8: simple network
-            true,      // 9: multihead attention model
+            false,      // 1: extract_matrix() & update_matrix()
+            false,      // 2: linear layer
+            false,      // 3: masked attention layer
+            false,      // 4: softmax layer
+            false,      // 5: mean_matrix()
+            false,      // 6: attention mechanism
+            false,      // 7: add_prev1 layer
+            false,      // 8: simple network
+            false,      // 9: multihead attention model
             false       // 10: "shakespeare" example
         };
 
@@ -1902,10 +1905,10 @@ int main(int argc, char* argv[]) {
                 }
 
                 // Model definition
-                using net_type = tag10<multm_prev1<softmaxm<tmp_scale<tag6<multm_prev4<
+                using net_type = tag10<multm_prev1<softmaxm<scale_weights<1, 3, tag6<multm_prev4<
                     tag3<linear_no_bias<3, // Q
                     skip5<tag4<transpose<tag2<linear_no_bias<3, // K
-                    skip5<tag1<linear_no_bias<3,// V
+                    skip5<tag1<linear_no_bias<3, // V
                     tag5<input<matrix<float>>>>>>>>>>>>>>>>>>>;
                 net_type net;
 
@@ -2002,41 +2005,42 @@ int main(int argc, char* argv[]) {
             constexpr int iter_wo_progress = 900;
 
             // Shakespeare's text sample
-            const string shakespeare_text = R"(To be, or not to be, that is the question:
-Whether 'tis nobler in the mind to suffer
+            const string shakespeare_text = R"(HAMLET By William Shakespeare - Act Three, Scene One
+To be or not to be—that is the question:
+Whether ’tis nobler in the mind to suffer
 The slings and arrows of outrageous fortune,
 Or to take arms against a sea of troubles
-And by opposing end them. To die: to sleep;
-No more; and by a sleep to say we end
-The heart-ache and the thousand natural shocks
-That flesh is heir to, 'tis a consummation
-Devoutly to be wish'd. To die, to sleep;
-To sleep: perchance to dream: ay, there's the rub;
-For in that sleep of death what dreams may come
+And, by opposing, end them. To die, to sleep—
+No more—and by a sleep to say we end
+The heartache and the thousand natural shocks
+That flesh is heir to—’tis a consummation
+Devoutly to be wished. To die, to sleep—
+To sleep, perchance to dream. Ay, there’s the rub,
+For in that sleep of death what dreams may come,
 When we have shuffled off this mortal coil,
-Must give us pause: there's the respect
-That makes calamity of so long life;
+Must give us pause. There’s the respect
+That makes calamity of so long life.
 For who would bear the whips and scorns of time,
-The oppressor's wrong, the proud man's contumely,
-The pangs of despised love, the law's delay,
-The insolence of office and the spurns
+Th’ oppressor’s wrong, the proud man’s contumely,
+The pangs of despised love, the law’s delay,
+The insolence of office, and the spurns
 That patient merit of the unworthy takes,
 When he himself might his quietus make
-With a bare bodkin? who would fardels bear,
+With a bare bodkin? Who would fardels bear,
 To grunt and sweat under a weary life,
 But that the dread of something after death,
-The undiscover'd country from whose bourn
-No traveller returns, puzzles the will
+The undiscovered country from whose bourn
+No traveler returns, puzzles the will
 And makes us rather bear those ills we have
 Than fly to others that we know not of?
-Thus conscience does make cowards of us all;
+Thus conscience does make cowards of us all,
 And thus the native hue of resolution
-Is sicklied o'er with the pale cast of thought,
-And enterprises of great pitch and moment
-With this regard their currents turn awry,
-And lose the name of action. Soft you now!
-The fair Ophelia! Nymph, in thy orisons
-Be all my sins remember'd.)";
+Is sicklied o’er with the pale cast of thought,
+And enterprises of great pith and moment
+With this regard their currents turn awry
+And lose the name of action.—Soft you now,
+The fair Ophelia.—Nymph, in thy orisons
+Be all my sins remembered.)";
 
             using net_type_a = classification_head<num_classes,
                 feed_forward_fc<embedding_size,
@@ -2051,8 +2055,7 @@ Be all my sins remember'd.)";
                 repeat<number_of_blocks/3, transformer_block,
                 embeddings<sequence_size, num_classes, embedding_size,
                 input<matrix<int, 0, 1>>>>>;
-            net_type_c net_c;
-            set_dnn_prefer_smallest_algorithms();
+            net_type_c net_c;            
 
             // Generate synthetic training data
             dlib::rand rnd;
@@ -2185,7 +2188,7 @@ Be all my sins remember'd.)";
                 DLIB_TEST_MSG(accuracy_c > 0.8, "shakespeare model (accuracy: " + to_string(accuracy_c) + ")");
 
                 // Predict the next sequence of characters
-                string input_sequence = "To be, or not to be, that is the";
+                string input_sequence = "To be or not to be—that is the";
                 std::vector<matrix<int, 0, 1>> input_tokens = tokenize_text(input_sequence, sequence_size);
                 string start_seq = to_unsigned_char_string(input_tokens.back());
                 size_t pos = input_sequence.find(start_seq);
@@ -2269,7 +2272,6 @@ Be all my sins remember'd.)";
             return 1;
         }
     } else if (model_training) {
-        set_dnn_prefer_smallest_algorithms();
         if (fs::exists(vocabulary_prefix + ".model")) status = sp.Load(vocabulary_prefix + ".model");
         else {
             cerr << "vocabulary file not found! (<" << (vocabulary_prefix + ".model|.vocab") << ">)" << endl;
