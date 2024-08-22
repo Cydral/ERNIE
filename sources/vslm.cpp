@@ -2126,10 +2126,12 @@ Be all my sins remembered.)";
                 trainer_c.set_iterations_without_progress_threshold(850);
                 std::vector<matrix<int, 0, 1>> samples;
                 std::vector<unsigned long> labels;
+                size_t iteration = 0;
                 while (trainer_c.get_learning_rate() >= trainer_c.get_min_learning_rate() && !g_interrupt_signal_received) {
                     if (data.generate_samples(mini_batch_size, samples, labels, false)) trainer_c.train_one_step(samples, labels);
                     else g_interrupt_signal_received = true;
-                    if (trainer_c.get_average_loss() > 0.05) g_interrupt_signal_received = true;
+                    if (iteration > 100 && trainer_c.get_average_loss() > 0.05) g_interrupt_signal_received = true;
+                    iteration++;
                 }
                 trainer_c.get_net();
                 net_c.clean();
@@ -2180,7 +2182,7 @@ Be all my sins remembered.)";
                     } else {
                         cout << "no previous model found, starting from scratch" << endl;
                     }
-                    dnn_trainer<net_type_c, adam> trainer_d(net_c, adam(0.004, 0.9, 0.999));
+                    dnn_trainer<net_type_c, adam> trainer_d(net_c, adam(0.004, 0.9, 0.998));
                     trainer_d.set_learning_rate(1e-3);
                     trainer_d.set_min_learning_rate(1e-6);
                     trainer_d.set_mini_batch_size(mini_batch_size);
@@ -2188,10 +2190,12 @@ Be all my sins remembered.)";
                     trainer_d.set_iterations_without_progress_threshold(2000);
 
                     // New training loop
+                    iteration = 0;
                     while (trainer_d.get_learning_rate() >= trainer_d.get_min_learning_rate() && !g_interrupt_signal_received) {
                         if (shakespeare_data.generate_samples(mini_batch_size, samples, labels, true)) trainer_d.train_one_step(samples, labels);                        
                         else g_interrupt_signal_received = true;
-                        if (trainer_d.get_average_loss() > 0.05) g_interrupt_signal_received = true;
+                        if (iteration > 100 && trainer_d.get_average_loss() > 0.05) g_interrupt_signal_received = true;
+                        iteration++;
                     }
                     trainer_d.get_net();
                     net_c.clean();
