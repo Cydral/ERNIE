@@ -2114,7 +2114,7 @@ Be all my sins remembered.)";
                 trainer_b.set_min_learning_rate(1e-6);
                 trainer_b.set_mini_batch_size(mini_batch_size);
                 trainer_b.be_verbose();
-                trainer_b.set_iterations_without_progress_threshold(100);
+                trainer_b.set_iterations_without_progress_threshold(50);
                 for (int epoch = 0; epoch < num_epochs && trainer_b.get_learning_rate() > trainer_b.get_min_learning_rate() && !g_interrupt_signal_received; ++epoch) {
                     for (size_t i = 0; i < batches.size(); ++i) trainer_b.train_one_step(batches[i], label_batches[i]);
                 }
