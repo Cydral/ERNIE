@@ -2133,8 +2133,8 @@ Be all my sins remembered.)";
                 trainer_c.get_net();
                 net_c.clean();
                 serialize("llm_shakespeare_model_a.dat") << net_c;
-                cout << "shakespeare model A saved: llm_shakespeare_model_a.dat" << endl;
-                cout << "shakespeare model A parameters: " << count_parameters(net_c) << endl;
+                cout << "shakespeare model saved: llm_shakespeare_model_a.dat" << endl;
+                cout << "shakespeare model parameters: " << count_parameters(net_c) << endl;
                 g_interrupt_signal_received = false;
 
                 // Test the network with the same data to ensure it has learned something
@@ -2149,7 +2149,7 @@ Be all my sins remembered.)";
                 std::vector<matrix<int, 0, 1>> input_tokens = tokenize_text(input_sequence, sequence_size);
                 string start_seq = to_unsigned_char_string(input_tokens.back());
                 size_t pos = input_sequence.find(start_seq);
-                if (pos != std::string::npos) input_sequence = input_sequence.substr(0, pos + start_seq.length());
+                if (pos != std::string::npos) input_shakespeare modelsequence = input_sequence.substr(0, pos + start_seq.length());
                 cout << "input sequence for text generation: <" << start_seq << ">" << endl;
                 matrix<int> next_input(sequence_size, 1);
                 for (int i = 0; i < 400; ++i) {
@@ -2179,14 +2179,19 @@ Be all my sins remembered.)";
                     } else {
                         cout << "no previous model found, starting from scratch" << endl;
                     }
-                    trainer_c.set_iterations_without_progress_threshold(2000);
+                    dnn_trainer<net_type_c, adam> trainer_d(net_c, adam(0.004, 0.9, 0.999));
+                    trainer_d.set_learning_rate(1e-3);
+                    trainer_d.set_min_learning_rate(1e-6);
+                    trainer_d.set_mini_batch_size(mini_batch_size);
+                    trainer_d.be_verbose();
+                    trainer_d.set_iterations_without_progress_threshold(2000);
 
                     // New training loop
-                    while (trainer_c.get_average_loss() > 0.05 && trainer_c.get_learning_rate() >= trainer_c.get_min_learning_rate() && !g_interrupt_signal_received) {
-                        if (shakespeare_data.generate_samples(mini_batch_size, samples, labels, true)) trainer_c.train_one_step(samples, labels);                        
+                    while (trainer_d.get_average_loss() > 0.05 && trainer_d.get_learning_rate() >= trainer_d.get_min_learning_rate() && !g_interrupt_signal_received) {
+                        if (shakespeare_data.generate_samples(mini_batch_size, samples, labels, true)) trainer_d.train_one_step(samples, labels);                        
                         else g_interrupt_signal_received = true;
                     }
-                    trainer_c.get_net();
+                    trainer_d.get_net();
                     net_c.clean();
                     serialize("llm_shakespeare_model_b.dat") << net_c;
                     cout << "advanced shakespeare model saved: llm_shakespeare_model_b.dat" << endl;
