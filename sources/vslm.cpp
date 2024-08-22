@@ -62,10 +62,10 @@ using namespace dlib;
 
 // Global parameters for the Transformer network
 constexpr int vocab_size = 8000;                                            // Size of the vocabulary
-constexpr int sequence_size = 16;                                           // Length of the sequence
-constexpr int number_of_heads = 8;                                          // Number of attention heads
-constexpr int number_of_blocks = 12;                                        // Number of transformer blocks
-constexpr int embedding_size = (128 / number_of_heads) * number_of_heads;    // Size of the embedding
+constexpr int sequence_size = 32;                                           // Length of the sequence
+constexpr int number_of_heads = 4;                                          // Number of attention heads
+constexpr int number_of_blocks = 6;                                         // Number of transformer blocks
+constexpr int embedding_size = (128 / number_of_heads) * number_of_heads;   // Size of the embedding
 constexpr int bos_id = 0, eos_id = 1, unk_id = 2, pad_id = 3;
 
 // Other global parameters
@@ -284,33 +284,24 @@ namespace dlib {
     template <typename SUBNET> using display_tensor = add_layer<display_tensor_, SUBNET>;
 
     void extract_matrix(const resizable_tensor& t, resizable_tensor& d, long s, long k) {
-        DLIB_CASSERT(s < t.num_samples() && k < t.k(), "Index out of bounds");
-        d.set_size(t.nr(), t.nc(), 1, 1);
-        for (int r = 0; r < t.nr(); ++r) {
-            for (int c = 0; c < t.nc(); ++c) {
-                d.host()[tensor_index(d, r, c, 0, 0)] = t.host()[tensor_index(t, s, k, r, c)];
-            }
-        }
+        DLIB_CASSERT(s < t.num_samples() && k < t.k(), "Index out of bounds");       
+        d.set_size(t.nr(), t.nc(), 1, 1);        
+        const size_t size = t.nr() * t.nc() * sizeof(float);
+        std::memcpy(d.host(), t.host() + tensor_index(t, s, k, 0, 0), size);
     }
     void update_matrix(const resizable_tensor& t, tensor& d, long s, long k, bool add_op = false) {
         DLIB_CASSERT(s < d.num_samples() && k < d.k(), "Index out of bounds");
         DLIB_CASSERT(t.num_samples() == d.nr() && t.k() == d.nc(), "Incompatible tensors");
-        for (int r = 0; r < t.num_samples(); ++r) {
-            if (add_op) {
-                for (int c = 0; c < t.k(); ++c) d.host()[tensor_index(d, s, k, r, c)] += t.host()[tensor_index(t, r, c, 0, 0)];
-            } else {
-                for (int c = 0; c < t.k(); ++c) d.host()[tensor_index(d, s, k, r, c)] = t.host()[tensor_index(t, r, c, 0, 0)];
-            }
-        }
-    }
-    void mean_matrix(const resizable_tensor& t, resizable_tensor& d) {
-        DLIB_CASSERT(t.k() == 1, "Unsupported input tensor");
-        d.set_size(t.num_samples(), t.nc());
-        for (int r = 0; r < t.num_samples(); ++r) {
-            resizable_tensor e;
-            extract_matrix(t, e, r, 0);
-            matrix<float> tmp(1, e.k());
-            for (int c = 0; c < t.nc(); ++c) d.host()[tensor_index(d, r, c, 0, 0)] = mean(colm(mat(e), c));
+
+        const size_t size = t.num_samples() * t.k();
+        float* dest = d.host() + tensor_index(d, s, k, 0, 0);
+        const float* src = t.host();
+
+        if (add_op) {
+            #pragma omp parallel for if(size > 1000)
+            for (long i = 0; i < size; ++i) dest[i] += src[i];
+        } else {
+            std::memcpy(dest, src, size * sizeof(float));
         }
     }
 
@@ -1005,48 +996,39 @@ namespace dlib {
     template <unsigned long num_heads, unsigned long embedding_length, typename SUBNET>
     using scale_weights = add_layer<scale_weights_<num_heads, embedding_length>, SUBNET>;
 
-    class softmaxm_ {
+    class softmaxm_ : public softmax_ {
     public:
-        softmaxm_() {}
-        template <typename SUBNET> void setup(const SUBNET& /*sub*/) {}
+        softmaxm_() : softmax_() {}
+        template <typename SUBNET> void setup(const SUBNET& sub) { softmax_::setup(sub); }
 
         void forward_inplace(const tensor& input, tensor& output) {
-            resizable_tensor m_input, m_output;                        
-            for (int s = 0; s < input.num_samples(); ++s) {
-                for (int k = 0; k < input.k(); ++k) {
-                    extract_matrix(input, m_input, s, k);
-                    m_output = local_softmax(mat(m_input));
-                    update_matrix(m_output, output, s, k);
+            const float* in_data = input.host();
+            float* out_data = output.host();
+
+            for (long n = 0; n < input.num_samples(); ++n) {
+                for (long k = 0; k < input.k(); ++k) {
+                    for (long r = 0; r < input.nr(); ++r) {
+                        apply_softmax_to_row(in_data, out_data, input.nc());
+                        in_data += input.nc();
+                        out_data += input.nc();
+                    }
                 }
             }
         }
 
-        void backward_inplace(const tensor& computed_output, const tensor& gradient_input, tensor& data_grad, tensor&) {
-            resizable_tensor c_input, g_input, d_input(gradient_input.nr(), gradient_input.nc());
-            for (int s = 0; s < gradient_input.num_samples(); ++s) {
-                for (int k = 0; k < gradient_input.k(); ++k) {
-                    extract_matrix(computed_output, c_input, s, k);
-                    extract_matrix(gradient_input, g_input, s, k);
-                    matrix<float> c_mat = mat(c_input);
-                    matrix<float> g_mat = mat(g_input);
-                    matrix<float> d_mat(c_mat.nr(), c_mat.nc());
+        void backward_inplace(const tensor& computed_output, const tensor& gradient_input, tensor& data_grad, tensor& /*params_grad*/) {
+            const float* out_data = computed_output.host();
+            const float* grad_data = gradient_input.host();
+            float* grad_out_data = data_grad.host();
 
-                    for (int i = 0; i < c_mat.nr(); ++i) {
-                        for (int j = 0; j < c_mat.nc(); ++j) {
-                            float grad = 0.0f;
-                            for (int k = 0; k < c_mat.nc(); ++k) {
-                                float delta = (j == k) ? 1.0f : 0.0f;
-                                grad += g_mat(i, k) * c_mat(i, j) * (delta - c_mat(i, k));
-                            }
-                            d_mat(i, j) = grad;
-                        }
+            for (long n = 0; n < computed_output.num_samples(); ++n) {
+                for (long k = 0; k < computed_output.k(); ++k) {
+                    for (long r = 0; r < computed_output.nr(); ++r) {
+                        apply_softmax_gradient_to_row(out_data, grad_data, grad_out_data, computed_output.nc());
+                        out_data += computed_output.nc();
+                        grad_data += computed_output.nc();
+                        grad_out_data += computed_output.nc();
                     }
-                    for (int r = 0; r < d_mat.nr(); ++r) {
-                        for (int c = 0; c < d_mat.nc(); ++c) {
-                            d_input.host()[tensor_index(d_input, r, c, 0, 0)] = d_mat(r, c);
-                        }
-                    }
-                    update_matrix(d_input, data_grad, s, k, true);
                 }
             }
         }
@@ -1073,33 +1055,37 @@ namespace dlib {
         }
 
     protected:
-        resizable_tensor local_softmax(const matrix<float>& m) {
-            matrix<float> result(m.nr(), m.nc());
-            for (long r = 0; r < m.nr(); ++r) {
-                bool all_neg_inf = true;
-                for (long c = 0; c < m.nc(); ++c) {
-                    if (m(r, c) > neg_inf) {
-                        all_neg_inf = false;
-                        break;
-                    }
-                }
-                if (all_neg_inf) {
-                    for (long c = 0; c < m.nc(); ++c) result(r, c) = (1.0 / m.nc());
-                } else {
-                    matrix<float> row = rowm(m, r);
-                    matrix<float> exp_row = exp(row);
-                    float sum_exp = sum(exp_row) + epsilon;
-                    for (long c = 0; c < m.nc(); ++c) result(r, c) = exp_row(0, c) / sum_exp;
+        void apply_softmax_to_row(const float* in, float* out, long nc) {
+            bool all_neg_inf = true;
+            for (long i = 0; i < nc; ++i) {
+                if (in[i] > neg_inf) {
+                    all_neg_inf = false;
+                    break;
                 }
             }
-            resizable_tensor output(result.nr(), result.nc(), 1, 1);
-            for (long r = 0; r < result.nr(); ++r) {
-                for (long c = 0; c < result.nc(); ++c) {
-                    output.host()[tensor_index(output, r, c, 0, 0)] = result(r, c);
+            if (all_neg_inf) {
+                for (long i = 0; i < nc; ++i) out[i] = (1.0f / nc);
+            } else {
+                float max_val = *std::max_element(in, in + nc);
+                float sum = 0;
+                for (long i = 0; i < nc; ++i) {
+                    out[i] = std::exp(in[i] - max_val);
+                    sum += out[i];
                 }
+                if (sum != 0.0f) for (long i = 0; i < nc; ++i) out[i] /= sum;
             }
-            return output;
         }
+        void apply_softmax_gradient_to_row(const float* out, const float* grad, float* grad_out, long nc) {
+            for (long i = 0; i < nc; ++i) {
+                float sum = 0;
+                for (long j = 0; j < nc; ++j) {
+                    float kronecker = (i == j) ? 1 : 0;
+                    sum += grad[j] * out[j] * (kronecker - out[i]);
+                }
+                grad_out[i] = sum;
+            }
+        }
+
     private:
         resizable_tensor params;
     };
@@ -1116,12 +1102,12 @@ namespace dlib {
         template<typename> class TAG3, template<typename> class TAG4, 
         template<typename> class TAG5, template<typename> class TAG6, typename SUBNET>
     using head6 = add_layer<concat_<TAG1, TAG2, TAG3, TAG4, TAG5, TAG6>, SUBNET>;
-    template <template<typename> class TAG1, template<typename> class TAG2,
+    /*template <template<typename> class TAG1, template<typename> class TAG2,
         template<typename> class TAG3, template<typename> class TAG4,
         template<typename> class TAG5, template<typename> class TAG6,
         template<typename> class TAG7, template<typename> class TAG8, typename SUBNET>
     using head8 = add_layer<concat_<TAG1, TAG2, TAG3, TAG4, TAG5, TAG6, TAG7, TAG8>, SUBNET>;
-    /*template <template<typename> class TAG1, template<typename> class TAG2,
+    template <template<typename> class TAG1, template<typename> class TAG2,
         template<typename> class TAG3, template<typename> class TAG4,
         template<typename> class TAG5, template<typename> class TAG6,
         template<typename> class TAG7, template<typename> class TAG8,
@@ -1159,7 +1145,7 @@ namespace dlib {
     template <typename SUBNET> using htag4 = add_tag_layer<1500 + 4, SUBNET>;
     template <typename SUBNET> using htag5 = add_tag_layer<1500 + 5, SUBNET>;
     template <typename SUBNET> using htag6 = add_tag_layer<1500 + 6, SUBNET>;
-    template <typename SUBNET> using htag7 = add_tag_layer<1500 + 7, SUBNET>;
+    /*template <typename SUBNET> using htag7 = add_tag_layer<1500 + 7, SUBNET>;
     template <typename SUBNET> using htag8 = add_tag_layer<1500 + 8, SUBNET>;
     template <typename SUBNET> using htag9 = add_tag_layer<1500 + 9, SUBNET>;
     template <typename SUBNET> using htag10 = add_tag_layer<1500 + 10, SUBNET>;
@@ -1168,7 +1154,7 @@ namespace dlib {
     template <typename SUBNET> using htag13 = add_tag_layer<1500 + 13, SUBNET>;
     template <typename SUBNET> using htag14 = add_tag_layer<1500 + 14, SUBNET>;
     template <typename SUBNET> using htag15 = add_tag_layer<1500 + 15, SUBNET>;
-    template <typename SUBNET> using htag16 = add_tag_layer<1500 + 16, SUBNET>;
+    template <typename SUBNET> using htag16 = add_tag_layer<1500 + 16, SUBNET>;*/
     template <typename SUBNET> using hskip = add_skip_layer<htag0, SUBNET>;
 
     template <template<typename>class B1, template<typename>class B2, typename SUBNET>
@@ -1183,13 +1169,13 @@ namespace dlib {
         template<typename>class B5, template<typename>class B6, typename SUBNET>
     using multihead_6 = head6<htag1, htag2, htag3, htag4, htag5, htag6,
         htag1<B1<hskip< htag2<B2<hskip< htag3<B3<hskip< htag4<B4<hskip< htag5<B5<hskip< htag6<B6< htag0<SUBNET>>>>>>>>>>>>>>>>>>>;
-    template <template<typename>class B1, template<typename>class B2,
+    /*template <template<typename>class B1, template<typename>class B2,
         template<typename>class B3, template<typename>class B4,
         template<typename>class B5, template<typename>class B6,
         template<typename>class B7, template<typename>class B8, typename SUBNET>
     using multihead_8 = head8<htag1, htag2, htag3, htag4, htag5, htag6, htag7, htag8,
         htag1<B1<hskip< htag2<B2<hskip< htag3<B3<hskip< htag4<B4<hskip< htag5<B5<hskip< htag6<B6<hskip< htag7<B7<hskip< htag8<B8< htag0<SUBNET>>>>>>>>>>>>>>>>>>>>>>>>>;
-    /*template <template<typename>class B1, template<typename>class B2,
+    template <template<typename>class B1, template<typename>class B2,
         template<typename>class B3, template<typename>class B4,
         template<typename>class B5, template<typename>class B6,
         template<typename>class B7, template<typename>class B8,
@@ -1262,7 +1248,7 @@ namespace dlib {
         layer_norm<add_prev3<
         dropout_10<linear_no_bias<embedding_size,
         hstack<
-        multihead_8<iblock, iblock, iblock, iblock, iblock, iblock, iblock, iblock,
+        multihead_4<iblock, iblock, iblock, iblock,
         tag3<SUBNET>>>>>>>;
 
     // Feedforward blocks
@@ -1533,7 +1519,7 @@ int main(int argc, char* argv[]) {
     bool do_benchmark = false, text_generation = false;
     bool voc_training = false, model_training = false, model_prompting = false, use_sync_file = false;
     double learning_rate = 1e-3, min_learning_rate = 1e-6, weight_decay = 0.005, beta1 = 0.9, beta2 = 0.998, temperature = 0.9;
-    long mini_batch_size = 16, iterations_without_progress_threshold = 20000, top_k = 3;
+    long mini_batch_size = 16, iterations_without_progress_threshold = 1500, top_k = 3;
     std::vector<int> gpus = { 0 };
     set_dnn_prefer_fastest_algorithms();
        
@@ -1598,17 +1584,16 @@ int main(int argc, char* argv[]) {
     if (do_benchmark) {
         constexpr bool display_debug_info = false;
         constexpr bool skip_tests[] = {
-            true,      // 0: strings & tokenization
-            true,      // 1: extract_matrix() & update_matrix()
-            true,      // 2: linear layer
-            true,      // 3: masked attention layer
-            true,      // 4: softmax layer
-            true,      // 5: mean_matrix()
-            true,      // 6: attention mechanism
-            true,      // 7: add_prev1 layer
-            false,      // 8: simple network
-            false,      // 9: multihead attention model
-            false      // 10: "shakespeare" example
+            false,      // 0: strings & tokenization
+            false,      // 1: extract_matrix() & update_matrix()
+            false,      // 2: linear layer
+            false,      // 3: masked attention layer
+            false,      // 4: softmax layer
+            false,      // 5: attention mechanism
+            false,      // 6: add_prev1 layer
+            true,       // 7: simple network
+            true,       // 8: multihead attention model
+            false       // 9: "shakespeare" example
         };
 
         // test: tokenization
@@ -1814,37 +1799,8 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // test: mean_matrix()
-        if (!skip_tests[5]) {
-            if (display_debug_info) cout << "\ntest: mean_matrix() function\n";
-            {
-                resizable_tensor output_tensor;
-                output_tensor.set_size(2, 1, 3, 4);
-                float data[] = {
-                        1.0, 2.0, 3.0, 4.0,
-                        5.0, 6.0, 7.0, 8.0,
-                        9.0, 10.0, 11.0, 12.0,
-
-                        1.0, 0.5, 2.5, 2.0,
-                        3.5, 3.0, 4.0, 4.5,
-                        5.0, 6.0, 7.5, 8.0
-                };
-                memcpy(output_tensor.host(), data, sizeof(data));
-                resizable_tensor A_output;
-                extract_matrix(output_tensor, A_output, 1, 0);
-                matrix<float> A(1, A_output.k());
-                for (int c = 0; c < A_output.k(); ++c) set_colm(A, c) = mean(colm(mat(A_output), c));
-
-                resizable_tensor B_output;
-                mean_matrix(output_tensor, B_output);
-                matrix<float> B(1, B_output.k());
-                for (int c = 0; c < B_output.k(); ++c) set_colm(B, c) = B_output.host()[tensor_index(B_output, 1, c, 0, 0)];
-                DLIB_TEST_MSG(max(abs(A - B)) < 1e-5, "mean_matrix() function");
-            }
-        }
-
         // test: attention mechanism
-        if (!skip_tests[6]) {
+        if (!skip_tests[5]) {
             if (display_debug_info) cout << "\ntest: attention mechanism\n";
             {
                 matrix<float> X(4, 3), WQ(3, 3), WK(3, 3), WV(3, 3);
@@ -1956,7 +1912,7 @@ int main(int argc, char* argv[]) {
         }
 
         // test: add_prev1 layer
-        if (!skip_tests[7]) {
+        if (!skip_tests[6]) {
             if (display_debug_info) cout << "\ntest: add_prev1 layer\n";
             {
                 // Define the network
@@ -2054,7 +2010,7 @@ Be all my sins remembered.)";
                 layer_norm<tag10<input<matrix<float>>>>>>;
             net_type_b net_b;
             using net_type_c = classification_head<num_classes,
-                repeat<4, transformer_block,
+                repeat<3, transformer_block,
                 embeddings<sequence_size, num_classes, embedding_size,
                 input<matrix<int, 0, 1>>>>>;
             net_type_c net_c;            
@@ -2083,14 +2039,14 @@ Be all my sins remembered.)";
             }
 
             // Train the most simple network
-            if (!skip_tests[8]) {
+            if (!skip_tests[7]) {
                 dnn_trainer<net_type_a, adam> trainer_a(net_a, adam(0.005, 0.9, 0.998));
                 trainer_a.set_learning_rate(1e-3);
                 trainer_a.set_min_learning_rate(1e-6);
                 trainer_a.set_mini_batch_size(mini_batch_size);
                 trainer_a.be_verbose();
                 trainer_a.set_iterations_without_progress_threshold(1500);
-                for (int epoch = 0; epoch < num_epochs && trainer_a.get_learning_rate() > trainer_a.get_min_learning_rate() && !g_interrupt_signal_received; ++epoch) {
+                for (int epoch = 0; epoch < num_epochs && trainer_a.get_average_loss() > 0.05 && trainer_a.get_learning_rate() > trainer_a.get_min_learning_rate() && !g_interrupt_signal_received; ++epoch) {
                     for (size_t i = 0; i < batches.size(); ++i) trainer_a.train_one_step(batches[i], label_batches[i]);
                 }
                 trainer_a.get_net();
@@ -2108,14 +2064,14 @@ Be all my sins remembered.)";
             }
             
             // Train now multihead attention model
-            if (!skip_tests[9]) {
+            if (!skip_tests[8]) {
                 dnn_trainer<net_type_b, adam> trainer_b(net_b, adam(0.005, 0.9, 0.998));
                 trainer_b.set_learning_rate(1e-3);
                 trainer_b.set_min_learning_rate(1e-6);
                 trainer_b.set_mini_batch_size(mini_batch_size);
                 trainer_b.be_verbose();
                 trainer_b.set_iterations_without_progress_threshold(50);
-                for (int epoch = 0; epoch < num_epochs && trainer_b.get_learning_rate() > trainer_b.get_min_learning_rate() && !g_interrupt_signal_received; ++epoch) {
+                for (int epoch = 0; epoch < num_epochs && trainer_b.get_average_loss() > 0.05 && trainer_b.get_learning_rate() > trainer_b.get_min_learning_rate() && !g_interrupt_signal_received; ++epoch) {
                     for (size_t i = 0; i < batches.size(); ++i) trainer_b.train_one_step(batches[i], label_batches[i]);
                 }
                 trainer_b.get_net();
@@ -2130,7 +2086,7 @@ Be all my sins remembered.)";
             }
 
             // "shakespeare" example
-            if (!skip_tests[10]) {
+            if (!skip_tests[9]) {
                 // Lambda function to convert a vector of integers to a string of unsigned chars
                 auto to_unsigned_char_string = [](const matrix<int, 0, 1>& ints) -> string {
                     string result;
@@ -2156,21 +2112,21 @@ Be all my sins remembered.)";
                 cout << "batch size: " << mini_batch_size << endl;
                 cout << "samples used for the training: " << samples_txt.size() << endl;
                 std::vector<unsigned long> labels_txt;
-                for (size_t i = 0; i < samples_txt.size(); ++i) labels_txt.push_back(static_cast<unsigned long>(shakespeare_text[(i + 1) * sequence_size])); // Next character as label
+                for (size_t i = 0; i < samples_txt.size(); ++i) labels_txt.push_back(static_cast<unsigned long>(shakespeare_text[i + sequence_size])); // Next character as label
                 // Train the network representing a model for integrating knowledge and completing texts
                 if (fs::exists("llm_shakespeare_model_a.dat")) {
                     deserialize("llm_shakespeare_model_a.dat") >> net_c;
                     cout << "shakespeare model loaded: llm_shakespeare_model_a.dat" << endl;
                 }
-                dnn_trainer<net_type_c, adam> trainer_c(net_c, adam(0.005, 0.9, 0.998));
+                dnn_trainer<net_type_c, adam> trainer_c(net_c, adam(0.004, 0.9, 0.999));
                 trainer_c.set_learning_rate(1e-3);
                 trainer_c.set_min_learning_rate(1e-6);
                 trainer_c.set_mini_batch_size(mini_batch_size);
                 trainer_c.be_verbose();
-                trainer_c.set_iterations_without_progress_threshold(750);
+                trainer_c.set_iterations_without_progress_threshold(850);
                 std::vector<matrix<int, 0, 1>> samples;
                 std::vector<unsigned long> labels;
-                while (trainer_c.get_learning_rate() >= trainer_c.get_min_learning_rate() && !g_interrupt_signal_received) {                                       
+                while (trainer_c.get_average_loss() > 0.05 && trainer_c.get_learning_rate() >= trainer_c.get_min_learning_rate() && !g_interrupt_signal_received) {
                     if (data.generate_samples(mini_batch_size, samples, labels, false)) trainer_c.train_one_step(samples, labels);
                     else g_interrupt_signal_received = true;
                 }
@@ -2186,10 +2142,10 @@ Be all my sins remembered.)";
                 int num_correct_c = 0;
                 for (size_t i = 0; i < labels_txt.size(); ++i) if (predicted_labels_c[i] == labels_txt[i]) ++num_correct_c;
                 double accuracy_c = static_cast<double>(num_correct_c) / labels_txt.size();
-                DLIB_TEST_MSG(accuracy_c >= 0.8, "shakespeare model (accuracy: " + to_string(accuracy_c) + ")");
+                DLIB_TEST_MSG(accuracy_c > 0.8, "shakespeare model (accuracy: " + to_string(accuracy_c) + ")");
 
                 // Predict the next sequence of characters
-                string input_sequence = "To be or not to be—that is the";
+                string input_sequence = "To be or not to be—that is the ques";
                 std::vector<matrix<int, 0, 1>> input_tokens = tokenize_text(input_sequence, sequence_size);
                 string start_seq = to_unsigned_char_string(input_tokens.back());
                 size_t pos = input_sequence.find(start_seq);
@@ -2204,7 +2160,86 @@ Be all my sins remembered.)";
                     input_tokens.clear();
                     input_tokens.push_back(next_input);
                 }
-                cout << "generated text: " << input_sequence << endl;
+                cout << "generated text:\n\n" << input_sequence << endl;
+
+                // Loading the complete Shakespeare file
+                string shakespeare_file = "shakespeare.txt";
+                if (fs::exists(shakespeare_file)) {
+                    documents shakespeare_data(sequence_size, 0, true);
+                    shakespeare_data.load_documents(shakespeare_file, false);
+                    cout << "loaded " << shakespeare_data.get_total_tokens() << " tokens from " << shakespeare_file << endl;
+
+                    // Reload previous model
+                    if (fs::exists("llm_shakespeare_model_b.dat")) {
+                        deserialize("llm_shakespeare_model_b.dat") >> net_c;
+                        cout << "shakespeare model loaded: llm_shakespeare_model_b.dat" << endl;
+                    } else if (fs::exists("llm_shakespeare_model_a.dat")) {
+                        deserialize("llm_shakespeare_model_a.dat") >> net_c;
+                        cout << "shakespeare model loaded (source template): llm_shakespeare_model_a.dat" << endl;
+                    } else {
+                        cout << "no previous model found, starting from scratch" << endl;
+                    }
+                    trainer_c.set_iterations_without_progress_threshold(2000);
+
+                    // New training loop
+                    while (trainer_c.get_average_loss() > 0.05 && trainer_c.get_learning_rate() >= trainer_c.get_min_learning_rate() && !g_interrupt_signal_received) {
+                        if (shakespeare_data.generate_samples(mini_batch_size, samples, labels, true)) trainer_c.train_one_step(samples, labels);                        
+                        else g_interrupt_signal_received = true;
+                    }
+                    trainer_c.get_net();
+                    net_c.clean();
+                    serialize("llm_shakespeare_model_b.dat") << net_c;
+                    cout << "advanced shakespeare model saved: llm_shakespeare_model_b.dat" << endl;
+
+                    // Attempting to generate a new sonnet
+                    string sonnet_start = "Shall I compare thee to a winter's night?";
+                    std::vector<matrix<int, 0, 1>> input_tokens = tokenize_text(sonnet_start, sequence_size);
+                    if (!input_tokens.empty()) {
+                        string generated_sonnet = sonnet_start;
+                        matrix<int> next_input(sequence_size, 1);
+
+                        for (int i = 0; i < 700 && !input_tokens.empty(); ++i) {
+                            unsigned long next_char = net_c(input_tokens.back());
+                            char c = static_cast<unsigned char>(next_char);
+                            generated_sonnet += c;
+                            if (c == '\n') generated_sonnet += '\n';  // Double newline for readability
+
+                            for (int j = 0; j < (sequence_size - 1); ++j) next_input(j, 0) = input_tokens.back()(j + 1, 0);
+                            next_input(sequence_size - 1, 0) = static_cast<int>(next_char);
+
+                            input_tokens.clear();
+                            input_tokens.push_back(next_input);
+
+                            // Stop after generating what looks like a complete sonnet
+                            if (generated_sonnet.find("END") != string::npos || generated_sonnet.find("\n\n\n\n") != string::npos) break;
+                        }
+                        cout << "generated sonnet:\n\n" << generated_sonnet << endl;
+
+                        // Basic relevance test
+                        std::vector<string> keywords = {
+                            "thou", "thy", "thee", "love", "beauty", "time", "death", "life",
+                            "king", "lord", "heart", "good", "night", "day", "man", "great",
+                            "eyes", "sweet", "fair", "world", "hand", "heaven", "father", "blood",
+                            "mind", "know", "make", "god", "son", "well", "long", "come",
+                            "hand", "art", "young", "dear", "true", "friend", "honour", "bear",
+                            "give", "lady", "sir", "queen", "speak", "face", "court", "live",
+                            "say", "soul", "leave", "heart", "grace", "power", "nature", "truth",
+                            "fear", "noble", "crown", "sword", "head", "hear", "stand", "tongue",
+                            "never", "light", "name", "peace", "hell", "spirit", "body", "master",
+                            "word", "poor", "prince", "fortune", "hope", "virtue", "law", "tale"
+                        };                        int keyword_count = 0;
+                        for (const auto& keyword : keywords) {
+                            if (generated_sonnet.find(keyword) != string::npos) keyword_count++;
+                        }
+                        double relevance_score = static_cast<double>(keyword_count) / keywords.size();
+                        cout << "relevance score: " << relevance_score << endl;
+                        DLIB_TEST_MSG(relevance_score > 0.3, "shakespeare model relevance (score: " + to_string(relevance_score) + ")");
+                    } else {
+                        cout << "error: unable to tokenize sonnet start" << endl;
+                    }
+                } else {
+                    cout << "error: shakespeare.txt file not found in the current directory" << endl;
+                }
             }
         }
     } else if (text_generation) {
