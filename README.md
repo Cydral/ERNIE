@@ -133,22 +133,26 @@ These custom layers demonstrate how to extend Dlib's functionality for specific 
 
 ## Examples
 Shakespeare Test
-The Shakespeare test demonstrates ERNIE's ability to learn and generate text in the style of William Shakespeare. Here's a sample output:
+The Shakespeare test initially demonstrates ERNIE's ability to memorize and reproduce text from William Shakespeare's works. Here's a sample output:
 
 ```mizar
-Input: "To be, or not to be, that is the"
+Input: "To be or not to be—that is the ques"
 
-Generated text: "To be, or not to be, that is the question:
-Whether 'tis nobler in the mind to suffer
+Generated text: "To be or not to be—that is the question:
+Whether ’tis nobler in the mind to suffer
 The slings and arrows of outrageous fortune,
 Or to take arms against a sea of troubles
-And by opposing end them. To die: to sleep;
-No more; and by a sleep to say we end
-The heart-ache and the thousand natural shocks
-That flesh is heir to, 'tis a consummation
-Devoutly to be wish'd. To die, to sleep;"
+And, by opposing, end them. To die, to sleep—
+No more—and by a sleep to say we end
+The heartache and the thousand natural shocks
+That flesh is heir to—’tis a consummation
+Devoutly to be wished. To die, to sleep—
+To sleep, perchance to dream. Ay, there (...)"
 ```
-This example showcases how ERNIE can capture the essence of Shakespeare's writing style, including vocabulary, meter, and thematic elements.
+It's important to note that this example primarily showcases ERNIE's capacity for memorization rather than true creative generation. The model has essentially learned to recite a well-known passage from Shakespeare's "Hamlet" verbatim when given the beginning of the famous soliloquy.
+While this demonstrates the network's ability to learn and reproduce complex text patterns, it does not necessarily indicate an understanding of Shakespeare's writing style or an ability to generate original content in that style.
+
+For a more comprehensive test of ERNIE's creative capabilities, we subsequently train the model on Shakespeare's complete works and challenge it to generate a new sonnet from an original starting line.
 
 ## Acknowledgements
 This project would not have been possible without the incredible work of the Dlib community.
