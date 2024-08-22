@@ -2130,8 +2130,8 @@ Be all my sins remembered.)";
                 while (trainer_c.get_learning_rate() >= trainer_c.get_min_learning_rate() && !g_interrupt_signal_received) {
                     if (data.generate_samples(mini_batch_size, samples, labels, false)) trainer_c.train_one_step(samples, labels);
                     else g_interrupt_signal_received = true;
-                    if (iteration > 100 && trainer_c.get_average_loss() > 0.05) g_interrupt_signal_received = true;
-                    iteration++;
+                    if (iteration > 100 && trainer_c.get_average_loss() < 0.05) g_interrupt_signal_received = true;
+                    else iteration++;
                 }
                 trainer_c.get_net();
                 net_c.clean();
@@ -2194,8 +2194,8 @@ Be all my sins remembered.)";
                     while (trainer_d.get_learning_rate() >= trainer_d.get_min_learning_rate() && !g_interrupt_signal_received) {
                         if (shakespeare_data.generate_samples(mini_batch_size, samples, labels, true)) trainer_d.train_one_step(samples, labels);                        
                         else g_interrupt_signal_received = true;
-                        if (iteration > 100 && trainer_d.get_average_loss() > 0.05) g_interrupt_signal_received = true;
-                        iteration++;
+                        if (iteration > 100 && trainer_d.get_average_loss() < 0.05) g_interrupt_signal_received = true;
+                        else iteration++;
                     }
                     trainer_d.get_net();
                     net_c.clean();
@@ -2243,7 +2243,6 @@ Be all my sins remembered.)";
                             if (generated_sonnet.find(keyword) != string::npos) keyword_count++;
                         }
                         double relevance_score = static_cast<double>(keyword_count) / keywords.size();
-                        cout << "relevance score: " << relevance_score << endl;
                         DLIB_TEST_MSG(relevance_score > 0.3, "shakespeare model relevance (score: " + to_string(relevance_score) + ")");
                     } else {
                         cout << "error: unable to tokenize sonnet start" << endl;
