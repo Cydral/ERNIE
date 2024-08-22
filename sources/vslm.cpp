@@ -2118,7 +2118,7 @@ Be all my sins remembered.)";
                     deserialize("llm_shakespeare_model_a.dat") >> net_c;
                     cout << "shakespeare model loaded: llm_shakespeare_model_a.dat" << endl;
                 }
-                dnn_trainer<net_type_c, adam> trainer_c(net_c, adam(0.004, 0.9, 0.999));
+                dnn_trainer<net_type_c, adam> trainer_c(net_c, adam(0.004, 0.9, 0.998));
                 trainer_c.set_learning_rate(1e-3);
                 trainer_c.set_min_learning_rate(1e-6);
                 trainer_c.set_mini_batch_size(mini_batch_size);
@@ -2126,9 +2126,10 @@ Be all my sins remembered.)";
                 trainer_c.set_iterations_without_progress_threshold(850);
                 std::vector<matrix<int, 0, 1>> samples;
                 std::vector<unsigned long> labels;
-                while (trainer_c.get_average_loss() > 0.05 && trainer_c.get_learning_rate() >= trainer_c.get_min_learning_rate() && !g_interrupt_signal_received) {
+                while (trainer_c.get_learning_rate() >= trainer_c.get_min_learning_rate() && !g_interrupt_signal_received) {
                     if (data.generate_samples(mini_batch_size, samples, labels, false)) trainer_c.train_one_step(samples, labels);
                     else g_interrupt_signal_received = true;
+                    if (trainer_c.get_average_loss() > 0.05) g_interrupt_signal_received = true;
                 }
                 trainer_c.get_net();
                 net_c.clean();
@@ -2149,7 +2150,7 @@ Be all my sins remembered.)";
                 std::vector<matrix<int, 0, 1>> input_tokens = tokenize_text(input_sequence, sequence_size);
                 string start_seq = to_unsigned_char_string(input_tokens.back());
                 size_t pos = input_sequence.find(start_seq);
-                if (pos != std::string::npos) input_shakespeare modelsequence = input_sequence.substr(0, pos + start_seq.length());
+                if (pos != std::string::npos) input_sequence = input_sequence.substr(0, pos + start_seq.length());
                 cout << "input sequence for text generation: <" << start_seq << ">" << endl;
                 matrix<int> next_input(sequence_size, 1);
                 for (int i = 0; i < 400; ++i) {
@@ -2187,9 +2188,10 @@ Be all my sins remembered.)";
                     trainer_d.set_iterations_without_progress_threshold(2000);
 
                     // New training loop
-                    while (trainer_d.get_average_loss() > 0.05 && trainer_d.get_learning_rate() >= trainer_d.get_min_learning_rate() && !g_interrupt_signal_received) {
+                    while (trainer_d.get_learning_rate() >= trainer_d.get_min_learning_rate() && !g_interrupt_signal_received) {
                         if (shakespeare_data.generate_samples(mini_batch_size, samples, labels, true)) trainer_d.train_one_step(samples, labels);                        
                         else g_interrupt_signal_received = true;
+                        if (trainer_d.get_average_loss() > 0.05) g_interrupt_signal_received = true;
                     }
                     trainer_d.get_net();
                     net_c.clean();
