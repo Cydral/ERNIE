@@ -47,4 +47,4 @@ It's worth noting that ERNIE's ability to accurately recite the learned text dep
   - Model A (Memorization): Typically achieves near-perfect reproduction of learned passages.
   - Model B (Generation): Performance varies. Check the 'relevance score' in the test output for an indication of how well it captures Shakespeare's style and vocabulary.
 
-We continue to refine these models to improve ERNIE's language understanding and generation capabilities. Stay tuned for updates!
+We continue to refine these models to improve ERNIE's language understanding and generation capabilities.
