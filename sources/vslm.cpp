@@ -211,6 +211,232 @@ using utils::is_utf8;
 using utils::concatenate_files;
 
 namespace dlib {
+    namespace cpu {
+        void rms_normalize(
+            const double eps,
+            resizable_tensor& dest,
+            resizable_tensor& scale,
+            const tensor& src,
+            const tensor& gamma
+        )
+        {
+            const long num = src.k() * src.nr() * src.nc();
+            DLIB_CASSERT(
+                src.k() == gamma.k() &&
+                src.nr() == gamma.nr() &&
+                src.nc() == gamma.nc() &&
+                eps > 0,
+                "\ngamma.k():  " << gamma.k() <<
+                "\ngamma.nr(): " << gamma.nr() <<
+                "\ngamma.nc(): " << gamma.nc() <<
+                "\nsrc.k():    " << src.k() <<
+                "\nsrc.nr():   " << src.nr() <<
+                "\nsrc.nc():   " << src.nc() <<
+                "\neps:  " << eps
+            );
+
+            dest.copy_size(src);
+            scale.set_size(src.num_samples());
+
+            // Compute RMS
+            scale = 0;
+            const auto p_scale = scale.host();
+            auto p_src = src.host();
+            for (long n = 0; n < src.num_samples(); ++n)
+            {
+                for (long i = 0; i < num; ++i)
+                {
+                    float val = p_src[n * num + i];
+                    p_scale[n] += val * val;
+                }
+            }
+            scale /= num;
+            // copy data back to host
+            scale.host();
+
+            // Compute RMS inverse
+            for (long n = 0; n < src.num_samples(); ++n)
+            {
+                p_scale[n] = 1.0f / std::sqrt(p_scale[n] + eps);
+            }
+
+            p_src = src.host();
+            auto p_dest = dest.host();
+            auto p_gamma = gamma.host();
+            for (long n = 0; n < src.num_samples(); ++n)
+            {
+                for (long i = 0; i < num; ++i)
+                {
+                    *p_dest = (*p_src) * p_scale[n];
+                    *p_dest = (*p_dest) * p_gamma[i];
+                    ++p_src;
+                    ++p_dest;
+                }
+            }
+        }
+
+        void rms_normalize_gradient(
+            const double eps,
+            const tensor& gradient_input,
+            const tensor& scale,
+            const tensor& src,
+            const tensor& gamma,
+            tensor& src_grad,
+            tensor& gamma_grad
+        )
+        {
+            const long num = src.k() * src.nr() * src.nc();
+            DLIB_CASSERT(src.num_samples() == scale.size());
+            DLIB_CASSERT(src.k() == gamma.k());
+            DLIB_CASSERT(src.nr() == gamma.nr());
+            DLIB_CASSERT(src.nc() == gamma.nc());
+            DLIB_CASSERT(have_same_dimensions(gradient_input, src));
+            DLIB_CASSERT(have_same_dimensions(gradient_input, src_grad));
+            DLIB_CASSERT(have_same_dimensions(gamma_grad, gamma));
+            DLIB_CASSERT(eps > 0);
+
+            gamma_grad = 0;
+            auto p_grad = gradient_input.host();
+            auto p_src = src.host();
+            const auto p_gamma = gamma.host();
+            const auto p_gamma_grad = gamma_grad.host();
+            const auto p_scale = scale.host();
+
+            resizable_tensor dscale;
+            dscale.copy_size(scale);
+            dscale = 0;
+            const auto p_dscale = dscale.host();
+
+            for (long n = 0; n < src.num_samples(); ++n)
+            {
+                for (long i = 0; i < num; ++i)
+                {
+                    const float x_hat = (*p_src) * p_scale[n];
+                    p_gamma_grad[i] += (*p_grad) * x_hat;
+
+                    const float dx = *p_grad * p_gamma[i];
+                    p_dscale[n] += dx * (*p_src) * (-0.5) * p_scale[n] * p_scale[n] * p_scale[n];
+
+                    ++p_grad;
+                    ++p_src;
+                }
+            }
+
+            const float invnum = 1.0f / num;
+            p_grad = gradient_input.host();
+            p_src = src.host();
+            auto p_src_grad = src_grad.host();
+            for (long n = 0; n < src.num_samples(); ++n)
+            {
+                for (long i = 0; i < num; ++i)
+                {
+                    const float dx = *p_grad * p_gamma[i];
+
+                    *p_src_grad += dx * p_scale[n] + p_dscale[n] * 2 * (*p_src) * invnum;
+
+                    ++p_grad;
+                    ++p_src;
+                    ++p_src_grad;
+                }
+            }
+        }
+    }
+
+    const double DEFAULT_RMS_NORM_EPS = 1e-5;
+    class rms_norm_ {
+    public:
+        explicit rms_norm_(
+            double eps_ = DEFAULT_RMS_NORM_EPS
+        ) :
+            learning_rate_multiplier(1),
+            weight_decay_multiplier(0),
+            eps(eps_) {}
+
+        double get_eps() const { return eps; }
+
+        double get_learning_rate_multiplier() const { return learning_rate_multiplier; }
+        double get_weight_decay_multiplier() const { return weight_decay_multiplier; }
+        void set_learning_rate_multiplier(double val) { learning_rate_multiplier = val; }
+        void set_weight_decay_multiplier(double val) { weight_decay_multiplier = val; }
+
+        inline dpoint map_input_to_output(const dpoint& p) const { return p; }
+        inline dpoint map_output_to_input(const dpoint& p) const { return p; }
+
+        template <typename SUBNET>
+        void setup(const SUBNET& sub) {
+            gamma = alias_tensor(1, sub.get_output().k(), sub.get_output().nr(), sub.get_output().nc());
+            params.set_size(gamma.size());
+            gamma(params, 0) = 1;
+        }
+
+        template <typename SUBNET>
+        void forward(const SUBNET& sub, resizable_tensor& output) {
+            auto g = gamma(params, 0);
+            cpu::rms_normalize(eps, output, scale, sub.get_output(), g);
+        }
+
+        template <typename SUBNET>
+        void backward(const tensor& gradient_input, SUBNET& sub, tensor& params_grad) {
+            auto g = gamma(params, 0);
+            auto g_grad = gamma(params_grad, 0);
+            cpu::rms_normalize_gradient(eps, gradient_input, scale, sub.get_output(), g, sub.get_gradient_input(), g_grad);
+        }
+
+        const tensor& get_layer_params() const { return params; };
+        tensor& get_layer_params() { return params; };
+
+        friend void serialize(const rms_norm_& item, std::ostream& out) {
+            serialize("rms_norm_", out);
+            serialize(item.params, out);
+            serialize(item.gamma, out);
+            serialize(item.scale, out);
+            serialize(item.learning_rate_multiplier, out);
+            serialize(item.weight_decay_multiplier, out);
+            serialize(item.eps, out);
+        }
+
+        friend void deserialize(rms_norm_& item, std::istream& in) {
+            std::string version;
+            deserialize(version, in);
+            if (version != "rms_norm_")
+                throw serialization_error("Unexpected version '" + version + "' found while deserializing dlib::rms_norm_.");
+            deserialize(item.params, in);
+            deserialize(item.gamma, in);
+            deserialize(item.scale, in);
+            deserialize(item.learning_rate_multiplier, in);
+            deserialize(item.weight_decay_multiplier, in);
+            deserialize(item.eps, in);
+        }
+
+        friend std::ostream& operator<<(std::ostream& out, const rms_norm_& item) {
+            out << "rms_norm";
+            out << " eps=" << item.eps;
+            out << " learning_rate_mult=" << item.learning_rate_multiplier;
+            out << " weight_decay_mult=" << item.weight_decay_multiplier;
+            return out;
+        }
+
+        friend void to_xml(const rms_norm_& item, std::ostream& out) {
+            out << "rms_norm";
+            out << " eps='" << item.eps << "'";
+            out << " learning_rate_mult='" << item.learning_rate_multiplier << "'";
+            out << " weight_decay_mult='" << item.weight_decay_multiplier << "'";
+            out << ">\n";
+            out << mat(item.params);
+            out << "</rms_norm>\n";
+        }
+
+    private:
+        resizable_tensor params;
+        alias_tensor gamma;
+        resizable_tensor scale;
+        double learning_rate_multiplier;
+        double weight_decay_multiplier;
+        double eps;
+    };
+    template <typename SUBNET>
+    using rms_norm = add_layer<rms_norm_, SUBNET>;
+
     void DBG_INFO(std::string dbg_msg) {
         if (!dbg_msg.empty()) cout << dbg_msg << endl;
     }
@@ -526,7 +752,7 @@ namespace dlib {
     template <int sequence_length, int embedding_length, typename SUBNET>
     using positional_encoding = add_layer<positional_encoding_<sequence_length, embedding_length>, SUBNET>;
     template <int sequence_length, int nb_embeddings, int embedding_length, typename SUBNET>
-    using embeddings = layer_norm<add_prev9<positional_encoding<sequence_length, embedding_length, tag9<embedding<nb_embeddings, embedding_length, tag10<SUBNET>>>>>>;
+    using embeddings = rms_norm<add_prev9<positional_encoding<sequence_length, embedding_length, tag9<embedding<nb_embeddings, embedding_length, tag10<SUBNET>>>>>>;
     template <int sequence_length, int nb_embeddings, int embedding_length, typename SUBNET>
     using static_embeddings = add_prev9<positional_encoding<sequence_length, embedding_length, tag9<static_embedding<nb_embeddings, embedding_length, tag10<SUBNET>>>>>;
 
@@ -1242,7 +1468,7 @@ namespace dlib {
     // Single-Head Attention
     template <int embedding_dim, typename SUBNET>
     using single_head_attention_block =
-        layer_norm<add_prev3<
+        rms_norm<add_prev3<
         dropout_10<linear_no_bias<embedding_size,
         core_masked_attention_block<embedding_size, number_of_heads,
         tag3<
@@ -1253,7 +1479,7 @@ namespace dlib {
     using iblock = core_masked_attention_block<embedding_size, number_of_heads, SUBNET>;
     template <typename SUBNET>
     using multihead_attention_block =
-        layer_norm<add_prev3<
+        rms_norm<add_prev3<
         dropout_10<linear_no_bias<embedding_size,
         stackm<
         multihead_4<iblock, iblock, iblock, iblock,
@@ -1262,14 +1488,14 @@ namespace dlib {
     // Feedforward blocks
     template <int embedding_dim, typename SUBNET>
     using feed_forward_fc =
-        layer_norm<add_prev5<
+        rms_norm<add_prev5<
         scale5<con<1, 1, 1, 1, 1,
         fc<embedding_size,
         dropout_10<gelu<bn_fc<fc<embedding_size * 4,
         tag5<SUBNET>>>>>>>>>>;
     template <int embedding_dim, typename SUBNET>
     using feed_forward_linear =
-        layer_norm<add_prev5<
+        rms_norm<add_prev5<
         linear<embedding_size,
         dropout_10<gelu<linear<embedding_size * 4,
         tag5<SUBNET>>>>>>>;
@@ -1288,12 +1514,12 @@ namespace dlib {
     using sh_llm_net = classification_head<vocab_size,
         feed_forward_linear<embedding_size,
         single_head_attention_block<embedding_size,
-        layer_norm<embeddings<sequence_size, vocab_size, embedding_size,
-        input<matrix<int, 0, 1>>>>>>>;
+        embeddings<sequence_size, vocab_size, embedding_size,
+        input<matrix<int, 0, 1>>>>>>;
     using mh_llm_net = classification_head<vocab_size,
         repeat<number_of_blocks, transformer_block,
-        layer_norm<embeddings<sequence_size, vocab_size, embedding_size,
-        input<matrix<int, 0, 1>>>>>>;
+        embeddings<sequence_size, vocab_size, embedding_size,
+        input<matrix<int, 0, 1>>>>>;
 }
 
 constexpr size_t std_global_context_size = (5 * sequence_size);
@@ -2019,7 +2245,6 @@ Be all my sins remembered.)";
             net_type_b net_b;
             using net_type_c = classification_head<num_classes,
                 repeat<3, transformer_block,
-                //layer_norm<embedding<num_classes, embedding_size, tag10<
                 embeddings<sequence_size, num_classes, embedding_size,
                 input<matrix<int, 0, 1>>>>>;
             net_type_c net_c;            
@@ -2126,46 +2351,48 @@ Be all my sins remembered.)";
                 trainer_c.set_learning_rate(learning_rate);
                 trainer_c.set_min_learning_rate(min_learning_rate);
                 trainer_c.set_mini_batch_size(mini_batch_size);
-                trainer_c.be_verbose();
-                trainer_c.set_iterations_without_progress_threshold(80);
+                trainer_c.be_verbose();                
                 trainer_c.set_synchronization_file("llm_shakespeare_model_a.ckp", std::chrono::minutes(5));
+                trainer_c.set_iterations_without_progress_threshold(80);
                 std::vector<matrix<int, 0, 1>> samples;
                 std::vector<unsigned long> labels;
-                while (trainer_c.get_learning_rate() >= trainer_c.get_min_learning_rate() && !g_interrupt_signal_received) {
-                    if (data.generate_samples(mini_batch_size, samples, labels, false)) trainer_c.train_one_step(samples, labels);
-                    else g_interrupt_signal_received = true;
-                }
-                trainer_c.get_net();
-                net_c.clean();
-                serialize("llm_shakespeare_model_a.dat") << net_c;
-                cout << "shakespeare model saved: llm_shakespeare_model_a.dat" << endl;
-                cout << "shakespeare model parameters: " << count_parameters(net_c) << endl;
-                g_interrupt_signal_received = false;
+                if (trainer_c.get_learning_rate() < trainer_c.get_min_learning_rate()) {
+                    while (trainer_c.get_learning_rate() >= trainer_c.get_min_learning_rate() && !g_interrupt_signal_received) {
+                        if (data.generate_samples(mini_batch_size, samples, labels, false)) trainer_c.train_one_step(samples, labels);
+                        else g_interrupt_signal_received = true;
+                    }
+                    trainer_c.get_net();
+                    net_c.clean();
+                    serialize("llm_shakespeare_model_a.dat") << net_c;
+                    cout << "shakespeare model saved: llm_shakespeare_model_a.dat" << endl;
+                    cout << "shakespeare model parameters: " << count_parameters(net_c) << endl;
+                    g_interrupt_signal_received = false;
 
-                // Test the network with the same data to ensure it has learned something
-                std::vector<unsigned long> predicted_labels_c = net_c(samples_txt);
-                int num_correct_c = 0;
-                for (size_t i = 0; i < labels_txt.size(); ++i) if (predicted_labels_c[i] == labels_txt[i]) ++num_correct_c;
-                double accuracy_c = static_cast<double>(num_correct_c) / labels_txt.size();
-                DLIB_TEST_MSG(accuracy_c > 0.8, "shakespeare model (accuracy: " + to_string(accuracy_c) + ")");
+                    // Test the network with the same data to ensure it has learned something
+                    std::vector<unsigned long> predicted_labels_c = net_c(samples_txt);
+                    int num_correct_c = 0;
+                    for (size_t i = 0; i < labels_txt.size(); ++i) if (predicted_labels_c[i] == labels_txt[i]) ++num_correct_c;
+                    double accuracy_c = static_cast<double>(num_correct_c) / labels_txt.size();
+                    DLIB_TEST_MSG(accuracy_c > 0.8, "shakespeare model (accuracy: " + to_string(accuracy_c) + ")");
 
-                // Predict the next sequence of characters
-                string input_sequence = "To be or not to be—that is the ques";
-                std::vector<matrix<int, 0, 1>> input_tokens = tokenize_text(input_sequence, sequence_size);
-                string start_seq = to_unsigned_char_string(input_tokens.back());
-                size_t pos = input_sequence.find(start_seq);
-                if (pos != std::string::npos) input_sequence = input_sequence.substr(0, pos + start_seq.length());
-                cout << "input sequence for text generation: <" << start_seq << ">" << endl;
-                matrix<int> next_input(sequence_size, 1);
-                for (int i = 0; i < 400; ++i) {
-                    unsigned long next_char = net_c(input_tokens.back());
-                    input_sequence += static_cast<unsigned char>(next_char);
-                    for (int j = 0; j < (sequence_size - 1); ++j) next_input(j, 0) = input_tokens.back()(j + 1, 0);
-                    next_input(sequence_size - 1, 0) = static_cast<int>(next_char);
-                    input_tokens.clear();
-                    input_tokens.push_back(next_input);
+                    // Predict the next sequence of characters
+                    string input_sequence = "To be or not to be—that is the ques";
+                    std::vector<matrix<int, 0, 1>> input_tokens = tokenize_text(input_sequence, sequence_size);
+                    string start_seq = to_unsigned_char_string(input_tokens.back());
+                    size_t pos = input_sequence.find(start_seq);
+                    if (pos != std::string::npos) input_sequence = input_sequence.substr(0, pos + start_seq.length());
+                    cout << "input sequence for text generation: <" << start_seq << ">" << endl;
+                    matrix<int> next_input(sequence_size, 1);
+                    for (int i = 0; i < 400; ++i) {
+                        unsigned long next_char = net_c(input_tokens.back());
+                        input_sequence += static_cast<unsigned char>(next_char);
+                        for (int j = 0; j < (sequence_size - 1); ++j) next_input(j, 0) = input_tokens.back()(j + 1, 0);
+                        next_input(sequence_size - 1, 0) = static_cast<int>(next_char);
+                        input_tokens.clear();
+                        input_tokens.push_back(next_input);
+                    }
+                    cout << "generated text:\n\n" << input_sequence << " (...)\n\n";
                 }
-                cout << "generated text:\n\n" << input_sequence << "\n\n";
 
                 // Loading the complete Shakespeare file
                 string shakespeare_file = "shakespeare.txt";
@@ -2185,13 +2412,13 @@ Be all my sins remembered.)";
                     trainer_d.set_learning_rate(learning_rate);
                     trainer_d.set_min_learning_rate(min_learning_rate);
                     trainer_d.set_mini_batch_size(mini_batch_size);
-                    trainer_d.be_verbose();
-                    trainer_d.set_iterations_without_progress_threshold(200);
+                    trainer_d.be_verbose();                    
                     trainer_d.set_synchronization_file("llm_shakespeare_model_b.ckp", std::chrono::minutes(5));
+                    trainer_d.set_iterations_without_progress_threshold(500);
 
                     // New training loop
                     while (trainer_d.get_learning_rate() >= trainer_d.get_min_learning_rate() && !g_interrupt_signal_received) {
-                        if (shakespeare_data.generate_samples(mini_batch_size, samples, labels, true)) trainer_d.train_one_step(samples, labels);                        
+                        if (shakespeare_data.generate_samples(mini_batch_size, samples, labels)) trainer_d.train_one_step(samples, labels);                        
                         else g_interrupt_signal_received = true;
                     }
                     trainer_d.get_net();
