@@ -35,6 +35,7 @@ The source code for ERNIE is organized in the `ERNIE/sources/` directory. This s
 - **Pre-calculated UNIGRAM Tokenizer Models**:
   - `.model` and `.vocab` files for UNIGRAM tokenizers
   - Includes models for: 3k, 8k, 20k and 40k vocabulary
+  - Source corpus details: Transcriptions of European Parliament proceedings and careful alignment of English and French transcriptions (English: ~2 million sentences, French: ~2 million sentences)
 
 ### Notes:
 
