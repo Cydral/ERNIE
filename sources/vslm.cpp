@@ -1600,7 +1600,7 @@ int main(int argc, char* argv[]) {
             false,      // 5: attention mechanism
             false,      // 6: add_prev1 layer
             true,       // 7: simple network
-            false,      // 8: multihead attention model
+            true,       // 8: multihead attention model
             false       // 9: "shakespeare" example
         };
 
