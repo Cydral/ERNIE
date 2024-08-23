@@ -339,16 +339,24 @@ namespace dlib {
                 DLIB_CASSERT(sub.get_output().nc() == 1);
                 DLIB_CASSERT(sub.get_output().nr() > 0);
                 embeddings.set_size(num_embeddings, embedding_dim);
-                tt::tensor_rand rnd;
-                if (is_trainable_) {
-                    rnd.fill_uniform(embeddings);
-                } else {
-                    dlib::rand rnd;
-                    for (int r = 0; r < embeddings.nr(); ++r) {
-                        for (int c = 0; c < embeddings.nc(); ++c) {
-                            embeddings.host()[tensor_index(embeddings, r, c, 0, 0)] = rnd.get_random_float();;
-                        }                        
-                    }                    
+
+                auto xavier_init = [](int num_embeddings_, int embedding_dim_) {
+                    double limit = std::sqrt(6.0 / (num_embeddings_ + embedding_dim_));
+
+                std::random_device rd;
+                std::mt19937 gen(rd());
+                std::uniform_real_distribution<> dis(-limit, limit);
+
+                return [=](float& weight) mutable {
+                    weight = std::tanh(static_cast<float>(dis(gen)));
+                    };
+                };
+
+                auto init_func = xavier_init(num_embeddings, embedding_dim);
+                for (int r = 0; r < embeddings.nr(); ++r) {
+                    for (int c = 0; c < embeddings.nc(); ++c) {
+                        init_func(embeddings.host()[tensor_index(embeddings, r, c, 0, 0)]);
+                    }                        
                 } 
             }
         }
@@ -520,7 +528,7 @@ namespace dlib {
     template <int sequence_length, int nb_embeddings, int embedding_length, typename SUBNET>
     using embeddings = layer_norm<add_prev9<positional_encoding<sequence_length, embedding_length, tag9<embedding<nb_embeddings, embedding_length, tag10<SUBNET>>>>>>;
     template <int sequence_length, int nb_embeddings, int embedding_length, typename SUBNET>
-    using static_embeddings = layer_norm<add_prev9<positional_encoding<sequence_length, embedding_length, tag9<static_embedding<nb_embeddings, embedding_length, tag10<SUBNET>>>>>>;
+    using static_embeddings = add_prev9<positional_encoding<sequence_length, embedding_length, tag9<static_embedding<nb_embeddings, embedding_length, tag10<SUBNET>>>>>;
 
     enum linear_bias_mode { LINEAR_HAS_BIAS = 0, LINEAR_NO_BIAS = 1 };
     struct num_linear_outputs {
@@ -927,9 +935,9 @@ namespace dlib {
     using multm_prev4_ = multm_prev_<tag4>;
     using multm_prev5_ = multm_prev_<tag5>;
 
-    class hstack_ {
+    class stackm_ {
     public:
-        hstack_() {}
+        stackm_() {}
         template <typename SUBNET> void setup(const SUBNET& /* sub */) {}
 
         template <typename SUBNET> void forward(const SUBNET& sub, resizable_tensor& output) {
@@ -962,28 +970,28 @@ namespace dlib {
         const tensor& get_layer_params() const { return params; }
         tensor& get_layer_params() { return params; }
 
-        friend void serialize(const hstack_& /* item */, std::ostream& out) {
-            serialize("hstack_", out);
+        friend void serialize(const stackm_& /* item */, std::ostream& out) {
+            serialize("stackm_", out);
         }
-        friend void deserialize(hstack_& /* item */, std::istream& in) {
+        friend void deserialize(stackm_& /* item */, std::istream& in) {
             std::string version;
             deserialize(version, in);
-            if (version != "hstack_")
-                throw serialization_error("Unexpected version '" + version + "' found while deserializing dlib::hstack_.");
+            if (version != "stackm_")
+                throw serialization_error("Unexpected version '" + version + "' found while deserializing dlib::stackm_.");
         }
 
-        friend std::ostream& operator<<(std::ostream& out, const hstack_& /* item */) {
-            out << "hstack";
+        friend std::ostream& operator<<(std::ostream& out, const stackm_& /* item */) {
+            out << "stackm";
             return out;
         }
-        friend void to_xml(const hstack_& /* item */, std::ostream& out) {
-            out << "<hstack />\n";
+        friend void to_xml(const stackm_& /* item */, std::ostream& out) {
+            out << "<stackm />\n";
         }
     private:
         dlib::resizable_tensor params; // Unused
     };
     template <typename SUBNET>
-    using hstack = add_layer<hstack_, SUBNET>;
+    using stackm = add_layer<stackm_, SUBNET>;
 
     template <unsigned long number_of_heads_, unsigned long embedding_dim_>
     class scale_weights_ : public multiply_ {
@@ -1247,7 +1255,7 @@ namespace dlib {
     using multihead_attention_block =
         layer_norm<add_prev3<
         dropout_10<linear_no_bias<embedding_size,
-        hstack<
+        stackm<
         multihead_4<iblock, iblock, iblock, iblock,
         tag3<SUBNET>>>>>>>;
 
@@ -1518,7 +1526,7 @@ int main(int argc, char* argv[]) {
     string corpus_dir;
     bool do_benchmark = false, text_generation = false;
     bool voc_training = false, model_training = false, model_prompting = false, use_sync_file = false;
-    double learning_rate = 1e-3, min_learning_rate = 1e-6, weight_decay = 0.005, beta1 = 0.9, beta2 = 0.998, temperature = 0.9;
+    double learning_rate = 1e-3, min_learning_rate = 1e-6, weight_decay = 0.001, beta1 = 0.9, beta2 = 0.999, temperature = 0.9;
     long mini_batch_size = 16, iterations_without_progress_threshold = 1500, top_k = 3;
     std::vector<int> gpus = { 0 };
     set_dnn_prefer_fastest_algorithms();
@@ -1592,7 +1600,7 @@ int main(int argc, char* argv[]) {
             false,      // 5: attention mechanism
             false,      // 6: add_prev1 layer
             true,       // 7: simple network
-            true,       // 8: multihead attention model
+            false,      // 8: multihead attention model
             false       // 9: "shakespeare" example
         };
 
@@ -2003,14 +2011,15 @@ Be all my sins remembered.)";
             using net_type_a = classification_head<num_classes,
                 feed_forward_fc<embedding_size,
                 single_head_attention_block<embedding_size,                
-                layer_norm<tag10<input<matrix<float>>>>>>>;
+                tag10<input<matrix<float>>>>>>;
             net_type_a net_a;
             using net_type_b = classification_head<num_classes,
                 repeat<2, transformer_block,
-                layer_norm<tag10<input<matrix<float>>>>>>;
+                tag10<input<matrix<float>>>>>;
             net_type_b net_b;
             using net_type_c = classification_head<num_classes,
                 repeat<3, transformer_block,
+                //layer_norm<embedding<num_classes, embedding_size, tag10<
                 embeddings<sequence_size, num_classes, embedding_size,
                 input<matrix<int, 0, 1>>>>>;
             net_type_c net_c;            
@@ -2040,13 +2049,13 @@ Be all my sins remembered.)";
 
             // Train the most simple network
             if (!skip_tests[7]) {
-                dnn_trainer<net_type_a, adam> trainer_a(net_a, adam(0.005, 0.9, 0.998));
-                trainer_a.set_learning_rate(1e-3);
-                trainer_a.set_min_learning_rate(1e-6);
+                dnn_trainer<net_type_a> trainer_a(net_a);
+                trainer_a.set_learning_rate(learning_rate);
+                trainer_a.set_min_learning_rate(min_learning_rate);
                 trainer_a.set_mini_batch_size(mini_batch_size);
                 trainer_a.be_verbose();
                 trainer_a.set_iterations_without_progress_threshold(1500);
-                for (int epoch = 0; epoch < num_epochs && trainer_a.get_average_loss() > 0.05 && trainer_a.get_learning_rate() > trainer_a.get_min_learning_rate() && !g_interrupt_signal_received; ++epoch) {
+                for (int epoch = 0; epoch < num_epochs && trainer_a.get_learning_rate() > trainer_a.get_min_learning_rate() && !g_interrupt_signal_received; ++epoch) {
                     for (size_t i = 0; i < batches.size(); ++i) trainer_a.train_one_step(batches[i], label_batches[i]);
                 }
                 trainer_a.get_net();
@@ -2065,13 +2074,13 @@ Be all my sins remembered.)";
             
             // Train now multihead attention model
             if (!skip_tests[8]) {
-                dnn_trainer<net_type_b, adam> trainer_b(net_b, adam(0.005, 0.9, 0.998));
-                trainer_b.set_learning_rate(1e-3);
-                trainer_b.set_min_learning_rate(1e-6);
+                dnn_trainer<net_type_b> trainer_b(net_b);
+                trainer_b.set_learning_rate(learning_rate);
+                trainer_b.set_min_learning_rate(min_learning_rate);
                 trainer_b.set_mini_batch_size(mini_batch_size);
                 trainer_b.be_verbose();
                 trainer_b.set_iterations_without_progress_threshold(50);
-                for (int epoch = 0; epoch < num_epochs && trainer_b.get_average_loss() > 0.05 && trainer_b.get_learning_rate() > trainer_b.get_min_learning_rate() && !g_interrupt_signal_received; ++epoch) {
+                for (int epoch = 0; epoch < num_epochs && trainer_b.get_learning_rate() > trainer_b.get_min_learning_rate() && !g_interrupt_signal_received; ++epoch) {
                     for (size_t i = 0; i < batches.size(); ++i) trainer_b.train_one_step(batches[i], label_batches[i]);
                 }
                 trainer_b.get_net();
@@ -2113,24 +2122,20 @@ Be all my sins remembered.)";
                 cout << "samples used for the training: " << samples_txt.size() << endl;
                 std::vector<unsigned long> labels_txt;
                 for (size_t i = 0; i < samples_txt.size(); ++i) labels_txt.push_back(static_cast<unsigned long>(shakespeare_text[i + sequence_size])); // Next character as label
-                // Train the network representing a model for integrating knowledge and completing texts
-                if (fs::exists("llm_shakespeare_model_a.dat")) {
-                    deserialize("llm_shakespeare_model_a.dat") >> net_c;
-                    cout << "shakespeare model loaded: llm_shakespeare_model_a.dat" << endl;
-                }
-                dnn_trainer<net_type_c, adam> trainer_c(net_c, adam(0.004, 0.9, 0.998));
-                trainer_c.set_learning_rate(1e-3);
-                trainer_c.set_min_learning_rate(1e-6);
+                dnn_trainer<net_type_c, adam> trainer_c(net_c, adam(weight_decay, beta1, beta2));
+                trainer_c.set_learning_rate(learning_rate);
+                trainer_c.set_min_learning_rate(min_learning_rate);
                 trainer_c.set_mini_batch_size(mini_batch_size);
                 trainer_c.be_verbose();
                 trainer_c.set_iterations_without_progress_threshold(850);
+                trainer_c.set_synchronization_file("llm_shakespeare_model_a.ckp", std::chrono::minutes(5));
                 std::vector<matrix<int, 0, 1>> samples;
                 std::vector<unsigned long> labels;
                 size_t iteration = 0;
                 while (trainer_c.get_learning_rate() >= trainer_c.get_min_learning_rate() && !g_interrupt_signal_received) {
                     if (data.generate_samples(mini_batch_size, samples, labels, false)) trainer_c.train_one_step(samples, labels);
                     else g_interrupt_signal_received = true;
-                    if (iteration > 100 && trainer_c.get_average_loss() < 0.05) g_interrupt_signal_received = true;
+                    if (iteration > 300 && trainer_c.get_average_loss() <= 0.02) g_interrupt_signal_received = true;
                     else iteration++;
                 }
                 trainer_c.get_net();
@@ -2173,28 +2178,26 @@ Be all my sins remembered.)";
                     cout << "loaded " << shakespeare_data.get_total_tokens() << " tokens from " << shakespeare_file << endl;
 
                     // Reload previous model
-                    if (fs::exists("llm_shakespeare_model_b.dat")) {
-                        deserialize("llm_shakespeare_model_b.dat") >> net_c;
-                        cout << "shakespeare model loaded: llm_shakespeare_model_b.dat" << endl;
-                    } else if (fs::exists("llm_shakespeare_model_a.dat")) {
+                    if (!fs::exists("llm_shakespeare_model_b.ckp") && fs::exists("llm_shakespeare_model_a.dat")) {
                         deserialize("llm_shakespeare_model_a.dat") >> net_c;
                         cout << "shakespeare model loaded (source template): llm_shakespeare_model_a.dat" << endl;
                     } else {
-                        cout << "no previous model found, starting from scratch" << endl;
+                        cout << "no previous model found, starting from scratch or from last checkpoint" << endl;
                     }
-                    dnn_trainer<net_type_c, adam> trainer_d(net_c, adam(0.004, 0.9, 0.998));
-                    trainer_d.set_learning_rate(1e-3);
-                    trainer_d.set_min_learning_rate(1e-6);
+                    dnn_trainer<net_type_c, adam> trainer_d(net_c, adam(weight_decay, beta1, beta2));
+                    trainer_d.set_learning_rate(learning_rate);
+                    trainer_d.set_min_learning_rate(min_learning_rate);
                     trainer_d.set_mini_batch_size(mini_batch_size);
                     trainer_d.be_verbose();
                     trainer_d.set_iterations_without_progress_threshold(2000);
+                    trainer_d.set_synchronization_file("llm_shakespeare_model_b.ckp", std::chrono::minutes(5));
 
                     // New training loop
                     iteration = 0;
                     while (trainer_d.get_learning_rate() >= trainer_d.get_min_learning_rate() && !g_interrupt_signal_received) {
                         if (shakespeare_data.generate_samples(mini_batch_size, samples, labels, true)) trainer_d.train_one_step(samples, labels);                        
                         else g_interrupt_signal_received = true;
-                        if (iteration > 100 && trainer_d.get_average_loss() < 0.05) g_interrupt_signal_received = true;
+                        if (iteration > 300 && trainer_d.get_average_loss() <= 0.02) g_interrupt_signal_received = true;
                         else iteration++;
                     }
                     trainer_d.get_net();
@@ -2294,6 +2297,7 @@ Be all my sins remembered.)";
             concatenate_files(corpus_dir);
             return 1;
         }*/
+        std::vector<int> vocab_sizes = { 3000, 8000, 20000, 40000 };
         string corpus_files;
         for (const auto& entry : fs::recursive_directory_iterator(corpus_dir)) {
             if (entry.is_regular_file() && entry.path().extension() == ".txt") {
@@ -2301,21 +2305,35 @@ Be all my sins remembered.)";
             }
         }
         corpus_files.pop_back();
-        string train_args = "--input=" + corpus_files +
-            " --model_prefix=" + vocabulary_prefix +
-            " --bos_id=" + to_string(bos_id) + " --eos_id=" + to_string(eos_id) + " --unk_id=" + to_string(unk_id) + " --pad_id=" + to_string(pad_id) +
-            " --model_type=unigram" +
-            " --character_coverage=1.0" +
-            " --max_sentence_length=16768" +
-            " --split_by_unicode_script=false" +
-            " --input_sentence_size=3500000" +
-            " --shuffle_input_sentence=true" +
-            " --train_extremely_large_corpus=true" +            
-            " --vocab_size=" + to_string(vocab_size);
-        status = sentencepiece::SentencePieceTrainer::Train(train_args);
-        if (!status.ok()) {
-            cerr << "error: " << status.message() << endl;
-            return 1;
+
+        for (const auto& vocab_size : vocab_sizes) {
+            string size_suffix;
+            if (vocab_size == 3000) size_suffix = "3k";
+            else if (vocab_size == 8000) size_suffix = "8k";
+            else if (vocab_size == 20000) size_suffix = "20k";
+            else if (vocab_size == 40000) size_suffix = "40k";
+            string current_vocabulary_prefix = "ernie.en-fr.ung." + size_suffix;
+
+            string train_args = "--input=" + corpus_files +
+                " --model_prefix=" + current_vocabulary_prefix +
+                " --bos_id=" + to_string(bos_id) + " --eos_id=" + to_string(eos_id) +
+                " --unk_id=" + to_string(unk_id) + " --pad_id=" + to_string(pad_id) +
+                " --model_type=unigram" +
+                " --character_coverage=1.0" +
+                " --max_sentence_length=16768" +
+                " --split_by_unicode_script=false" +
+                " --input_sentence_size=3500000" +
+                " --shuffle_input_sentence=true" +
+                " --train_extremely_large_corpus=true" +
+                " --vocab_size=" + to_string(vocab_size);
+
+            auto status = sentencepiece::SentencePieceTrainer::Train(train_args);
+            if (!status.ok()) {
+                cerr << "error training tokenizer " << current_vocabulary_prefix << ": " << status.message() << endl;
+                return 1;
+            } else {
+                cout << "successfully trained tokenizer " << current_vocabulary_prefix << endl;
+            }
         }
     } else if (model_training) {
         if (fs::exists(vocabulary_prefix + ".model")) status = sp.Load(vocabulary_prefix + ".model");
