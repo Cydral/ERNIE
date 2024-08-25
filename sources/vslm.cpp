@@ -213,6 +213,9 @@ using utils::concatenate_files;
 
 namespace dlib {
     namespace cpu {
+/* TO BE ADDED TO <cpu_dlib.cpp> */
+// -----------------------------------------------------------------------------------
+
         void rms_normalize(
             const double eps,
             resizable_tensor& dest,
@@ -339,6 +342,57 @@ namespace dlib {
     }
 
     namespace tt {
+/* TO BE ADDED TO <tensor_tools.h> */
+// -----------------------------------------------------------------------------------
+
+        void rms_normalize(
+            const double eps,
+            resizable_tensor& dest,
+            resizable_tensor& scale,
+            const tensor& src,
+            const tensor& gamma
+        );
+        /*!
+            requires
+                - eps > 0
+                - src.num_samples() == gamma.size()
+                - gamma.num_samples() == gamma.nr() == gamma.nc() == 1
+            ensures
+                - have_same_dimensions(#dest, src) == true
+                - #scale.size() == src.num_samples()
+                - #dest == the RMS normalized version of src.
+                - #scale == the scaling factors used to normalize src.
+        !*/
+
+        void rms_normalize_gradient(
+            const double eps,
+            const tensor& gradient_input,
+            const tensor& scale,
+            const tensor& src,
+            const tensor& gamma,
+            tensor& src_grad,
+            tensor& gamma_grad
+        );
+        /*!
+            requires
+                - eps > 0
+                - scale should be the output of a call to
+                  rms_normalize(eps,dest,scale,src,gamma)
+                - have_same_dimensions(gradient_input, src) == true
+                - have_same_dimensions(src, src_grad) == true
+                - have_same_dimensions(gamma, gamma_grad) == true
+                - scale.size() == src.num_samples()
+                - have_same_dimensions(scale, gamma) == true
+            ensures
+                - Let f(src,gamma) == dot(gradient_input, dest output of
+                  rms_normalize(eps,dest,scale,src,gamma))
+                - Adds the gradient of f() with respect to src to #src_grad.
+                - Assigns the gradient of f() with respect to gamma to #gamma_grad.
+        !*/
+
+/* TO BE ADDED TO <tensor_tools.cpp> */
+// ----------------------------------------------------------------------------------------
+
         void rms_normalize(
             const double eps,
             resizable_tensor& dest,
@@ -372,15 +426,23 @@ namespace dlib {
         }
     }
 
+/* TO BE ADDED TO <layers.h> */
+// ----------------------------------------------------------------------------------------
+
     const double DEFAULT_RMS_NORM_EPS = 1e-5;
-    class rms_norm_ {
+
+    class rms_norm_
+    {
     public:
         explicit rms_norm_(
             double eps_ = DEFAULT_RMS_NORM_EPS
         ) :
             learning_rate_multiplier(1),
             weight_decay_multiplier(0),
-            eps(eps_) {}
+            eps(eps_)
+        {
+
+        }
 
         double get_eps() const { return eps; }
 
@@ -393,20 +455,23 @@ namespace dlib {
         inline dpoint map_output_to_input(const dpoint& p) const { return p; }
 
         template <typename SUBNET>
-        void setup(const SUBNET& sub) {
+        void setup(const SUBNET& sub)
+        {
             gamma = alias_tensor(1, sub.get_output().k(), sub.get_output().nr(), sub.get_output().nc());
             params.set_size(gamma.size());
             gamma(params, 0) = 1;
         }
 
         template <typename SUBNET>
-        void forward(const SUBNET& sub, resizable_tensor& output) {
+        void forward(const SUBNET& sub, resizable_tensor& output)
+        {
             auto g = gamma(params, 0);
             tt::rms_normalize(eps, output, scale, sub.get_output(), g);
         }
 
         template <typename SUBNET>
-        void backward(const tensor& gradient_input, SUBNET& sub, tensor& params_grad) {
+        void backward(const tensor& gradient_input, SUBNET& sub, tensor& params_grad)
+        {
             auto g = gamma(params, 0);
             auto g_grad = gamma(params_grad, 0);
             tt::rms_normalize_gradient(eps, gradient_input, scale, sub.get_output(), g, sub.get_gradient_input(), g_grad);
@@ -415,7 +480,8 @@ namespace dlib {
         const tensor& get_layer_params() const { return params; };
         tensor& get_layer_params() { return params; };
 
-        friend void serialize(const rms_norm_& item, std::ostream& out) {
+        friend void serialize(const rms_norm_& item, std::ostream& out)
+        {
             serialize("rms_norm_", out);
             serialize(item.params, out);
             serialize(item.gamma, out);
@@ -425,7 +491,8 @@ namespace dlib {
             serialize(item.eps, out);
         }
 
-        friend void deserialize(rms_norm_& item, std::istream& in) {
+        friend void deserialize(rms_norm_& item, std::istream& in)
+        {
             std::string version;
             deserialize(version, in);
             if (version != "rms_norm_")
@@ -438,7 +505,8 @@ namespace dlib {
             deserialize(item.eps, in);
         }
 
-        friend std::ostream& operator<<(std::ostream& out, const rms_norm_& item) {
+        friend std::ostream& operator<<(std::ostream& out, const rms_norm_& item)
+        {
             out << "rms_norm";
             out << " eps=" << item.eps;
             out << " learning_rate_mult=" << item.learning_rate_multiplier;
@@ -446,7 +514,8 @@ namespace dlib {
             return out;
         }
 
-        friend void to_xml(const rms_norm_& item, std::ostream& out) {
+        friend void to_xml(const rms_norm_& item, std::ostream& out)
+        {
             out << "rms_norm";
             out << " eps='" << item.eps << "'";
             out << " learning_rate_mult='" << item.learning_rate_multiplier << "'";
@@ -464,8 +533,11 @@ namespace dlib {
         double weight_decay_multiplier;
         double eps;
     };
+
     template <typename SUBNET>
     using rms_norm = add_layer<rms_norm_, SUBNET>;
+
+// ----------------------------------------------------------------------------------------
 
     void DBG_INFO(std::string dbg_msg) {
         if (!dbg_msg.empty()) cout << dbg_msg << endl;
