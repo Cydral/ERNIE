@@ -51,6 +51,7 @@
 #include <dlib/data_io.h>
 #include <sentencepiece_trainer.h>
 #include <sentencepiece_processor.h>
+#include "cuda_dlib_ext.cuh"
 #include "tokenizer.hpp"
 #include "data_fr.h"
 
@@ -238,22 +239,19 @@ namespace dlib {
             dest.copy_size(src);
             scale.set_size(src.num_samples());
 
-            // Compute RMS
-            scale = 0;
+            // Compute RMS            
             const auto p_scale = scale.host();
             auto p_src = src.host();
             for (long n = 0; n < src.num_samples(); ++n)
             {
+                float sum_squares = 0;
                 for (long i = 0; i < num; ++i)
                 {
                     float val = p_src[n * num + i];
-                    p_scale[n] += val * val;
+                    sum_squares += val * val;
                 }
+                p_scale[n] = sum_squares / num;
             }
-            scale /= num;
-            // copy data back to host
-            scale.host();
-
             // Compute RMS inverse
             for (long n = 0; n < src.num_samples(); ++n)
             {
@@ -267,8 +265,7 @@ namespace dlib {
             {
                 for (long i = 0; i < num; ++i)
                 {
-                    *p_dest = (*p_src) * p_scale[n];
-                    *p_dest = (*p_dest) * p_gamma[i];
+                    *p_dest = (*p_src) * p_scale[n] * p_gamma[i];
                     ++p_src;
                     ++p_dest;
                 }
@@ -322,7 +319,6 @@ namespace dlib {
                 }
             }
 
-            const float invnum = 1.0f / num;
             p_grad = gradient_input.host();
             p_src = src.host();
             auto p_src_grad = src_grad.host();
@@ -332,13 +328,47 @@ namespace dlib {
                 {
                     const float dx = *p_grad * p_gamma[i];
 
-                    *p_src_grad += dx * p_scale[n] + p_dscale[n] * 2 * (*p_src) * invnum;
+                    *p_src_grad += dx * p_scale[n] + p_dscale[n] * 2 * (*p_src) / num;
 
                     ++p_grad;
                     ++p_src;
                     ++p_src_grad;
                 }
             }
+        }
+    }
+
+    namespace tt {
+        void rms_normalize(
+            const double eps,
+            resizable_tensor& dest,
+            resizable_tensor& scale,
+            const tensor& src,
+            const tensor& gamma
+        )
+        {            
+#ifdef DLIB_USE_CUDA
+            cuda::rms_normalize(eps, dest, scale, src, gamma);
+#else
+            cpu::rms_normalize(eps, dest, scale, src, gamma);
+#endif
+        }
+
+        void rms_normalize_gradient(
+            const double eps,
+            const tensor& gradient_input,
+            const tensor& scale,
+            const tensor& src,
+            const tensor& gamma,
+            tensor& src_grad,
+            tensor& gamma_grad
+        )
+        {            
+#ifdef DLIB_USE_CUDA
+            cuda::rms_normalize_gradient(eps, gradient_input, scale, src, gamma, src_grad, gamma_grad);
+#else
+            cpu::rms_normalize_gradient(eps, gradient_input, scale, src, gamma, src_grad, gamma_grad);
+#endif
         }
     }
 
@@ -372,14 +402,14 @@ namespace dlib {
         template <typename SUBNET>
         void forward(const SUBNET& sub, resizable_tensor& output) {
             auto g = gamma(params, 0);
-            cpu::rms_normalize(eps, output, scale, sub.get_output(), g);
+            tt::rms_normalize(eps, output, scale, sub.get_output(), g);
         }
 
         template <typename SUBNET>
         void backward(const tensor& gradient_input, SUBNET& sub, tensor& params_grad) {
             auto g = gamma(params, 0);
             auto g_grad = gamma(params_grad, 0);
-            cpu::rms_normalize_gradient(eps, gradient_input, scale, sub.get_output(), g, sub.get_gradient_input(), g_grad);
+            tt::rms_normalize_gradient(eps, gradient_input, scale, sub.get_output(), g, sub.get_gradient_input(), g_grad);
         }
 
         const tensor& get_layer_params() const { return params; };
@@ -1753,7 +1783,7 @@ int main(int argc, char* argv[]) {
     bool do_benchmark = false, text_generation = false;
     bool voc_training = false, model_training = false, model_prompting = false, use_sync_file = false;
     double learning_rate = 1e-3, min_learning_rate = 1e-6, weight_decay = 0.001, beta1 = 0.9, beta2 = 0.999, temperature = 0.9;
-    long mini_batch_size = 16, iterations_without_progress_threshold = 1500, top_k = 3;
+    long mini_batch_size = 32, iterations_without_progress_threshold = 8500, top_k = 3;
     std::vector<int> gpus = { 0 };
     set_dnn_prefer_fastest_algorithms();
        
@@ -1825,9 +1855,10 @@ int main(int argc, char* argv[]) {
             false,      // 4: softmax layer
             false,      // 5: attention mechanism
             false,      // 6: add_prev1 layer
-            true,       // 7: simple network
-            true,       // 8: multihead attention model
-            false       // 9: "shakespeare" example
+            false,      // 7: rms_norm layer
+            true,       // 8: simple network
+            true,       // 9: multihead attention model
+            false       // 10: "shakespeare" example
         };
 
         // test: tokenization
@@ -2188,6 +2219,76 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // test: rms_norm layer
+        if (!skip_tests[7]) {
+            if (display_debug_info) cout << "\ntest: rms_norm layer\n";
+            {
+                resizable_tensor x(2, 3, 4, 5);
+                resizable_tensor y_cpu(x);
+                tt::tensor_rand rnd(0);
+                rnd.fill_uniform(x);
+                resizable_tensor scale_cpu(x.num_samples());
+                resizable_tensor gamma(1, x.k(), x.nr(), x.nc());
+                gamma = 1;
+                const float eps = 1e-5;
+                cpu::rms_normalize(eps, y_cpu, scale_cpu, x, gamma);
+
+                // check that the RMS per sample is close to 1 and that the scale is correctly applied
+                const float* p_x = x.host();
+                const float* p_y = y_cpu.host();
+                const float* p_scale = scale_cpu.host();
+                for (long n = 0; n < y_cpu.num_samples(); ++n) {
+                    double sum_squared_x = 0;
+                    double sum_squared_y = 0;
+                    long count = 0;
+                    for (long k = 0; k < y_cpu.k(); ++k) {
+                        for (long r = 0; r < y_cpu.nr(); ++r) {
+                            for (long c = 0; c < y_cpu.nc(); ++c) {
+                                float val_x = p_x[tensor_index(x, n, k, r, c)];
+                                float val_y = p_y[tensor_index(y_cpu, n, k, r, c)];
+                                sum_squared_x += val_x * val_x;
+                                sum_squared_y += val_y * val_y;
+                                count++;
+                            }
+                        }
+                    }
+
+                    // Calculate RMS of input and output
+                    float rms_x = std::sqrt(sum_squared_x / count);
+                    float rms_y = std::sqrt(sum_squared_y / count);
+
+                    // Check that output RMS is close to 1
+                    DLIB_TEST_MSG(std::abs(rms_y - 1.0f) < 1e-4,
+                        "rms_norm layer, abs(rms_y - 1.0f) < 1e-4, got " << rms_y);
+
+                    // Check that the computed scale correctly transforms input RMS to output RMS
+                    float computed_scale = p_scale[n];
+                    float expected_scale = 1.0f / std::sqrt(sum_squared_x / count + eps);
+                    DLIB_TEST_MSG(std::abs(computed_scale - expected_scale) < 1e-5,
+                        "rms_norm layer, abs(computed_scale - expected_scale) < 1e-5, got "
+                        << computed_scale << " vs expected " << expected_scale);
+                }
+                // check that the CPU and the CUDA implementation are equivalent 
+#ifdef DLIB_USE_CUDA 
+                resizable_tensor y_cuda(x);
+                resizable_tensor scale_cuda(x.num_samples());
+                cuda::rms_normalize(eps, y_cuda, scale_cuda, x, gamma);
+                DLIB_TEST_MSG(max(abs(mat(y_cpu) - mat(y_cuda))) < 1e-5, "rms_norm layer, max(abs(mat(y_cpu) - mat(y_cuda))) < 1e-5");
+                DLIB_TEST_MSG(max(abs(mat(scale_cpu) - mat(scale_cuda))) < 1e-5, "rms_norm layer, max(abs(mat(scale_cpu) - mat(scale_cuda))) < 1e-5");
+                resizable_tensor gradient_input(x);
+                resizable_tensor src_grad_cpu(x), gamma_grad_cpu(1, x.k(), x.nr(), x.nc());
+                resizable_tensor src_grad_cuda(x), gamma_grad_cuda(1, x.k(), x.nr(), x.nc());
+                rnd.fill_gaussian(gradient_input);
+                src_grad_cpu = 0;
+                src_grad_cuda = 0;
+                cpu::rms_normalize_gradient(eps, gradient_input, scale_cpu, x, gamma, src_grad_cpu, gamma_grad_cpu);
+                cuda::rms_normalize_gradient(eps, gradient_input, scale_cuda, x, gamma, src_grad_cuda, gamma_grad_cuda);
+                DLIB_TEST_MSG(max(abs(mat(src_grad_cpu) - mat(src_grad_cuda))) < 1e-5, "rms_norm layer, max(abs(mat(src_grad_cpu) - mat(src_grad_cuda))) < 1e-5");
+                DLIB_TEST_MSG(max(abs(mat(gamma_grad_cpu) - mat(gamma_grad_cuda))) < 1e-5, "rms_norm layer, max(abs(mat(gamma_grad_cpu) - mat(gamma_grad_cuda))) < 1e-5");
+#endif 
+            }
+        }
+
         // test: training using a attention mask block
         if (display_debug_info) cout << "\ntest: training attention models\n";
         {
@@ -2273,7 +2374,7 @@ Be all my sins remembered.)";
             }
 
             // Train the most simple network
-            if (!skip_tests[7]) {
+            if (!skip_tests[8]) {
                 dnn_trainer<net_type_a> trainer_a(net_a);
                 trainer_a.set_learning_rate(learning_rate);
                 trainer_a.set_min_learning_rate(min_learning_rate);
@@ -2298,7 +2399,7 @@ Be all my sins remembered.)";
             }
             
             // Train now multihead attention model
-            if (!skip_tests[8]) {
+            if (!skip_tests[9]) {
                 dnn_trainer<net_type_b> trainer_b(net_b);
                 trainer_b.set_learning_rate(learning_rate);
                 trainer_b.set_min_learning_rate(min_learning_rate);
@@ -2320,7 +2421,7 @@ Be all my sins remembered.)";
             }
 
             // "shakespeare" example
-            if (!skip_tests[9]) {
+            if (!skip_tests[10]) {
                 // Lambda function to convert a vector of integers to a string of unsigned chars
                 auto to_unsigned_char_string = [](const matrix<int, 0, 1>& ints) -> string {
                     string result;
@@ -2347,16 +2448,16 @@ Be all my sins remembered.)";
                 cout << "samples used for the training: " << samples_txt.size() << endl;
                 std::vector<unsigned long> labels_txt;
                 for (size_t i = 0; i < samples_txt.size(); ++i) labels_txt.push_back(static_cast<unsigned long>(shakespeare_text[i + sequence_size])); // Next character as label
-                dnn_trainer<net_type_c, adam> trainer_c(net_c, adam(weight_decay, beta1, beta2));
+                dnn_trainer<net_type_c, adam> trainer_c(net_c, adam(weight_decay, beta1, beta2), gpus);
                 trainer_c.set_learning_rate(learning_rate);
                 trainer_c.set_min_learning_rate(min_learning_rate);
                 trainer_c.set_mini_batch_size(mini_batch_size);
                 trainer_c.be_verbose();                
                 trainer_c.set_synchronization_file("llm_shakespeare_model_a.ckp", std::chrono::minutes(5));
-                trainer_c.set_iterations_without_progress_threshold(80);
+                trainer_c.set_iterations_without_progress_threshold(250);
                 std::vector<matrix<int, 0, 1>> samples;
                 std::vector<unsigned long> labels;
-                if (trainer_c.get_learning_rate() < trainer_c.get_min_learning_rate()) {
+                if (trainer_c.get_learning_rate() >= trainer_c.get_min_learning_rate()) {
                     while (trainer_c.get_learning_rate() >= trainer_c.get_min_learning_rate() && !g_interrupt_signal_received) {
                         if (data.generate_samples(mini_batch_size, samples, labels, false)) trainer_c.train_one_step(samples, labels);
                         else g_interrupt_signal_received = true;
@@ -2402,19 +2503,26 @@ Be all my sins remembered.)";
                     cout << "loaded " << shakespeare_data.get_total_tokens() << " tokens from " << shakespeare_file << endl;
 
                     // Reload previous model
-                    if (!fs::exists("llm_shakespeare_model_b.ckp") && fs::exists("llm_shakespeare_model_a.dat")) {
-                        deserialize("llm_shakespeare_model_a.dat") >> net_c;
-                        cout << "shakespeare model loaded (source template): llm_shakespeare_model_a.dat" << endl;
+                    if (!fs::exists("llm_shakespeare_model_b.ckp")) {
+                        if (!fs::exists("llm_shakespeare_model_b.dat") && fs::exists("llm_shakespeare_model_a.dat")) {
+                            deserialize("llm_shakespeare_model_a.dat") >> net_c;
+                            cout << "shakespeare model loaded (source template): llm_shakespeare_model_a.dat" << endl;
+                        } else if (fs::exists("llm_shakespeare_model_b.dat")) {
+                            deserialize("llm_shakespeare_model_b.dat") >> net_c;
+                            cout << "shakespeare model loaded: llm_shakespeare_model_b.dat" << endl;
+                        } else {
+                            cout << "no previous model found, starting from scratch" << endl;
+                        }
                     } else {
-                        cout << "no previous model found, starting from scratch or from last checkpoint" << endl;
+                        cout << "restarting from from the last checkpoint" << endl;
                     }
-                    dnn_trainer<net_type_c, adam> trainer_d(net_c, adam(weight_decay, beta1, beta2));
+                    dnn_trainer<net_type_c, adam> trainer_d(net_c, adam(weight_decay, beta1, beta2), gpus);
                     trainer_d.set_learning_rate(learning_rate);
                     trainer_d.set_min_learning_rate(min_learning_rate);
                     trainer_d.set_mini_batch_size(mini_batch_size);
                     trainer_d.be_verbose();                    
                     trainer_d.set_synchronization_file("llm_shakespeare_model_b.ckp", std::chrono::minutes(5));
-                    trainer_d.set_iterations_without_progress_threshold(500);
+                    trainer_d.set_iterations_without_progress_threshold(7500);
 
                     // New training loop
                     while (trainer_d.get_learning_rate() >= trainer_d.get_min_learning_rate() && !g_interrupt_signal_received) {
@@ -2436,9 +2544,9 @@ Be all my sins remembered.)";
                         cout << "generated sonnet:\n\n";
                         for (int i = 0; i < 700 && !input_tokens.empty(); ++i) {
                             unsigned long next_char = net_c(input_tokens.back());
-                            char c = static_cast<unsigned char>(next_char);
+                            unsigned char c = static_cast<unsigned char>(next_char);
                             generated_sonnet += c;
-                            cout << to_string(c);
+                            cout << c;
                             if (c == '\n') generated_sonnet += '\n';  // Double newline for readability
                             cout << "\n";
 
@@ -2574,7 +2682,7 @@ Be all my sins remembered.)";
         my_trainer.set_min_learning_rate(min_learning_rate);
         my_trainer.set_iterations_without_progress_threshold(iterations_without_progress_threshold);
         my_trainer.set_mini_batch_size(mini_batch_size);
-        if (use_sync_file) my_trainer.set_synchronization_file(model_sync_filename, std::chrono::seconds(120));
+        if (use_sync_file) my_trainer.set_synchronization_file(model_sync_filename, std::chrono::minutes(5));
         my_trainer.be_verbose();
         if (!fs::exists(model_sync_filename) && fs::exists(language_model)) deserialize(language_model) >> net;
         std::ostringstream oss;
