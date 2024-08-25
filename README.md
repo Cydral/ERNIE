@@ -17,7 +17,7 @@ ERNIE (Efficient Rapid Neural Intelligence Engine) addresses these challenges by
 ERNIE is an ongoing development project that demonstrates the implementation of a compact yet powerful language model using Dlib. Key aspects of the project include:
 
 - **Environment**: Primarily designed for Microsoft Windows (console mode), compilable with Microsoft Visual Studio 2022 64-bit (version 17.8.5 used in development).
-- **Hardware Utilization**: Supports both GPU (CUDA - NVidia cuDNN v12.6) and CPU operations, with compile-time options for flexibility.
+- **Hardware Utilization**: Supports both GPU (CUDA v12.6) and CPU operations, with compile-time options for flexibility.
 - **Cross-Platform Potential**: With minimal adaptations, the codebase can be ported to Linux environments.
 
 > **Note**: This project is in active development and stabilization. While initial results are promising, users should expect ongoing improvements and potential changes.
