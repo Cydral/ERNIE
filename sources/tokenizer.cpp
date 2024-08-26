@@ -1,10 +1,3 @@
-//
-//  tokenizer.cpp
-//
-//  Created by MNN on 2023/09/25.
-//  ZhaodeWang
-//
-
 #include "tokenizer.hpp"
 #include <windows.h>
 #include <fstream>
@@ -16,67 +9,20 @@
 #include <regex>
 #include <set>
 #include <climits>
+#include <dlib/base64.h>
 
 // base64
-static const std::string base64_chars =
-             "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-             "abcdefghijklmnopqrstuvwxyz"
-             "0123456789+/";
-
-static inline bool is_base64(unsigned char c) {
-    return (isalnum(c) || (c == '+') || (c == '/'));
+static std::string base64_decode(const std::string& str) {
+    dlib::base64 decoder;
+    std::istringstream sin;
+    std::ostringstream sout;    
+    sin.str(str);
+    decoder.decode(sin, sout);
+    return sout.str();
 }
 
 static inline size_t one_char_len(const char *src) {
   return "\1\1\1\1\1\1\1\1\1\1\1\1\2\2\3\4"[(*src & 0xFF) >> 4];
-}
-
-static std::string base64_decode(const std::string& str) {
-    int in_len = str.size();
-    int i = 0;
-    int j = 0;
-    int in_ = 0;
-    unsigned char char_array_4[4], char_array_3[3];
-    std::string ret;
-
-    while (in_len-- && ( str[in_] != '=') && is_base64(str[in_])) {
-        char_array_4[i++] = str[in_]; in_++;
-        if (i ==4) {
-            for (i = 0; i <4; i++) {
-                char_array_4[i] = base64_chars.find(char_array_4[i]);
-            }
-            char_array_3[0] = (char_array_4[0] << 2) + ((char_array_4[1] & 0x30) >> 4);
-            char_array_3[1] = ((char_array_4[1] & 0xf) << 4) + ((char_array_4[2] & 0x3c) >> 2);
-            char_array_3[2] = ((char_array_4[2] & 0x3) << 6) + char_array_4[3];
-            for (i = 0; (i < 3); i++) {
-                ret.push_back(char_array_3[i]);
-            }
-            i = 0;
-        }
-    }
-    if (i) {
-        for (j = i; j < 4; j++) {
-            char_array_4[j] = 0;
-        }
-        for (j = 0; j < 4; j++) {
-            char_array_4[j] = base64_chars.find(char_array_4[j]);
-        }
-        char_array_3[0] = (char_array_4[0] << 2) + ((char_array_4[1] & 0x30) >> 4);
-        char_array_3[1] = ((char_array_4[1] & 0xf) << 4) + ((char_array_4[2] & 0x3c) >> 2);
-        char_array_3[2] = ((char_array_4[2] & 0x3) << 6) + char_array_4[3];
-        for (j = 0; (j < i - 1); j++) {
-            ret.push_back(char_array_3[j]);
-        }
-    }
-    return ret;
-}
-
-static inline void to_lower_case(std::string& str) {
-    for (auto &c : str) {
-        if (c >= 'A' && c <= 'Z') {
-            c = std::tolower(static_cast<unsigned char>(c));
-        }
-    }
 }
 
 Tokenizer* Tokenizer::createTokenizer(const std::string& filename) {
@@ -84,7 +30,7 @@ Tokenizer* Tokenizer::createTokenizer(const std::string& filename) {
     // check file
     std::ifstream tok_file(filename);
     if (!tok_file.good()) {
-        printf("Failed: can't load tokenzier from: %s.\n", filename.c_str());
+        std::cerr << "Failed: can't load tokenzier from: " << filename << std::endl;
         return tokenizer;
     }
     // check tokenizer info
@@ -94,18 +40,18 @@ Tokenizer* Tokenizer::createTokenizer(const std::string& filename) {
     int magic_number, tokenizer_type;
     line_str >> magic_number;
     if (magic_number != MAGIC_NUMBER) {
-        printf("Failed: magic number is wrong from: %s.\n", filename.c_str());
+        std::cerr << "Failed: magic number is wrong from: " << filename << std::endl;
         return tokenizer;
     }
     line_str >> tokenizer_type;
-    printf("tokenizer_type = %d\n", tokenizer_type);
+    std::cout << "tokenizer_type = " << std::to_string(tokenizer_type) << std::endl;
     // create tokenizer
     switch (tokenizer_type)
     {
         case SENTENCEPIECE:
             tokenizer = new Sentencepiece();
             break;
-        case TIKTOIKEN:
+        case TIKTOKEN:
             tokenizer = new Tiktoken();
             break;
         case BERT:
@@ -140,26 +86,26 @@ void Tokenizer::load_special(std::ifstream& tok_file) {
     int special_num, stop_num, prefix_num;
     line_str >> special_num >> stop_num >> prefix_num;
     std::getline(tok_file, line);
-    std::istringstream specail_line(line);
+    std::istringstream special_line(line);
     if (special_num) {
         // load special tokens
         special_tokens_.resize(special_num);
         for (int i = 0; i < special_num; i++) {
-            specail_line >> special_tokens_[i];
+            special_line >> special_tokens_[i];
         }
     }
     if (stop_num) {
         // load stop tokens
         stop_tokens_.resize(stop_num);
         for (int i = 0; i < stop_num; i++) {
-            specail_line >> stop_tokens_[i];
+            special_line >> stop_tokens_[i];
         }
     }
     if (prefix_num) {
         // load prefix tokens
         prefix_tokens_.resize(prefix_num);
         for (int i = 0; i < prefix_num; i++) {
-            specail_line >> prefix_tokens_[i];
+            special_line >> prefix_tokens_[i];
         }
     }
 }
@@ -302,7 +248,7 @@ Sentencepiece::EncodeResult Sentencepiece::bpe_encode(string_view_ normalized, f
     while (!normalized.empty()) {
         Symbol s;
         // const int mblen = matcher_->PrefixMatch(normalized, &s.freeze);
-        int mblen = std::min<int>(normalized.size(), one_char_len(normalized.data()));
+        size_t mblen = std::min<size_t>(normalized.size(), one_char_len(normalized.data()));
         s.piece = string_view_(normalized.data(), mblen);
         s.prev = index == 0 ? -1 : index - 1;
         normalized.remove_prefix(mblen);
@@ -410,10 +356,8 @@ void Sentencepiece::encode(const std::string& str, std::vector<int>& ids) {
 
 std::string Sentencepiece::decode(int id) {
     auto piece = sentence_pieces_[id].piece;
-    int pos = piece.find("▁");
-    if (pos != -1) {
-        piece.replace(pos, pos + 3, " ");
-    }
+    size_t pos = piece.find("▁");
+    if (pos != std::string::npos) piece.replace(pos, pos + 3, " ");
     return piece;
 }
 
@@ -496,7 +440,7 @@ std::vector<int> BertTokenizer::word_piece(const std::string& token) {
     while (!current.empty()) {
         int match_id = -1;
         size_t match_pos = 0;
-        for (int len = current.size(); len > 0; --len) {
+        for (int len = static_cast<int>(current.size()); len > 0; --len) {
             std::string candidate = current.substr(0, len);
             if (!ids.empty()) {
                 candidate = "##" + candidate;
@@ -628,9 +572,9 @@ bool HuggingfaceTokenizer::load_vocab(std::ifstream& tok_file) {
     };
 
     b2u_.clear();
-    _insert_range(L'!', L'~');
-    _insert_range(L'¡', L'¬');
-    _insert_range(L'®', L'ÿ');
+    _insert_range(0x0021, 0x007E);  // Unicode range for '!' to '~'
+    _insert_range(0x00A1, 0x00AC);  // Unicode range for '¡' to '¬'
+    _insert_range(0x00AE, 0x00FF);  // Unicode range for '®' to 'ÿ'
 
     int n = 0;
     for (int b = 0; b < 256; b++) {
@@ -741,10 +685,7 @@ void HuggingfaceTokenizer::encode(const std::string& str, std::vector<int>& ids)
 }
 
 std::string HuggingfaceTokenizer::decode(int id) {
-    // printf("decode id = %d, %lu, %s#\n", id, decoder_.size(), decoder_.at(id).c_str());
-    if (id >= decoder_.size()) {
-        return "";
-    }
+    if (id >= decoder_.size()) return "";
     std::wstring w = utf8_to_wstring(decoder_.at(id));
     std::string r;
     for (wchar_t c : w) {

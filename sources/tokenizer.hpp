@@ -8,34 +8,84 @@
 #include <iostream>
 #include <cstring>
 
-class string_view_ {
+// ----------------------------------------------------------------------------------------
+
+class string_view_
+{
+    /*!
+        WHAT THIS OBJECT REPRESENTS
+            This class represents a non-owning reference to a string or a substring.
+            It's a lightweight alternative to std::string_view for environments where
+            C++17 features are not available.
+
+            This implementation provides basic functionalities similar to std::string_view,
+            including:
+                - Non-owning views of strings
+                - Constant time operations for most methods
+                - No memory allocations
+
+            IMPORTANT:
+                If you are using a C++17 compliant compiler or newer, it is recommended
+                to use std::string_view instead. std::string_view offers better optimization,
+                more comprehensive functionality, and better integration with the C++
+                standard library.
+
+        THREAD SAFETY
+            It is safe to access const methods of this object from multiple threads.
+            However, any operation that modifies the object is not thread-safe.
+    !*/
+
 public:
     string_view_() : data_(nullptr), size_(0) {}
-    string_view_(const char* data) : data_(data), size_(std::strlen(data)) {}
+    string_view_(const char* data) : data_(data), size_(data ? std::strlen(data) : 0) {}
     string_view_(const char* data, std::size_t size) : data_(data), size_(size) {}
     string_view_(const std::string& str) : data_(str.data()), size_(str.size()) {}
     constexpr string_view_(const string_view_&) noexcept = default;
     string_view_& operator=(const string_view_&) noexcept = default;
-    const char& operator[](size_t pos) const { return data_[pos]; }
+
+    const char& operator[](size_t pos) const
+    {
+        if (pos >= size_) throw std::out_of_range("Index out of range");
+        return data_[pos];
+    }
     constexpr const char* data() const noexcept { return data_; }
     constexpr std::size_t size() const noexcept { return size_; }
-    constexpr bool empty() const { return size_ == 0; }
+    constexpr bool empty() const noexcept { return size_ == 0; }
     std::string to_string() const { return std::string(data_, size_); }
-    bool operator==(const string_view_& other) const noexcept {
-        return size_ == other.size_ && strncmp(data_, other.data_, size_) == 0;
+
+    bool operator==(const string_view_& other) const noexcept
+    {
+        return size_ == other.size_ && (data_ == other.data_ || std::memcmp(data_, other.data_, size_) == 0);
     }
-    void remove_prefix(size_t n) {
-        if (n < size_) {
-            data_ += n;
-            size_ -= n;
-        } else {
-            data_ = "";
-            size_ = 0;
+    bool operator!=(const string_view_& other) const noexcept
+    {
+        return !(*this == other);
+    }
+
+    void remove_prefix(size_t n)
+    {
+        n = std::min(n, size_);
+        data_ += n;
+        size_ -= n;
+    }
+
+    const char* begin() const noexcept { return data_; }
+    const char* end() const noexcept { return data_ + size_; }
+
+    int compare(string_view_ s) const noexcept
+    {
+        const size_t rlen = std::min(size_, s.size_);
+        int result = std::memcmp(data_, s.data_, rlen);
+        if (result == 0) {
+            if (size_ < s.size_) result = -1;
+            else if (size_ > s.size_) result = 1;
         }
+        return result;
     }
+
 private:
     const char* data_;
-    std::size_t size_ = 0;
+    std::size_t size_;
 };
 
 namespace std {
@@ -57,7 +107,7 @@ public:
     static constexpr int MAGIC_NUMBER = 430;
     enum TokenizerType {
         SENTENCEPIECE = 0,
-        TIKTOIKEN = 1,
+        TIKTOKEN = 1,
         BERT = 2,
         HUGGINGFACE = 3
     };
