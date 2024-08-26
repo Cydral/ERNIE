@@ -631,12 +631,22 @@ namespace dlib {
         }
     }
 
-    class dropout_10_ : public dropout_ {
+    // ----------------------------------------------------------------------------------------
+    /* TO BE ADDED TO <layers_abstract.h> & <layers.h> */
+    template <float DROP_RATE>
+    class dropout_custom_ : public dropout_
+    {
     public:
-        explicit dropout_10_() : dropout_(0.10f) { }
+        explicit dropout_custom_() : dropout_(DROP_RATE)
+        {
+            DLIB_CASSERT(0 <= DROP_RATE && DROP_RATE <= 1,
+                "DROP_RATE must be between 0 and 1, inclusive.");
+        }
     };
+    template <float DROP_RATE, typename SUBNET>
+    using dropout_custom = add_layer<dropout_custom_<DROP_RATE>, SUBNET>;
     template <typename SUBNET>
-    using dropout_10 = add_layer<dropout_10_, SUBNET>;
+    using dropout_10 = add_layer<dropout_custom_<0.10f>, SUBNET>;
 
     template<int num_embeddings_, int embedding_dim_, bool is_trainable_>
     class embedding_ {
