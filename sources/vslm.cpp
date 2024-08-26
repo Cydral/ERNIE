@@ -40,10 +40,6 @@
 #include <algorithm>
 #include <io.h>
 #include <fcntl.h>
-#include <codecvt>
-#include <cctype>
-#include <ciso646>
-#include <windows.h>
 #include <boost/program_options.hpp>
 #include <dlib/dnn.h>
 #include <dlib/matrix.h>
@@ -51,8 +47,10 @@
 #include <dlib/data_io.h>
 #include <sentencepiece_trainer.h>
 #include <sentencepiece_processor.h>
+#ifdef DLIB_USE_CUDA
 #include "cuda_dlib_ext.cuh"
-#include "tokenizer.hpp"
+#endif // DLIB_USE_CUDA
+#include "advanced_tokenizer.hpp"
 #include "data_fr.h"
 
 namespace fs = std::filesystem;
@@ -73,7 +71,7 @@ constexpr int bos_id = 0, eos_id = 1, unk_id = 2, pad_id = 3;
 constexpr float neg_inf = -1e9;
 const float epsilon = 1e-5;
 string vocabulary_prefix = "ernie.en-fr.ung.8k", language_model = "ernie_vslm_v1.dat";
-std::unique_ptr<Tokenizer> tokenizer_;
+std::unique_ptr<advanced_tokenizer> tokenizer_;
 
 #define DLIB_TEST_MSG(cond, msg) \
     do { \
