@@ -40,6 +40,7 @@
 #include <algorithm>
 #include <io.h>
 #include <fcntl.h>
+#include <atomic>
 #include <boost/program_options.hpp>
 #include <dlib/dnn.h>
 #include <dlib/matrix.h>
@@ -698,25 +699,30 @@ namespace dlib {
         }
 
         template <typename SUBNET>
-        void forward(const SUBNET& sub, resizable_tensor& output) {            
+        void forward(const SUBNET& sub, resizable_tensor& output) {
             const auto& prev = sub.get_output();
             output.set_size(prev.num_samples(), 1, prev.nr(), embedding_dim);
 
             const float* prev_data = prev.host();
             float* output_data = output.host();
             const float* embeddings_data = embeddings.host();
+            long num_samples = output.num_samples(), nr = output.nr(), nc = output.nc();
 
-            for (int s = 0; s < output.num_samples(); ++s) {
-                for (int r = 0; r < output.nr(); ++r) {
-                    int token_idx = static_cast<int>(prev_data[tensor_index(prev, s, 0, r, 0)]);
+            for (long s = 0; s < num_samples; ++s) {
+                parallel_for(0, nr, [&](long r) {
+                    long token_idx = static_cast<long>(prev_data[tensor_index(prev, s, 0, r, 0)]);
                     if (token_idx < num_embeddings) {
-                        for (int c = 0; c < output.nc(); ++c) {
+                        for (long c = 0; c < nc; ++c) {
                             output_data[tensor_index(output, s, 0, r, c)] = embeddings_data[tensor_index(embeddings, token_idx, c, 0, 0)];
                         }
-                    } else {
-                        cout << "Warning: token_idx (" << token_idx << ") exceeds num_embeddings (" << num_embeddings << ")" << endl;
                     }
-                }
+                    else {
+                        // Thread-safe logging of warning
+                        static std::mutex cout_mutex;
+                        std::lock_guard<std::mutex> lock(cout_mutex);
+                        std::cout << "Warning: token_idx (" << token_idx << ") exceeds num_embeddings (" << num_embeddings << ")" << std::endl;
+                    }
+                });
             }
         }
 
@@ -728,19 +734,29 @@ namespace dlib {
                 const float* prev_data = prev.host();
                 const float* gradient_input_data = gradient_input.host();
                 float* embeddings_data = embeddings.host();
+                long num_samples = gradient_input.num_samples(), nr = gradient_input.nr(), nc = gradient_input.nc();
 
-                for (int s = 0; s < gradient_input.num_samples(); ++s) {
-                    for (int r = 0; r < gradient_input.nr(); ++r) {
-                        int token_idx = static_cast<int>(prev_data[tensor_index(prev, s, 0, r, 0)]);
+                for (long s = 0; s < num_samples; ++s) {
+                    parallel_for(0, nr, [&](long r) {
+                        long token_idx = static_cast<long>(prev_data[tensor_index(prev, s, 0, r, 0)]);
                         if (token_idx < num_embeddings) {
-                            for (int c = 0; c < gradient_input.nc(); ++c) {
-                                embeddings_data[tensor_index(embeddings, token_idx, c, 0, 0)] -=
-                                    (learning_rate_multiplier * gradient_input_data[tensor_index(gradient_input, s, 0, r, c)]);
-                            }                            
-                        } else {
-                            cout << "Warning: token_idx (" << token_idx << ") exceeds num_embeddings (" << num_embeddings << ")" << endl;
+                            for (long c = 0; c < nc; ++c) {
+                                float& embedding = embeddings_data[tensor_index(embeddings, token_idx, c, 0, 0)];
+                                float gradient = gradient_input_data[tensor_index(gradient_input, s, 0, r, c)];
+                                float update = learning_rate_multiplier * gradient;
+
+                                // Use atomic operation for thread-safe update
+                                std::atomic<float>* atomic_embedding = reinterpret_cast<std::atomic<float>*>(&embedding);
+                                atomic_embedding->fetch_sub(update, std::memory_order_relaxed);
+                            }
                         }
-                    }
+                        else {
+                            // Thread-safe logging of warning
+                            static std::mutex cout_mutex;
+                            std::lock_guard<std::mutex> lock(cout_mutex);
+                            std::cout << "Warning: token_idx (" << token_idx << ") exceeds num_embeddings (" << num_embeddings << ")" << std::endl;
+                        }
+                    });
                 }
             }
         }
@@ -808,17 +824,18 @@ namespace dlib {
         }
 
         template <typename SUBNET>
-        void forward(const SUBNET& sub, resizable_tensor& output) {            
+        void forward(const SUBNET& sub, resizable_tensor& output) {
             const auto& prev_output = sub.get_output();
             DLIB_CASSERT(prev_output.k() == 1);
             output.set_size(prev_output.num_samples(), prev_output.k(), prev_output.nr(), prev_output.nc());
+            long num_samples = output.num_samples(), nr = output.nr(), nc = output.nc();
 
-            for (int s = 0; s < output.num_samples(); ++s) {
-                for (int r = 0; r < output.nr(); ++r) {
-                    for (int c = 0; c < output.nc(); ++c) {
+            for (long s = 0; s < num_samples; ++s) {
+                parallel_for(0, nr, [&](long r) {
+                    for (long c = 0; c < nc; ++c) {
                         output.host()[tensor_index(output, s, 0, r, c)] = pe.host()[tensor_index(pe, r, c, 0, 0)];
                     }
-                }
+                });
             }
         }
         template <typename SUBNET>
@@ -1049,6 +1066,95 @@ namespace dlib {
     using linear = add_layer<linear_<num_outputs, LINEAR_HAS_BIAS>, SUBNET>;
     template <unsigned long num_outputs, typename SUBNET>
     using linear_no_bias = add_layer<linear_<num_outputs, LINEAR_NO_BIAS>, SUBNET>;
+
+    // ----------------------------------------------------------------------------------------
+    class flatten_
+    {
+    public:
+        flatten_() = default;
+
+        template <typename SUBNET>
+        void setup(const SUBNET& /*sub*/)
+        {
+            // No setup needed for flatten layer
+        }
+
+        template <typename SUBNET>
+        void forward(const SUBNET& sub, resizable_tensor& output)
+        {
+            const auto& input = sub.get_output();
+            output.set_size(input.num_samples(), input.k() * input.nr() * input.nc(), 1, 1);
+
+            // Flatten the input tensor
+            float* out_data = output.host();
+            const float* in_data = input.host();
+            const long total_elements = input.k() * input.nr() * input.nc();
+
+            for (long n = 0; n < input.num_samples(); ++n)
+            {
+                for (long i = 0; i < total_elements; ++i)
+                {
+                    out_data[n * total_elements + i] = in_data[n * total_elements + i];
+                }
+            }
+        }
+
+        template <typename SUBNET>
+        void backward(
+            const tensor& gradient_input,
+            SUBNET& sub,
+            tensor& /*params_grad*/
+        )
+        {
+            const auto& input = sub.get_output();
+            tensor& grad = sub.get_gradient_input();
+
+            const float* gin = gradient_input.host();
+            float* gout = grad.host();
+            const long total_elements = input.k() * input.nr() * input.nc();
+
+            for (long n = 0; n < input.num_samples(); ++n)
+            {
+                for (long i = 0; i < total_elements; ++i)
+                {
+                    gout[n * total_elements + i] = gin[n * total_elements + i];
+                }
+            }
+        }
+
+        const tensor& get_layer_params() const { return params; }
+        tensor& get_layer_params() { return params; }
+
+        friend void serialize(const flatten_& /*item*/, std::ostream& out)
+        {
+            serialize("flatten_", out);
+        }
+
+        friend void deserialize(flatten_& /*item*/, std::istream& in)
+        {
+            std::string version;
+            deserialize(version, in);
+            if (version != "flatten_")
+                throw serialization_error("Unexpected version '" + version + "' found while deserializing dlib::flatten_.");
+        }
+
+        friend std::ostream& operator<<(std::ostream& out, const flatten_& /*item*/)
+        {
+            out << "flatten";
+            return out;
+        }
+
+        friend void to_xml(const flatten_& /*item*/, std::ostream& out)
+        {
+            out << "<flatten/>\n";
+        }
+
+    private:
+        resizable_tensor params; // Empty tensor, as flatten has no learnable parameters
+    };
+
+    template <typename SUBNET>
+    using flatten = add_layer<flatten_, SUBNET>;
 
     class transpose_ {
     public:
@@ -1618,7 +1724,9 @@ namespace dlib {
 
     // Classification head
     template <int num_logits, typename SUBNET>
-    using classification_head = loss_multiclass_log<fc<num_logits, SUBNET>>;
+    using classification_head_fc = loss_multiclass_log<fc<num_logits, SUBNET>>;
+    template <int num_logits, typename SUBNET>
+    using classification_head = loss_multiclass_log<flatten<linear<num_logits, SUBNET>>>;
 
     // Full minimalistic network
     using sh_llm_net = classification_head<vocab_size,
@@ -2415,7 +2523,7 @@ And lose the name of action.—Soft you now,
 The fair Ophelia.—Nymph, in thy orisons
 Be all my sins remembered.)";
 
-            using net_type_a = classification_head<num_classes,
+            using net_type_a = classification_head_fc<num_classes,
                 feed_forward_fc<embedding_size,
                 single_head_attention_block<embedding_size,                
                 tag10<input<matrix<float>>>>>>;
