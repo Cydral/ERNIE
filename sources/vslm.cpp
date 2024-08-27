@@ -62,10 +62,10 @@ using namespace dlib;
 
 // Global parameters for the Transformer network
 constexpr int vocab_size = 8000;                                            // Size of the vocabulary
-constexpr int sequence_size = 32;                                           // Length of the sequence
+constexpr int sequence_size = 20;                                           // Length of the sequence
 constexpr int number_of_heads = 4;                                          // Number of attention heads
 constexpr int number_of_blocks = 6;                                         // Number of transformer blocks
-constexpr int embedding_size = (64 / number_of_heads) * number_of_heads;   // Size of the embedding
+constexpr int embedding_size = (32 / number_of_heads) * number_of_heads;   // Size of the embedding
 constexpr int bos_id = 0, eos_id = 1, unk_id = 2, pad_id = 3;
 
 // Other global parameters
@@ -1900,7 +1900,7 @@ int main(int argc, char* argv[]) {
     sentencepiece::SentencePieceProcessor sp;
     sentencepiece::util::Status status;
     if (do_benchmark) {
-        constexpr bool display_debug_info = true;
+        constexpr bool display_debug_info = false;
         constexpr bool skip_tests[] = {
             false,      // 0: strings & tokenization
             false,      // 1: extract_matrix() & update_matrix()
@@ -2393,7 +2393,7 @@ Be all my sins remembered.)";
                 tag10<input<matrix<float>>>>>>;
             net_type_a net_a;
             using net_type_b = classification_head<num_classes,
-                rms_norm<repeat<3, transformer_block,
+                rms_norm<repeat<2, transformer_block,
                 embeddings<sequence_size, num_classes, embedding_size,
                 input<matrix<int, 0, 1>>>>>>;
             net_type_b net_b;            
