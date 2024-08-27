@@ -65,7 +65,7 @@ constexpr int vocab_size = 8000;                                            // S
 constexpr int sequence_size = 32;                                           // Length of the sequence
 constexpr int number_of_heads = 4;                                          // Number of attention heads
 constexpr int number_of_blocks = 6;                                         // Number of transformer blocks
-constexpr int embedding_size = (128 / number_of_heads) * number_of_heads;   // Size of the embedding
+constexpr int embedding_size = (64 / number_of_heads) * number_of_heads;   // Size of the embedding
 constexpr int bos_id = 0, eos_id = 1, unk_id = 2, pad_id = 3;
 
 // Other global parameters
@@ -1068,56 +1068,63 @@ namespace dlib {
     using linear_no_bias = add_layer<linear_<num_outputs, LINEAR_NO_BIAS>, SUBNET>;
 
     // ----------------------------------------------------------------------------------------
-    class flatten_
-    {
+    const int DEFAULT_NUM_HEADS = 4;
+
+    template <int nb_heads>
+    class split_heads_ {
     public:
-        flatten_() = default;
+        split_heads_(int nb_heads_ = DEFAULT_NUM_HEADS) : num_heads(nb_heads_) {}
 
         template <typename SUBNET>
-        void setup(const SUBNET& /*sub*/)
-        {
-            // No setup needed for flatten layer
+        void setup(const SUBNET& sub) {
+            const auto& input = sub.get_output();
+            DLIB_CASSERT(input.k() == 1, "Input must have k() == 1");
+            DLIB_CASSERT(num_heads > 1 && input.nc() % num_heads == 0, "Input dimension must be divisible by number of heads");
         }
 
         template <typename SUBNET>
         void forward(const SUBNET& sub, resizable_tensor& output)
         {
             const auto& input = sub.get_output();
-            output.set_size(input.num_samples(), input.k() * input.nr() * input.nc(), 1, 1);
+            long batch_size = input.num_samples();
+            long seq_length = input.nr();
+            long embed_dim = input.nc();
+            long head_dim = embed_dim / num_heads;
 
-            // Flatten the input tensor
-            float* out_data = output.host();
-            const float* in_data = input.host();
-            const long total_elements = input.k() * input.nr() * input.nc();
-
-            for (long n = 0; n < input.num_samples(); ++n)
+            output.set_size(batch_size, num_heads, seq_length, head_dim);
+            for (long n = 0; n < batch_size; ++n)
             {
-                for (long i = 0; i < total_elements; ++i)
+                for (long h = 0; h < num_heads; ++h)
                 {
-                    out_data[n * total_elements + i] = in_data[n * total_elements + i];
+                    for (long s = 0; s < seq_length; ++s)
+                    {
+                        const float* in_ptr = input.host() + ((n * seq_length + s) * embed_dim + h * head_dim);
+                        float* out_ptr = output.host() + ((n * num_heads + h) * seq_length + s) * head_dim;
+                        std::memcpy(out_ptr, in_ptr, head_dim * sizeof(float));
+                    }
                 }
             }
         }
 
         template <typename SUBNET>
-        void backward(
-            const tensor& gradient_input,
-            SUBNET& sub,
-            tensor& /*params_grad*/
-        )
+        void backward(const tensor& gradient_input, SUBNET& sub, tensor& /*params_grad*/)
         {
-            const auto& input = sub.get_output();
-            tensor& grad = sub.get_gradient_input();
+            auto& grad = sub.get_gradient_input();
+            long batch_size = grad.num_samples();
+            long seq_length = grad.nr();
+            long embed_dim = grad.nc();
+            long head_dim = embed_dim / num_heads;
 
-            const float* gin = gradient_input.host();
-            float* gout = grad.host();
-            const long total_elements = input.k() * input.nr() * input.nc();
-
-            for (long n = 0; n < input.num_samples(); ++n)
+            for (long n = 0; n < batch_size; ++n)
             {
-                for (long i = 0; i < total_elements; ++i)
+                for (long h = 0; h < num_heads; ++h)
                 {
-                    gout[n * total_elements + i] = gin[n * total_elements + i];
+                    for (long s = 0; s < seq_length; ++s)
+                    {
+                        const float* in_ptr = gradient_input.host() + ((n * num_heads + h) * seq_length + s) * head_dim;
+                        float* out_ptr = grad.host() + ((n * seq_length + s) * embed_dim + h * head_dim);
+                        for (long d = 0; d < head_dim; ++d) out_ptr[d] += in_ptr[d];
+                    }
                 }
             }
         }
@@ -1125,36 +1132,34 @@ namespace dlib {
         const tensor& get_layer_params() const { return params; }
         tensor& get_layer_params() { return params; }
 
-        friend void serialize(const flatten_& /*item*/, std::ostream& out)
-        {
-            serialize("flatten_", out);
+        friend void serialize(const split_heads_& item, std::ostream& out) {
+            serialize("split_heads_", out);
+            serialize(item.num_heads, out);
         }
-
-        friend void deserialize(flatten_& /*item*/, std::istream& in)
-        {
+        friend void deserialize(split_heads_& item, std::istream& in) {
             std::string version;
             deserialize(version, in);
-            if (version != "flatten_")
-                throw serialization_error("Unexpected version '" + version + "' found while deserializing dlib::flatten_.");
+            if (version != "split_heads_")
+                throw serialization_error("Unexpected version '" + version + "' found while deserializing dlib::split_heads_.");
+            deserialize(item.num_heads, in);
         }
 
-        friend std::ostream& operator<<(std::ostream& out, const flatten_& /*item*/)
-        {
-            out << "flatten";
+        friend std::ostream& operator<<(std::ostream& out, const split_heads_& item) {
+            out << "split_heads (" << "num_heads=" << item.num_heads << ")";
             return out;
         }
-
-        friend void to_xml(const flatten_& /*item*/, std::ostream& out)
-        {
-            out << "<flatten/>\n";
+        friend void to_xml(const split_heads_& item, std::ostream& out) {
+            out << "<split_heads num_heads='" << item.num_heads << "''>\n";
+            out << "</split_heads>\n";
         }
 
     private:
-        resizable_tensor params; // Empty tensor, as flatten has no learnable parameters
+        resizable_tensor params; // Not used
+        int num_heads;
     };
 
-    template <typename SUBNET>
-    using flatten = add_layer<flatten_, SUBNET>;
+    template <int num_heads, typename SUBNET>
+    using split_heads = add_layer<split_heads_<num_heads>, SUBNET>;
 
     class transpose_ {
     public:
@@ -1377,9 +1382,9 @@ namespace dlib {
     using multm_prev4_ = multm_prev_<tag4>;
     using multm_prev5_ = multm_prev_<tag5>;
 
-    class stackm_ {
+    class hstack_ {
     public:
-        stackm_() {}
+        hstack_() {}
         template <typename SUBNET> void setup(const SUBNET& /* sub */) {}
 
         template <typename SUBNET> void forward(const SUBNET& sub, resizable_tensor& output) {
@@ -1412,28 +1417,28 @@ namespace dlib {
         const tensor& get_layer_params() const { return params; }
         tensor& get_layer_params() { return params; }
 
-        friend void serialize(const stackm_& /* item */, std::ostream& out) {
-            serialize("stackm_", out);
+        friend void serialize(const hstack_& /* item */, std::ostream& out) {
+            serialize("hstack_", out);
         }
-        friend void deserialize(stackm_& /* item */, std::istream& in) {
+        friend void deserialize(hstack_& /* item */, std::istream& in) {
             std::string version;
             deserialize(version, in);
-            if (version != "stackm_")
-                throw serialization_error("Unexpected version '" + version + "' found while deserializing dlib::stackm_.");
+            if (version != "hstack_")
+                throw serialization_error("Unexpected version '" + version + "' found while deserializing dlib::hstack_.");
         }
 
-        friend std::ostream& operator<<(std::ostream& out, const stackm_& /* item */) {
-            out << "stackm";
+        friend std::ostream& operator<<(std::ostream& out, const hstack_& /* item */) {
+            out << "hstack";
             return out;
         }
-        friend void to_xml(const stackm_& /* item */, std::ostream& out) {
-            out << "<stackm />\n";
+        friend void to_xml(const hstack_& /* item */, std::ostream& out) {
+            out << "<hstack />\n";
         }
     private:
         dlib::resizable_tensor params; // Unused
     };
     template <typename SUBNET>
-    using stackm = add_layer<stackm_, SUBNET>;
+    using hstack = add_layer<hstack_, SUBNET>;
 
     template <unsigned long number_of_heads_, unsigned long embedding_dim_>
     class scale_weights_ : public multiply_ {
@@ -1542,124 +1547,6 @@ namespace dlib {
     template <typename SUBNET>
     using softmaxm = add_layer<softmaxm_, SUBNET>;
 
-    // head layer definitions
-    template <template<typename> class TAG1, template<typename> class TAG2, typename SUBNET>
-    using head2 = add_layer<concat_<TAG1, TAG2>, SUBNET>;
-    template <template<typename> class TAG1, template<typename> class TAG2,
-        template<typename> class TAG3, template<typename> class TAG4, typename SUBNET>
-    using head4 = add_layer<concat_<TAG1, TAG2, TAG3, TAG4>, SUBNET>;
-    template <template<typename> class TAG1, template<typename> class TAG2,
-        template<typename> class TAG3, template<typename> class TAG4, 
-        template<typename> class TAG5, template<typename> class TAG6, typename SUBNET>
-    using head6 = add_layer<concat_<TAG1, TAG2, TAG3, TAG4, TAG5, TAG6>, SUBNET>;
-    /*template <template<typename> class TAG1, template<typename> class TAG2,
-        template<typename> class TAG3, template<typename> class TAG4,
-        template<typename> class TAG5, template<typename> class TAG6,
-        template<typename> class TAG7, template<typename> class TAG8, typename SUBNET>
-    using head8 = add_layer<concat_<TAG1, TAG2, TAG3, TAG4, TAG5, TAG6, TAG7, TAG8>, SUBNET>;
-    template <template<typename> class TAG1, template<typename> class TAG2,
-        template<typename> class TAG3, template<typename> class TAG4,
-        template<typename> class TAG5, template<typename> class TAG6,
-        template<typename> class TAG7, template<typename> class TAG8,
-        template<typename> class TAG9, template<typename> class TAG10, typename SUBNET>
-    using head10 = add_layer<concat_<TAG1, TAG2, TAG3, TAG4, TAG5, TAG6, TAG7, TAG8, TAG9, TAG10>, SUBNET>;
-    template <template<typename> class TAG1, template<typename> class TAG2,
-        template<typename> class TAG3, template<typename> class TAG4,
-        template<typename> class TAG5, template<typename> class TAG6,
-        template<typename> class TAG7, template<typename> class TAG8,
-        template<typename> class TAG9, template<typename> class TAG10,
-        template<typename> class TAG11, template<typename> class TAG12, typename SUBNET>
-    using head12 = add_layer<concat_<TAG1, TAG2, TAG3, TAG4, TAG5, TAG6, TAG7, TAG8, TAG9, TAG10, TAG11, TAG12>, SUBNET>;
-    template <template<typename> class TAG1, template<typename> class TAG2,
-        template<typename> class TAG3, template<typename> class TAG4,
-        template<typename> class TAG5, template<typename> class TAG6,
-        template<typename> class TAG7, template<typename> class TAG8,
-        template<typename> class TAG9, template<typename> class TAG10,
-        template<typename> class TAG11, template<typename> class TAG12,
-        template<typename> class TAG13, template<typename> class TAG14, typename SUBNET>
-    using head14 = add_layer<concat_<TAG1, TAG2, TAG3, TAG4, TAG5, TAG6, TAG7, TAG8, TAG9, TAG10, TAG11, TAG12, TAG13, TAG14>, SUBNET>;
-    template <template<typename> class TAG1, template<typename> class TAG2,
-        template<typename> class TAG3, template<typename> class TAG4,
-        template<typename> class TAG5, template<typename> class TAG6,
-        template<typename> class TAG7, template<typename> class TAG8,
-        template<typename> class TAG9, template<typename> class TAG10,
-        template<typename> class TAG11, template<typename> class TAG12,
-        template<typename> class TAG13, template<typename> class TAG14,
-        template<typename> class TAG15, template<typename> class TAG16, typename SUBNET>
-    using head16 = add_layer<concat_<TAG1, TAG2, TAG3, TAG4, TAG5, TAG6, TAG7, TAG8, TAG9, TAG10, TAG11, TAG12, TAG13, TAG14, TAG15, TAG16>, SUBNET>;*/
-
-    template <typename SUBNET> using htag0 = add_tag_layer<1500 + 0, SUBNET>;
-    template <typename SUBNET> using htag1 = add_tag_layer<1500 + 1, SUBNET>;
-    template <typename SUBNET> using htag2 = add_tag_layer<1500 + 2, SUBNET>;
-    template <typename SUBNET> using htag3 = add_tag_layer<1500 + 3, SUBNET>;
-    template <typename SUBNET> using htag4 = add_tag_layer<1500 + 4, SUBNET>;
-    template <typename SUBNET> using htag5 = add_tag_layer<1500 + 5, SUBNET>;
-    template <typename SUBNET> using htag6 = add_tag_layer<1500 + 6, SUBNET>;
-    /*template <typename SUBNET> using htag7 = add_tag_layer<1500 + 7, SUBNET>;
-    template <typename SUBNET> using htag8 = add_tag_layer<1500 + 8, SUBNET>;
-    template <typename SUBNET> using htag9 = add_tag_layer<1500 + 9, SUBNET>;
-    template <typename SUBNET> using htag10 = add_tag_layer<1500 + 10, SUBNET>;
-    template <typename SUBNET> using htag11 = add_tag_layer<1500 + 11, SUBNET>;
-    template <typename SUBNET> using htag12 = add_tag_layer<1500 + 12, SUBNET>;
-    template <typename SUBNET> using htag13 = add_tag_layer<1500 + 13, SUBNET>;
-    template <typename SUBNET> using htag14 = add_tag_layer<1500 + 14, SUBNET>;
-    template <typename SUBNET> using htag15 = add_tag_layer<1500 + 15, SUBNET>;
-    template <typename SUBNET> using htag16 = add_tag_layer<1500 + 16, SUBNET>;*/
-    template <typename SUBNET> using hskip = add_skip_layer<htag0, SUBNET>;
-
-    template <template<typename>class B1, template<typename>class B2, typename SUBNET>
-    using multihead_2 = head2<htag1, htag2,
-        htag1<B1<hskip< htag2<B2< htag0<SUBNET>>>>>>>;
-    template <template<typename>class B1, template<typename>class B2,
-        template<typename>class B3, template<typename>class B4, typename SUBNET>
-    using multihead_4 = head4<htag1, htag2, htag3, htag4,
-        htag1<B1<hskip< htag2<B2<hskip< htag3<B3<hskip< htag4<B4< htag0<SUBNET>>>>>>>>>>>>>;
-    template <template<typename>class B1, template<typename>class B2,
-        template<typename>class B3, template<typename>class B4, 
-        template<typename>class B5, template<typename>class B6, typename SUBNET>
-    using multihead_6 = head6<htag1, htag2, htag3, htag4, htag5, htag6,
-        htag1<B1<hskip< htag2<B2<hskip< htag3<B3<hskip< htag4<B4<hskip< htag5<B5<hskip< htag6<B6< htag0<SUBNET>>>>>>>>>>>>>>>>>>>;
-    /*template <template<typename>class B1, template<typename>class B2,
-        template<typename>class B3, template<typename>class B4,
-        template<typename>class B5, template<typename>class B6,
-        template<typename>class B7, template<typename>class B8, typename SUBNET>
-    using multihead_8 = head8<htag1, htag2, htag3, htag4, htag5, htag6, htag7, htag8,
-        htag1<B1<hskip< htag2<B2<hskip< htag3<B3<hskip< htag4<B4<hskip< htag5<B5<hskip< htag6<B6<hskip< htag7<B7<hskip< htag8<B8< htag0<SUBNET>>>>>>>>>>>>>>>>>>>>>>>>>;
-    template <template<typename>class B1, template<typename>class B2,
-        template<typename>class B3, template<typename>class B4,
-        template<typename>class B5, template<typename>class B6,
-        template<typename>class B7, template<typename>class B8,
-        template<typename>class B9, template<typename>class B10, typename SUBNET>
-    using multihead_10 = head10<htag1, htag2, htag3, htag4, htag5, htag6, htag7, htag8, htag9, htag10,
-        htag1<B1<hskip< htag2<B2<hskip< htag3<B3<hskip< htag4<B4<hskip< htag5<B5<hskip< htag6<B6<hskip< htag7<B7<hskip< htag8<B8<hskip< htag9<B9<hskip< htag10<B10< htag0<SUBNET>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>;
-    template <template<typename>class B1, template<typename>class B2,
-        template<typename>class B3, template<typename>class B4,
-        template<typename>class B5, template<typename>class B6,
-        template<typename>class B7, template<typename>class B8,
-        template<typename>class B9, template<typename>class B10,
-        template<typename>class B11, template<typename>class B12, typename SUBNET>
-    using multihead_12 = head12<htag1, htag2, htag3, htag4, htag5, htag6, htag7, htag8, htag9, htag10, htag11, htag12,
-        htag1<B1<hskip< htag2<B2<hskip< htag3<B3<hskip< htag4<B4<hskip< htag5<B5<hskip< htag6<B6<hskip< htag7<B7<hskip< htag8<B8<hskip< htag9<B9<hskip< htag10<B10<hskip< htag11<B11<hskip< htag12<B12< htag0<SUBNET>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>;
-    template <template<typename>class B1, template<typename>class B2,
-        template<typename>class B3, template<typename>class B4,
-        template<typename>class B5, template<typename>class B6,
-        template<typename>class B7, template<typename>class B8,
-        template<typename>class B9, template<typename>class B10,
-        template<typename>class B11, template<typename>class B12,
-        template<typename>class B13, template<typename>class B14, typename SUBNET>
-    using multihead_14 = head14<htag1, htag2, htag3, htag4, htag5, htag6, htag7, htag8, htag9, htag10, htag11, htag12, htag13, htag14,
-        htag1<B1<hskip< htag2<B2<hskip< htag3<B3<hskip< htag4<B4<hskip< htag5<B5<hskip< htag6<B6<hskip< htag7<B7<hskip< htag8<B8<hskip< htag9<B9<hskip< htag10<B10<hskip< htag11<B11<hskip< htag12<B12<hskip< htag13<B13<hskip< htag14<B14< htag0<SUBNET>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>;
-    template <template<typename>class B1, template<typename>class B2,
-        template<typename>class B3, template<typename>class B4,
-        template<typename>class B5, template<typename>class B6,
-        template<typename>class B7, template<typename>class B8,
-        template<typename>class B9, template<typename>class B10,
-        template<typename>class B11, template<typename>class B12,
-        template<typename>class B13, template<typename>class B14,
-        template<typename>class B15, template<typename>class B16, typename SUBNET>
-    using multihead_16 = head16<htag1, htag2, htag3, htag4, htag5, htag6, htag7, htag8, htag9, htag10, htag11, htag12, htag13, htag14, htag15, htag16,
-        htag1<B1<hskip< htag2<B2<hskip< htag3<B3<hskip< htag4<B4<hskip< htag5<B5<hskip< htag6<B6<hskip< htag7<B7<hskip< htag8<B8<hskip< htag9<B9<hskip< htag10<B10<hskip< htag11<B11<hskip< htag12<B12<hskip< htag13<B13<hskip< htag14<B14<hskip< htag15<B15<hskip< htag16<B16< htag0<SUBNET>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>;*/
-
     // Basic layers for Query, Key, and Value
     template <int num_filters_out, typename SUBNET>
     using query = linear_no_bias<num_filters_out, SUBNET>;
@@ -1668,76 +1555,55 @@ namespace dlib {
     template <int num_filters_out, typename SUBNET>
     using value = linear_no_bias<num_filters_out, SUBNET>;
 
-    // Core masked attention block
+    // Core masked multihead attention block
     template <int embedding_dim, int nb_heads, typename SUBNET>
-    using core_masked_attention_block =
+    using multihead_attention_block =
+        add_prev3<
+        linear<embedding_dim,
+        hstack<
         multm_prev1<
         dropout_10<softmaxm<
         masked_attention<
         scale_weights<nb_heads, embedding_dim,
         multm_prev2<
-        query<embedding_dim/nb_heads, skip3<
-        tag2<transpose<key<embedding_dim/nb_heads, skip3<
-        tag1<value<embedding_dim/nb_heads,
-        SUBNET>>>>>>>>>>>>>>;
-
-    // Single-Head Attention
-    template <int embedding_dim, typename SUBNET>
-    using single_head_attention_block =
-        rms_norm<add_prev3<
-        dropout_10<linear_no_bias<embedding_size,
-        core_masked_attention_block<embedding_size, number_of_heads,
-        tag3<
-        SUBNET>>>>>>;
-    
-    // Multihead Attention Block
-    template <typename SUBNET>
-    using iblock = core_masked_attention_block<embedding_size, number_of_heads, SUBNET>;
-    template <typename SUBNET>
-    using multihead_attention_block =
-        rms_norm<add_prev3<
-        dropout_10<linear_no_bias<embedding_size,
-        stackm<
-        multihead_4<iblock, iblock, iblock, iblock,
-        tag3<SUBNET>>>>>>>;
+        split_heads<nb_heads, query<embedding_dim, skip3<
+        tag2<transpose<split_heads<nb_heads, key<embedding_dim, skip3<
+        tag1<split_heads<nb_heads, value<embedding_dim,
+        rms_norm<
+        tag3<SUBNET>>>>>>>>>>>>>>>>>>>>>>;
 
     // Feedforward blocks
     template <int embedding_dim, typename SUBNET>
     using feed_forward_fc =
-        rms_norm<add_prev5<
+        add_prev5<
         scale5<con<1, 1, 1, 1, 1,
         fc<embedding_size,
         dropout_10<gelu<bn_fc<fc<embedding_size * 4,
+        rms_norm<
         tag5<SUBNET>>>>>>>>>>;
     template <int embedding_dim, typename SUBNET>
-    using feed_forward_linear =
-        rms_norm<add_prev5<
+    using feed_forward =
+        add_prev5<
         linear<embedding_size,
         dropout_10<gelu<linear<embedding_size * 4,
+        rms_norm<
         tag5<SUBNET>>>>>>>;
 
     // Transformer block
     template <typename SUBNET>
     using transformer_block =
-        feed_forward_linear<embedding_size,
-        multihead_attention_block<SUBNET>>;
+        feed_forward<embedding_size,
+        multihead_attention_block<embedding_size, number_of_heads, SUBNET>>;
 
     // Classification head
     template <int num_logits, typename SUBNET>
-    using classification_head_fc = loss_multiclass_log<fc<num_logits, SUBNET>>;
-    template <int num_logits, typename SUBNET>
-    using classification_head = loss_multiclass_log<flatten<linear<num_logits, SUBNET>>>;
+    using classification_head = loss_multiclass_log<fc<num_logits, SUBNET>>;
 
-    // Full minimalistic network
-    using sh_llm_net = classification_head<vocab_size,
-        feed_forward_linear<embedding_size,
-        single_head_attention_block<embedding_size,
+    // VSLM network
+    using llm_net = classification_head<vocab_size,        
+        rms_norm<repeat<number_of_blocks, transformer_block,
         embeddings<sequence_size, vocab_size, embedding_size,
         input<matrix<int, 0, 1>>>>>>;
-    using mh_llm_net = classification_head<vocab_size,
-        repeat<number_of_blocks, transformer_block,
-        embeddings<sequence_size, vocab_size, embedding_size,
-        input<matrix<int, 0, 1>>>>>;
 }
 
 constexpr size_t std_global_context_size = (5 * sequence_size);
@@ -2034,7 +1900,7 @@ int main(int argc, char* argv[]) {
     sentencepiece::SentencePieceProcessor sp;
     sentencepiece::util::Status status;
     if (do_benchmark) {
-        constexpr bool display_debug_info = false;
+        constexpr bool display_debug_info = true;
         constexpr bool skip_tests[] = {
             false,      // 0: strings & tokenization
             false,      // 1: extract_matrix() & update_matrix()
@@ -2044,9 +1910,8 @@ int main(int argc, char* argv[]) {
             false,      // 5: attention mechanism
             false,      // 6: add_prev1 layer
             false,      // 7: rms_norm layer
-            true,       // 8: simple network
-            true,       // 9: multihead attention model
-            false       // 10: "shakespeare" example
+            true,       // 8: multihead attention model
+            false       // 9: "shakespeare" example
         };
 
         // test: tokenization
@@ -2523,20 +2388,15 @@ And lose the name of action.—Soft you now,
 The fair Ophelia.—Nymph, in thy orisons
 Be all my sins remembered.)";
 
-            using net_type_a = classification_head_fc<num_classes,
-                feed_forward_fc<embedding_size,
-                single_head_attention_block<embedding_size,                
+            using net_type_a = classification_head<num_classes,
+                rms_norm<repeat<2, transformer_block,
                 tag10<input<matrix<float>>>>>>;
             net_type_a net_a;
             using net_type_b = classification_head<num_classes,
-                repeat<2, transformer_block,
-                tag10<input<matrix<float>>>>>;
-            net_type_b net_b;
-            using net_type_c = classification_head<num_classes,
-                repeat<3, transformer_block,
+                rms_norm<repeat<3, transformer_block,
                 embeddings<sequence_size, num_classes, embedding_size,
-                input<matrix<int, 0, 1>>>>>;
-            net_type_c net_c;            
+                input<matrix<int, 0, 1>>>>>>;
+            net_type_b net_b;            
 
             // Generate synthetic training data
             dlib::rand rnd;
@@ -2560,35 +2420,10 @@ Be all my sins remembered.)";
                 batches.push_back(batch_samples);
                 label_batches.push_back(batch_labels);
             }
-
-            // Train the most simple network
+           
+            // Train multihead attention model
             if (!skip_tests[8]) {
-                dnn_trainer<net_type_a> trainer_a(net_a);
-                trainer_a.set_learning_rate(learning_rate);
-                trainer_a.set_min_learning_rate(min_learning_rate);
-                trainer_a.set_mini_batch_size(mini_batch_size);
-                trainer_a.be_verbose();
-                trainer_a.set_iterations_without_progress_threshold(1500);
-                for (int epoch = 0; epoch < num_epochs && trainer_a.get_learning_rate() > trainer_a.get_min_learning_rate() && !g_interrupt_signal_received; ++epoch) {
-                    for (size_t i = 0; i < batches.size(); ++i) trainer_a.train_one_step(batches[i], label_batches[i]);
-                }
-                trainer_a.get_net();
-                net_a.clean();
-                cout << "single-head attention model parameters: " << count_parameters(net_a) << endl;
-                g_interrupt_signal_received = false;
-
-                // Test the network with the same data to ensure it has learned something
-                std::vector<unsigned long> predicted_labels_a = net_a(samples);
-                int num_correct_a = 0;
-                for (size_t i = 0; i < labels.size(); ++i) if (predicted_labels_a[i] == labels[i]) ++num_correct_a;
-                double accuracy_a = static_cast<double>(num_correct_a) / labels.size();
-                // Ensure the accuracy is reasonable (for synthetic data, we might not expect perfect accuracy)
-                DLIB_TEST_MSG(accuracy_a > 0.8, "single-head attention model (accuracy: " + to_string(accuracy_a) + ")");
-            }
-            
-            // Train now multihead attention model
-            if (!skip_tests[9]) {
-                dnn_trainer<net_type_b> trainer_b(net_b);
+                dnn_trainer<net_type_a> trainer_b(net_a);
                 trainer_b.set_learning_rate(learning_rate);
                 trainer_b.set_min_learning_rate(min_learning_rate);
                 trainer_b.set_mini_batch_size(mini_batch_size);
@@ -2598,10 +2433,10 @@ Be all my sins remembered.)";
                     for (size_t i = 0; i < batches.size(); ++i) trainer_b.train_one_step(batches[i], label_batches[i]);
                 }
                 trainer_b.get_net();
-                net_b.clean();
-                cout << "multihead attention model parameters: " << count_parameters(net_b) << endl;
+                net_a.clean();
+                cout << "multihead attention model parameters: " << count_parameters(net_a) << endl;
                 g_interrupt_signal_received = false;
-                std::vector<unsigned long> predicted_labels_b = net_b(samples);
+                std::vector<unsigned long> predicted_labels_b = net_a(samples);
                 int num_correct_b = 0;
                 for (size_t i = 0; i < labels.size(); ++i) if (predicted_labels_b[i] == labels[i]) ++num_correct_b;
                 double accuracy_b = static_cast<double>(num_correct_b) / labels.size();
@@ -2609,7 +2444,7 @@ Be all my sins remembered.)";
             }
 
             // "shakespeare" example
-            if (!skip_tests[10]) {
+            if (!skip_tests[9]) {
                 // Lambda function to convert a vector of integers to a string of unsigned chars
                 auto to_unsigned_char_string = [](const matrix<int, 0, 1>& ints) -> string {
                     string result;
@@ -2636,7 +2471,7 @@ Be all my sins remembered.)";
                 cout << "samples used for the training: " << samples_txt.size() << endl;
                 std::vector<unsigned long> labels_txt;
                 for (size_t i = 0; i < samples_txt.size(); ++i) labels_txt.push_back(static_cast<unsigned long>(shakespeare_text[i + sequence_size])); // Next character as label
-                dnn_trainer<net_type_c, adam> trainer_c(net_c, adam(weight_decay, beta1, beta2), gpus);
+                dnn_trainer<net_type_b, adam> trainer_c(net_b, adam(weight_decay, beta1, beta2), gpus);
                 trainer_c.set_learning_rate(learning_rate);
                 trainer_c.set_min_learning_rate(min_learning_rate);
                 trainer_c.set_mini_batch_size(mini_batch_size);
@@ -2651,14 +2486,14 @@ Be all my sins remembered.)";
                         else g_interrupt_signal_received = true;
                     }
                     trainer_c.get_net();
-                    net_c.clean();
-                    serialize("llm_shakespeare_model_a.dat") << net_c;
+                    net_b.clean();
+                    serialize("llm_shakespeare_model_a.dat") << net_b;
                     cout << "shakespeare model saved: llm_shakespeare_model_a.dat" << endl;
-                    cout << "shakespeare model parameters: " << count_parameters(net_c) << endl;
+                    cout << "shakespeare model parameters: " << count_parameters(net_b) << endl;
                     g_interrupt_signal_received = false;
 
                     // Test the network with the same data to ensure it has learned something
-                    std::vector<unsigned long> predicted_labels_c = net_c(samples_txt);
+                    std::vector<unsigned long> predicted_labels_c = net_b(samples_txt);
                     int num_correct_c = 0;
                     for (size_t i = 0; i < labels_txt.size(); ++i) if (predicted_labels_c[i] == labels_txt[i]) ++num_correct_c;
                     double accuracy_c = static_cast<double>(num_correct_c) / labels_txt.size();
@@ -2673,7 +2508,7 @@ Be all my sins remembered.)";
                     cout << "input sequence for text generation: <" << start_seq << ">" << endl;
                     matrix<int> next_input(sequence_size, 1);
                     for (int i = 0; i < 400; ++i) {
-                        unsigned long next_char = net_c(input_tokens.back());
+                        unsigned long next_char = net_b(input_tokens.back());
                         input_sequence += static_cast<unsigned char>(next_char);
                         for (int j = 0; j < (sequence_size - 1); ++j) next_input(j, 0) = input_tokens.back()(j + 1, 0);
                         next_input(sequence_size - 1, 0) = static_cast<int>(next_char);
@@ -2693,10 +2528,10 @@ Be all my sins remembered.)";
                     // Reload previous model
                     if (!fs::exists("llm_shakespeare_model_b.ckp")) {
                         if (!fs::exists("llm_shakespeare_model_b.dat") && fs::exists("llm_shakespeare_model_a.dat")) {
-                            deserialize("llm_shakespeare_model_a.dat") >> net_c;
+                            deserialize("llm_shakespeare_model_a.dat") >> net_b;
                             cout << "shakespeare model loaded (source template): llm_shakespeare_model_a.dat" << endl;
                         } else if (fs::exists("llm_shakespeare_model_b.dat")) {
-                            deserialize("llm_shakespeare_model_b.dat") >> net_c;
+                            deserialize("llm_shakespeare_model_b.dat") >> net_b;
                             cout << "shakespeare model loaded: llm_shakespeare_model_b.dat" << endl;
                         } else {
                             cout << "no previous model found, starting from scratch" << endl;
@@ -2704,7 +2539,7 @@ Be all my sins remembered.)";
                     } else {
                         cout << "restarting from from the last checkpoint" << endl;
                     }
-                    dnn_trainer<net_type_c, adam> trainer_d(net_c, adam(weight_decay, beta1, beta2), gpus);
+                    dnn_trainer<net_type_b, adam> trainer_d(net_b, adam(weight_decay, beta1, beta2), gpus);
                     trainer_d.set_learning_rate(learning_rate);
                     trainer_d.set_min_learning_rate(min_learning_rate);
                     trainer_d.set_mini_batch_size(mini_batch_size);
@@ -2718,8 +2553,8 @@ Be all my sins remembered.)";
                         else g_interrupt_signal_received = true;
                     }
                     trainer_d.get_net();
-                    net_c.clean();
-                    serialize("llm_shakespeare_model_b.dat") << net_c;
+                    net_b.clean();
+                    serialize("llm_shakespeare_model_b.dat") << net_b;
                     cout << "advanced shakespeare model saved: llm_shakespeare_model_b.dat" << endl;
 
                     // Attempting to generate a new sonnet
@@ -2731,7 +2566,7 @@ Be all my sins remembered.)";
 
                         cout << "generated sonnet:\n\n";
                         for (int i = 0; i < 700 && !input_tokens.empty(); ++i) {
-                            unsigned long next_char = net_c(input_tokens.back());
+                            unsigned long next_char = net_b(input_tokens.back());
                             unsigned char c = static_cast<unsigned char>(next_char);
                             generated_sonnet += c;
                             cout << c;
@@ -2781,8 +2616,8 @@ Be all my sins remembered.)";
             cerr << "vocabulary file not found! (<" << (vocabulary_prefix + ".model|.vocab") << ">)" << endl;
             return 1;
         }
-        mh_llm_net net;
-        softmax<multiply<mh_llm_net::subnet_type>> generator(multiply_(1.0 / temperature));
+        llm_net net;
+        softmax<multiply<llm_net::subnet_type>> generator(multiply_(1.0 / temperature));
         if (fs::exists(language_model)) deserialize(language_model) >> net;
         else {
             cerr << "language model not found! (<" << language_model << ">)" << endl;
@@ -2863,9 +2698,9 @@ Be all my sins remembered.)";
         }
         
         const string model_sync_filename = fs::current_path().string() + "/ernie_checkpoint.dat";        
-        mh_llm_net net;
+        llm_net net;
         adam solver(weight_decay, beta1, beta2);
-        dnn_trainer<mh_llm_net, adam> my_trainer(net, solver, gpus);
+        dnn_trainer<llm_net, adam> my_trainer(net, solver, gpus);
         my_trainer.set_learning_rate(learning_rate);
         my_trainer.set_min_learning_rate(min_learning_rate);
         my_trainer.set_iterations_without_progress_threshold(iterations_without_progress_threshold);
@@ -2933,8 +2768,8 @@ Be all my sins remembered.)";
             cerr << "vocabulary file not found! (<" << (vocabulary_prefix + ".model|.vocab") << ">)" << endl;
             return 1;
         }
-        mh_llm_net net;
-        softmax<multiply<mh_llm_net::subnet_type>> generator(multiply_(1.0 / temperature));
+        llm_net net;
+        softmax<multiply<llm_net::subnet_type>> generator(multiply_(1.0 / temperature));
         if (fs::exists(language_model)) deserialize(language_model) >> net;
         else {
             cerr << "language model not found! (<" << language_model << ">)" << endl;
