@@ -649,6 +649,10 @@ namespace dlib {
     template <typename SUBNET>
     using dropout_10 = add_layer<dropout_custom_<0.10f>, SUBNET>;
 
+    // ----------------------------------------------------------------------------------------
+    /* TO BE ADDED TO <layers_abstract.h> & <layers.h> */
+    const double DEFAULT_MAX_NORM_VALUE = 3.0;
+
     template<int num_embeddings_, int embedding_dim_, bool is_trainable_>
     class embedding_ {
         static_assert(num_embeddings_ > 0, "The size of the dictionary of embeddings must be > 0");
@@ -656,10 +660,21 @@ namespace dlib {
 
     public:
         embedding_() : num_embeddings(num_embeddings_),
-            embedding_dim(embedding_dim_), learning_rate_multiplier(1) {}
+            embedding_dim(embedding_dim_),
+            learning_rate_multiplier(1),
+            scale_grad_by_freq(true),
+            max_norm(DEFAULT_MAX_NORM_VALUE) {}
 
         double get_learning_rate_multiplier() const { return learning_rate_multiplier; }
         void set_learning_rate_multiplier(double val) { learning_rate_multiplier = val; }
+
+        void set_scale_grad_by_freq(bool val) { scale_grad_by_freq = val; }
+        bool get_scale_grad_by_freq() const { return scale_grad_by_freq; }
+
+        void set_max_norm(std::optional<double> new_max_norm) { max_norm = new_max_norm; }
+        void set_max_norm(double new_max_norm = 3.0) { max_norm = new_max_norm; }
+        std::optional<double> get_max_norm() const { return max_norm; }
+        void disable_max_norm() { max_norm = std::nullopt; }
 
         unsigned long get_num_embeddings() const { return num_embeddings; }
         void set_num_embeddings(unsigned long num) {
@@ -677,24 +692,8 @@ namespace dlib {
                 DLIB_CASSERT(sub.get_output().nr() > 0);
                 embeddings.set_size(num_embeddings, embedding_dim);
 
-                auto xavier_init = [](int num_embeddings_, int embedding_dim_) {
-                    double limit = std::sqrt(6.0 / (num_embeddings_ + embedding_dim_));
-
-                std::random_device rd;
-                std::mt19937 gen(rd());
-                std::uniform_real_distribution<> dis(-limit, limit);
-
-                return [=](float& weight) mutable {
-                    weight = std::tanh(static_cast<float>(dis(gen)));
-                    };
-                };
-
-                auto init_func = xavier_init(num_embeddings, embedding_dim);
-                for (int r = 0; r < embeddings.nr(); ++r) {
-                    for (int c = 0; c < embeddings.nc(); ++c) {
-                        init_func(embeddings.host()[tensor_index(embeddings, r, c, 0, 0)]);
-                    }                        
-                } 
+                dlib::rand rnd(std::rand());
+                randomize_parameters(embeddings, num_embeddings_ + embedding_dim_, rnd);
             }
         }
 
@@ -735,19 +734,39 @@ namespace dlib {
                 const float* gradient_input_data = gradient_input.host();
                 float* embeddings_data = embeddings.host();
                 long num_samples = gradient_input.num_samples(), nr = gradient_input.nr(), nc = gradient_input.nc();
+                std::unordered_map<long, long> token_freq;
+
+                if (scale_grad_by_freq) {
+                    for (long s = 0; s < num_samples; ++s) {
+                        for (long r = 0; r < nr; ++r) {
+                            long token_idx = static_cast<long>(prev_data[tensor_index(prev, s, 0, r, 0)]);
+                            if (token_idx < num_embeddings) token_freq[token_idx]++;
+                        }
+                    }
+                }
 
                 for (long s = 0; s < num_samples; ++s) {
                     parallel_for(0, nr, [&](long r) {
                         long token_idx = static_cast<long>(prev_data[tensor_index(prev, s, 0, r, 0)]);
                         if (token_idx < num_embeddings) {
+                            float freq_scale = 1.0f;
+                            if (scale_grad_by_freq) {
+                                auto it = token_freq.find(token_idx);
+                                freq_scale = (it != token_freq.end()) ? (1.0f / it->second) : 1.0f;
+                            }
+
                             for (long c = 0; c < nc; ++c) {
                                 float& embedding = embeddings_data[tensor_index(embeddings, token_idx, c, 0, 0)];
                                 float gradient = gradient_input_data[tensor_index(gradient_input, s, 0, r, c)];
-                                float update = learning_rate_multiplier * gradient;
+                                float update = learning_rate_multiplier * gradient * freq_scale;
 
                                 // Use atomic operation for thread-safe update
                                 std::atomic<float>* atomic_embedding = reinterpret_cast<std::atomic<float>*>(&embedding);
                                 atomic_embedding->fetch_sub(update, std::memory_order_relaxed);
+                            }
+
+                            if (max_norm.has_value()) {
+                                apply_max_norm(embeddings_data + token_idx * embedding_dim, embedding_dim);
                             }
                         }
                         else {
@@ -796,7 +815,23 @@ namespace dlib {
         int num_embeddings;
         int embedding_dim;
         double learning_rate_multiplier;
+        bool scale_grad_by_freq;
+        std::optional<double> max_norm;
         resizable_tensor embeddings;
+
+        void apply_max_norm(float* embedding_vector, long dim) {
+            double norm_sq = 0.0;
+            for (long i = 0; i < dim; ++i) {
+                norm_sq += embedding_vector[i] * embedding_vector[i];
+            }
+
+            if (norm_sq > max_norm.value() * max_norm.value()) {
+                double scale = max_norm.value() / std::sqrt(norm_sq);
+                for (long i = 0; i < dim; ++i) {
+                    embedding_vector[i] *= scale;
+                }
+            }
+        }
     };
     template <int nb_embeddings, int embedding_length, typename SUBNET>
     using embedding = add_layer<embedding_<nb_embeddings, embedding_length, true>, SUBNET>;
@@ -879,7 +914,7 @@ namespace dlib {
     template <int sequence_length, int embedding_length, typename SUBNET>
     using positional_encoding = add_layer<positional_encoding_<sequence_length, embedding_length>, SUBNET>;
     template <int sequence_length, int nb_embeddings, int embedding_length, typename SUBNET>
-    using embeddings = rms_norm<add_prev9<positional_encoding<sequence_length, embedding_length, tag9<embedding<nb_embeddings, embedding_length, tag10<SUBNET>>>>>>;
+    using embeddings = add_prev9<positional_encoding<sequence_length, embedding_length, tag9<embedding<nb_embeddings, embedding_length, tag10<SUBNET>>>>>;
     template <int sequence_length, int nb_embeddings, int embedding_length, typename SUBNET>
     using static_embeddings = add_prev9<positional_encoding<sequence_length, embedding_length, tag9<static_embedding<nb_embeddings, embedding_length, tag10<SUBNET>>>>>;
 
@@ -1569,8 +1604,7 @@ namespace dlib {
         split_heads<nb_heads, query<embedding_dim, skip3<
         tag2<transpose<split_heads<nb_heads, key<embedding_dim, skip3<
         tag1<split_heads<nb_heads, value<embedding_dim,
-        rms_norm<
-        tag3<SUBNET>>>>>>>>>>>>>>>>>>>>>>;
+        tag3<SUBNET>>>>>>>>>>>>>>>>>>>>>;
 
     // Feedforward blocks
     template <int embedding_dim, typename SUBNET>
@@ -1579,21 +1613,20 @@ namespace dlib {
         scale5<con<1, 1, 1, 1, 1,
         fc<embedding_size,
         dropout_10<gelu<bn_fc<fc<embedding_size * 4,
-        rms_norm<
-        tag5<SUBNET>>>>>>>>>>;
+        tag5<SUBNET>>>>>>>>>;
     template <int embedding_dim, typename SUBNET>
     using feed_forward =
         add_prev5<
         linear<embedding_size,
         dropout_10<gelu<linear<embedding_size * 4,
-        rms_norm<
-        tag5<SUBNET>>>>>>>;
+        tag5<SUBNET>>>>>>;
 
     // Transformer block
     template <typename SUBNET>
     using transformer_block =
         feed_forward<embedding_size,
-        multihead_attention_block<embedding_size, number_of_heads, SUBNET>>;
+        multihead_attention_block<embedding_size, number_of_heads, 
+        rms_norm<SUBNET>>>;
 
     // Classification head
     template <int num_logits, typename SUBNET>
@@ -1601,9 +1634,9 @@ namespace dlib {
 
     // VSLM network
     using llm_net = classification_head<vocab_size,        
-        rms_norm<repeat<number_of_blocks, transformer_block,
+        repeat<number_of_blocks, transformer_block,
         embeddings<sequence_size, vocab_size, embedding_size,
-        input<matrix<int, 0, 1>>>>>>;
+        input<matrix<int, 0, 1>>>>>;
 }
 
 constexpr size_t std_global_context_size = (5 * sequence_size);
@@ -1910,7 +1943,7 @@ int main(int argc, char* argv[]) {
             false,      // 5: attention mechanism
             false,      // 6: add_prev1 layer
             false,      // 7: rms_norm layer
-            true,       // 8: multihead attention model
+            false,      // 8: multihead attention model
             false       // 9: "shakespeare" example
         };
 
@@ -2389,13 +2422,13 @@ The fair Ophelia.—Nymph, in thy orisons
 Be all my sins remembered.)";
 
             using net_type_a = classification_head<num_classes,
-                rms_norm<repeat<2, transformer_block,
-                tag10<input<matrix<float>>>>>>;
+                repeat<1, transformer_block,
+                tag10<input<matrix<float>>>>>;
             net_type_a net_a;
             using net_type_b = classification_head<num_classes,
-                rms_norm<repeat<2, transformer_block,
+                repeat<2, transformer_block,
                 embeddings<sequence_size, num_classes, embedding_size,
-                input<matrix<int, 0, 1>>>>>>;
+                input<matrix<int, 0, 1>>>>>;
             net_type_b net_b;            
 
             // Generate synthetic training data
@@ -2477,7 +2510,7 @@ Be all my sins remembered.)";
                 trainer_c.set_mini_batch_size(mini_batch_size);
                 trainer_c.be_verbose();                
                 trainer_c.set_synchronization_file("llm_shakespeare_model_a.ckp", std::chrono::minutes(5));
-                trainer_c.set_iterations_without_progress_threshold(250);
+                trainer_c.set_iterations_without_progress_threshold(350);
                 std::vector<matrix<int, 0, 1>> samples;
                 std::vector<unsigned long> labels;
                 if (trainer_c.get_learning_rate() >= trainer_c.get_min_learning_rate()) {
