@@ -62,7 +62,7 @@ using namespace dlib;
 
 // Global parameters for the Transformer network
 constexpr int vocab_size = 8000;                                            // Size of the vocabulary
-constexpr int sequence_size = 20;                                           // Length of the sequence
+constexpr int sequence_size = 24;                                           // Length of the sequence
 constexpr int number_of_heads = 4;                                          // Number of attention heads
 constexpr int number_of_blocks = 6;                                         // Number of transformer blocks
 constexpr int embedding_size = (32 / number_of_heads) * number_of_heads;   // Size of the embedding
@@ -634,20 +634,20 @@ namespace dlib {
 
     // ----------------------------------------------------------------------------------------
     /* TO BE ADDED TO <layers_abstract.h> & <layers.h> */
-    template <float DROP_RATE>
-    class dropout_custom_ : public dropout_
+    template <int DROP_RATE_PERCENT>
+    class dropout_rate_ : public dropout_
     {
     public:
-        explicit dropout_custom_() : dropout_(DROP_RATE)
+        explicit dropout_rate_() : dropout_(static_cast<float>(DROP_RATE_PERCENT) / 100.0f)
         {
-            DLIB_CASSERT(0 <= DROP_RATE && DROP_RATE <= 1,
-                "DROP_RATE must be between 0 and 1, inclusive.");
+            static_assert(DROP_RATE_PERCENT >= 0 && DROP_RATE_PERCENT <= 100,
+                "DROP_RATE_PERCENT must be between 0 and 100, inclusive.");
         }
     };
-    template <float DROP_RATE, typename SUBNET>
-    using dropout_custom = add_layer<dropout_custom_<DROP_RATE>, SUBNET>;
+    template <int DROP_RATE, typename SUBNET>
+    using dropout_rate = add_layer<dropout_rate_<DROP_RATE>, SUBNET>;
     template <typename SUBNET>
-    using dropout_10 = add_layer<dropout_custom_<0.10f>, SUBNET>;
+    using dropout_10 = add_layer<dropout_rate_<10>, SUBNET>;
 
     // ----------------------------------------------------------------------------------------
     /* TO BE ADDED TO <layers_abstract.h> & <layers.h> */
@@ -2510,7 +2510,7 @@ Be all my sins remembered.)";
                 trainer_c.set_mini_batch_size(mini_batch_size);
                 trainer_c.be_verbose();                
                 trainer_c.set_synchronization_file("llm_shakespeare_model_a.ckp", std::chrono::minutes(5));
-                trainer_c.set_iterations_without_progress_threshold(350);
+                trainer_c.set_iterations_without_progress_threshold(400);
                 std::vector<matrix<int, 0, 1>> samples;
                 std::vector<unsigned long> labels;
                 if (trainer_c.get_learning_rate() >= trainer_c.get_min_learning_rate()) {
