@@ -281,7 +281,8 @@ namespace dlib {
             const tensor& src,
             const tensor& gamma,
             tensor& src_grad,
-            tensor& gamma_grad
+            tensor& gamma_grad,
+            tensor& dscale
         )
         {
             const long num = src.k() * src.nr() * src.nc();
@@ -301,8 +302,6 @@ namespace dlib {
             const auto p_gamma_grad = gamma_grad.host();
             const auto p_scale = scale.host();
 
-            resizable_tensor dscale;
-            dscale.copy_size(scale);
             dscale = 0;
             const auto p_dscale = dscale.host();
 
@@ -370,7 +369,8 @@ namespace dlib {
             const tensor& src,
             const tensor& gamma,
             tensor& src_grad,
-            tensor& gamma_grad
+            tensor& gamma_grad,
+            tensor& dscale
         );
         /*!
             requires
@@ -414,13 +414,14 @@ namespace dlib {
             const tensor& src,
             const tensor& gamma,
             tensor& src_grad,
-            tensor& gamma_grad
+            tensor& gamma_grad,
+            tensor& dscale
         )
         {            
 #ifdef DLIB_USE_CUDA
-            cuda::rms_normalize_gradient(eps, gradient_input, scale, src, gamma, src_grad, gamma_grad);
+            cuda::rms_normalize_gradient(eps, gradient_input, scale, src, gamma, src_grad, gamma_grad, dscale);
 #else
-            cpu::rms_normalize_gradient(eps, gradient_input, scale, src, gamma, src_grad, gamma_grad);
+            cpu::rms_normalize_gradient(eps, gradient_input, scale, src, gamma, src_grad, gamma_grad, dscale);
 #endif
         }
     }
@@ -459,6 +460,7 @@ namespace dlib {
             gamma = alias_tensor(1, sub.get_output().k(), sub.get_output().nr(), sub.get_output().nc());
             params.set_size(gamma.size());
             gamma(params, 0) = 1;
+            dscale.copy_size(gamma(params, 0));
         }
 
         template <typename SUBNET>
@@ -473,7 +475,7 @@ namespace dlib {
         {
             auto g = gamma(params, 0);
             auto g_grad = gamma(params_grad, 0);
-            tt::rms_normalize_gradient(eps, gradient_input, scale, sub.get_output(), g, sub.get_gradient_input(), g_grad);
+            tt::rms_normalize_gradient(eps, gradient_input, scale, sub.get_output(), g, sub.get_gradient_input(), g_grad, dscale);
         }
 
         const tensor& get_layer_params() const { return params; };
@@ -528,6 +530,7 @@ namespace dlib {
         resizable_tensor params;
         alias_tensor gamma;
         resizable_tensor scale;
+        resizable_tensor dscale;
         double learning_rate_multiplier;
         double weight_decay_multiplier;
         double eps;

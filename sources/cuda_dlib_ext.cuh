@@ -26,7 +26,8 @@ namespace dlib
             const tensor& src,
             const tensor& gamma,
             tensor& src_grad,
-            tensor& gamma_grad
+            tensor& gamma_grad,
+            tensor& dscale
         );
 #else // if DLIB_USE_CUDA NOT DEFINED
 #endif // DLIB_USE_CUDA
