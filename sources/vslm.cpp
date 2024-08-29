@@ -2367,11 +2367,12 @@ int main(int argc, char* argv[]) {
                 resizable_tensor gradient_input(x);
                 resizable_tensor src_grad_cpu(x), gamma_grad_cpu(1, x.k(), x.nr(), x.nc());
                 resizable_tensor src_grad_cuda(x), gamma_grad_cuda(1, x.k(), x.nr(), x.nc());
+                resizable_tensor dscale_cpu(x.num_samples()), dscale_cuda(x.num_samples());
                 rnd.fill_gaussian(gradient_input);
                 src_grad_cpu = 0;
                 src_grad_cuda = 0;
-                cpu::rms_normalize_gradient(eps, gradient_input, scale_cpu, x, gamma, src_grad_cpu, gamma_grad_cpu);
-                cuda::rms_normalize_gradient(eps, gradient_input, scale_cuda, x, gamma, src_grad_cuda, gamma_grad_cuda);
+                cpu::rms_normalize_gradient(eps, gradient_input, scale_cpu, x, gamma, src_grad_cpu, gamma_grad_cpu, dscale_cpu);
+                cuda::rms_normalize_gradient(eps, gradient_input, scale_cuda, x, gamma, src_grad_cuda, gamma_grad_cuda, dscale_cuda);
                 DLIB_TEST_MSG(max(abs(mat(src_grad_cpu) - mat(src_grad_cuda))) < 1e-5, "rms_norm layer, max(abs(mat(src_grad_cpu) - mat(src_grad_cuda))) < 1e-5");
                 DLIB_TEST_MSG(max(abs(mat(gamma_grad_cpu) - mat(gamma_grad_cuda))) < 1e-5, "rms_norm layer, max(abs(mat(gamma_grad_cpu) - mat(gamma_grad_cuda))) < 1e-5");
 #endif 
