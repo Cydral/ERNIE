@@ -966,13 +966,20 @@ namespace dlib {
 
         template <typename SUBNET>
         void forward(const SUBNET& sub, resizable_tensor& output) {
-            const auto& prev_output = sub.get_output();
+             auto& prev_output = sub.get_output();
             DLIB_CASSERT((long)num_inputs == prev_output.nc(),
                 "The number of input features to this linear layer doesn't match the size the linear layer was trained with");
 
             output.set_size(prev_output.num_samples(), prev_output.k(), prev_output.nr(), num_outputs);
             auto w = weights(params, 0);
-            resizable_tensor m_input, m_output(prev_output.nr(), num_outputs);
+            
+            auto m_input = alias_tensor(prev_output.num_samples() * prev_output.k() * prev_output.nr(), prev_output.nc());
+            resizable_tensor temp_output(prev_output.num_samples() * prev_output.k() * prev_output.nr(), num_outputs);
+            auto m_output = alias_tensor(prev_output.num_samples(), prev_output.k(), prev_output.nr(), num_outputs);
+            tt::gemm(0, temp_output, 1.0f, m_input(prev_output, 0), false, w, false);
+            tt::copy_tensor(false, output, 0, m_output(temp_output, 0), 0, m_output(temp_output, 0).k());
+
+            /*resizable_tensor m_input, m_output(prev_output.nr(), num_outputs);
             for (int s = 0; s < prev_output.num_samples(); ++s) {
                 for (int k = 0; k < prev_output.k(); ++k) {
                     extract_matrix(prev_output, m_input, s, k);
@@ -983,16 +990,16 @@ namespace dlib {
                     }
                     update_matrix(m_output, output, s, k);
                 }
-            }            
+            }*/
         }
-        
+
         template <typename SUBNET>
         void backward(const tensor& gradient_input, SUBNET& sub, tensor& params_grad) {
             const auto& prev_output = sub.get_output();
             long batch_size = prev_output.num_samples() * prev_output.k() * prev_output.nr();
             long input_features = prev_output.nc();
             alias_tensor flattened_gradient = alias_tensor(batch_size, num_outputs);
-            
+
             if (learning_rate_multiplier != 0) {
                 resizable_tensor m_input, i_grad;
                 auto pw = weights(params_grad, 0);
@@ -2326,13 +2333,17 @@ int main(int argc, char* argv[]) {
                 const float* p_x = x.host();
                 const float* p_y = y_cpu.host();
                 const float* p_scale = scale_cpu.host();
-                for (long n = 0; n < y_cpu.num_samples(); ++n) {
+                for (long n = 0; n < y_cpu.num_samples(); ++n)
+                {
                     double sum_squared_x = 0;
                     double sum_squared_y = 0;
                     long count = 0;
-                    for (long k = 0; k < y_cpu.k(); ++k) {
-                        for (long r = 0; r < y_cpu.nr(); ++r) {
-                            for (long c = 0; c < y_cpu.nc(); ++c) {
+                    for (long k = 0; k < y_cpu.k(); ++k)
+                    {
+                        for (long r = 0; r < y_cpu.nr(); ++r)
+                        {
+                            for (long c = 0; c < y_cpu.nc(); ++c)
+                            {
                                 float val_x = p_x[tensor_index(x, n, k, r, c)];
                                 float val_y = p_y[tensor_index(y_cpu, n, k, r, c)];
                                 sum_squared_x += val_x * val_x;
