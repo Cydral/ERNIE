@@ -12,7 +12,7 @@ namespace dlib
     {
 #ifdef DLIB_USE_CUDA
         void rms_normalize(
-            const double eps,
+            const float eps,
             resizable_tensor& dest,
             resizable_tensor& scale,
             const tensor& src,
@@ -20,7 +20,7 @@ namespace dlib
         );
 
         void rms_normalize_gradient(
-            const double eps,
+            const float eps,
             const tensor& gradient_input,
             const tensor& scale,
             const tensor& src,

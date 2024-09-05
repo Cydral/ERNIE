@@ -4,40 +4,69 @@ namespace dlib
 {
     namespace cuda
     {
-        __global__ void _cuda_rms_normalize(float* out, const float* s, float* scale, const float* g, float eps, size_t ns, size_t num)
+   // ----------------------------------------------------------------------------------------
+
+        __global__ void _cuda_rms_normalize(
+            float* dest,
+            float* scale,
+            const float* src,
+            const float* gamma,
+            float eps,
+            size_t ns,
+            size_t ks,
+            size_t num
+        )
         {
-            // Compute sum of squares
-            for (auto n : grid_stride_range_y(0, ns))
+            for (auto nk : grid_stride_range_y(0, ns * ks))
             {
-                auto p = s + n * num;
-                float sum_squares = 0;
+                const auto n = nk / ks;
+                const auto k = nk % ks;
+                const auto p_src = src + (n * ks + k) * num;
+                const auto p_dest = dest + (n * ks + k) * num;
+                
+                float sum_squares = 0.0f;
                 for (auto i : grid_stride_range(0, num))
                 {
-                    sum_squares += p[i] * p[i];
+                    sum_squares += p_src[i] * p_src[i];
                 }
-                warp_reduce_atomic_add(scale[n], sum_squares / num);
-            }
-            __syncthreads();
+                warp_reduce_sum(scale[n * ks + k], 1.0f / sqrtf(sum_squares / num + eps));
+                __syncthreads();
 
-            // Compute RMS inverse
-            for (auto n : grid_stride_range_y(0, ns))
-            {
-                for (auto i : grid_stride_range(0, 1))
-                {
-                    scale[n] = 1.0f / std::sqrt(scale[n] + eps);
-                }
-            }
-            __syncthreads();
-
-            for (auto n : grid_stride_range_y(0, ns))
-            {
+                const float s = scale[n * ks + k];
+                const float g = gamma[k];
                 for (auto i : grid_stride_range(0, num))
                 {
-                    const float val = s[n * num + i] * scale[n];
-                    out[n * num + i] = val * g[i];
+                    p_dest[i] = p_src[i] * s * g;
                 }
             }
         }
+
+        void rms_normalize(
+            const float eps,
+            resizable_tensor& dest,
+            resizable_tensor& scale,
+            const tensor& src,
+            const tensor& gamma
+        )
+        {
+            const long num = src.nr() * src.nc();
+            DLIB_CASSERT(
+                src.k() == gamma.k() &&
+                eps > 0,
+                "\ngamma.k():  " << gamma.k() <<
+                "\nsrc.k():    " << src.k() <<
+                "\neps:  " << eps
+            );
+
+            dest.copy_size(src);
+            scale.set_size(src.num_samples(), src.k());
+            
+            launch_kernel(_cuda_rms_normalize, max_jobs(src.num_samples() * src.k()), 
+                        dest.device(), scale.device(), src.device(), gamma.device(), eps, 
+                        src.num_samples(), src.k(), num);
+        }
+
+   // ----------------------------------------------------------------------------------------
 
         __global__ void _cuda_rms_normalize_gradient(float* out, float* gg, const float* s, const float* gi, const float* scale, const float* g, float* dscale, float eps, size_t ns, size_t num)
         {
@@ -66,36 +95,6 @@ namespace dlib
                     out[idx] += dx * scale[n] + dscale[n] * 2 * s[idx] / num;
                 }
             }
-        }
-
-        void rms_normalize(
-            const double eps,
-            resizable_tensor& dest,
-            resizable_tensor& scale,
-            const tensor& src,
-            const tensor& gamma
-        )
-        {
-            const long num = src.k() * src.nr() * src.nc();
-            DLIB_CASSERT(
-                src.k() == gamma.k() &&
-                src.nr() == gamma.nr() &&
-                src.nc() == gamma.nc() &&
-                eps > 0,
-                "\ngamma.k():  " << gamma.k() <<
-                "\ngamma.nr(): " << gamma.nr() <<
-                "\ngamma.nc(): " << gamma.nc() <<
-                "\nsrc.k():    " << src.k() <<
-                "\nsrc.nr():   " << src.nr() <<
-                "\nsrc.nc():   " << src.nc() <<
-                "\neps:  " << eps
-            );
-
-            dest.copy_size(src);
-            scale.set_size(src.num_samples());
-            scale = 0;
-            launch_kernel(_cuda_rms_normalize, max_jobs(num, src.num_samples()), dest.device(), src.device(),
-                scale.device(), gamma.device(), eps, src.num_samples(), num);
         }
 
         void rms_normalize_gradient(
