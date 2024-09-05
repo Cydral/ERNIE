@@ -216,66 +216,59 @@ namespace dlib {
 // -----------------------------------------------------------------------------------
 
         void rms_normalize(
-            const double eps,
+            const float eps,
             resizable_tensor& dest,
             resizable_tensor& scale,
             const tensor& src,
             const tensor& gamma
         )
         {
-            const long num = src.k() * src.nr() * src.nc();
             DLIB_CASSERT(
                 src.k() == gamma.k() &&
-                src.nr() == gamma.nr() &&
-                src.nc() == gamma.nc() &&
-                eps > 0,
+                 eps > 0,
                 "\ngamma.k():  " << gamma.k() <<
-                "\ngamma.nr(): " << gamma.nr() <<
-                "\ngamma.nc(): " << gamma.nc() <<
                 "\nsrc.k():    " << src.k() <<
-                "\nsrc.nr():   " << src.nr() <<
-                "\nsrc.nc():   " << src.nc() <<
                 "\neps:  " << eps
             );
 
+            const long ns = src.num_samples();
+            const long ks = src.k();
+            const long num = src.nr() * src.nc();
             dest.copy_size(src);
-            scale.set_size(src.num_samples());
+            scale.set_size(ns, ks);
+            
+            auto p_scale = scale.host();         
+            const auto p_gamma = gamma.host();
 
-            // Compute RMS            
-            const auto p_scale = scale.host();
-            auto p_src = src.host();
-            for (long n = 0; n < src.num_samples(); ++n)
+            // Compute RMS and store in scale
+            for (long n = 0; n < ns; ++n)
             {
-                float sum_squares = 0;
-                for (long i = 0; i < num; ++i)
+                for (long k = 0; k < ks; ++k)
                 {
-                    float val = p_src[n * num + i];
-                    sum_squares += val * val;
-                }
-                p_scale[n] = sum_squares / num;
-            }
-            // Compute RMS inverse
-            for (long n = 0; n < src.num_samples(); ++n)
-            {
-                p_scale[n] = 1.0f / std::sqrt(p_scale[n] + eps);
-            }
+                    float sum_squares = 0.0f;
 
-            p_src = src.host();
-            auto p_dest = dest.host();
-            auto p_gamma = gamma.host();
-            for (long n = 0; n < src.num_samples(); ++n)
-            {
-                for (long i = 0; i < num; ++i)
-                {
-                    *p_dest = (*p_src) * p_scale[n] * p_gamma[i];
-                    ++p_src;
-                    ++p_dest;
+                    // Sum squares for the current sample and channel
+                    const auto p_src = src.host() + (n * ks + k) * num;
+                    for (long i = 0; i < num; ++i)
+                    {
+                        sum_squares += p_src[i] * p_src[i];
+                    }
+
+                    // Store the scale for this sample and channel
+                    p_scale[n * ks + k] = 1.0f / std::sqrt(sum_squares / num + eps);
+
+                    // Normalize the input tensor
+                    auto p_dest = dest.host() + (n * ks + k) * num;                  
+                    for (long i = 0; i < num; ++i)
+                    {
+                        p_dest[i] = p_src[i] * p_scale[n * ks + k] * p_gamma[k];
+                    }
                 }
             }
         }
 
         void rms_normalize_gradient(
-            const double eps,
+            const float eps,
             const tensor& gradient_input,
             const tensor& scale,
             const tensor& src,
@@ -285,55 +278,62 @@ namespace dlib {
             tensor& dscale
         )
         {
-            const long num = src.k() * src.nr() * src.nc();
-            DLIB_CASSERT(src.num_samples() == scale.size());
-            DLIB_CASSERT(src.k() == gamma.k());
-            DLIB_CASSERT(src.nr() == gamma.nr());
-            DLIB_CASSERT(src.nc() == gamma.nc());
+            DLIB_CASSERT(
+                src.k() == gamma.k() && 
+                eps > 0, 
+                "\ngamma.k():  " << gamma.k() <<
+                "\nsrc.k():    " << src.k() <<
+                "\neps:  " << eps
+            );
             DLIB_CASSERT(have_same_dimensions(gradient_input, src));
             DLIB_CASSERT(have_same_dimensions(gradient_input, src_grad));
-            DLIB_CASSERT(have_same_dimensions(gamma_grad, gamma));
-            DLIB_CASSERT(eps > 0);
+            DLIB_CASSERT(have_same_dimensions(gamma_grad, gamma));            
 
-            gamma_grad = 0;
-            auto p_grad = gradient_input.host();
-            auto p_src = src.host();
-            const auto p_gamma = gamma.host();
-            const auto p_gamma_grad = gamma_grad.host();
+            const long ns = src.num_samples();
+            const long ks = src.k();
+            const long num = src.nr() * src.nc();
+            
+            dscale.set_size(ns, ks);
+            gamma_grad = 0;            
+
             const auto p_scale = scale.host();
-
-            dscale = 0;
-            const auto p_dscale = dscale.host();
-
-            for (long n = 0; n < src.num_samples(); ++n)
-            {
-                for (long i = 0; i < num; ++i)
-                {
-                    const float x_hat = (*p_src) * p_scale[n];
-                    p_gamma_grad[i] += (*p_grad) * x_hat;
-
-                    const float dx = *p_grad * p_gamma[i];
-                    p_dscale[n] += dx * (*p_src) * (-0.5) * p_scale[n] * p_scale[n] * p_scale[n];
-
-                    ++p_grad;
-                    ++p_src;
-                }
-            }
-
-            p_grad = gradient_input.host();
-            p_src = src.host();
+            const auto p_src = src.host();
+            const auto p_grad_input = gradient_input.host();
+            const auto p_gamma = gamma.host();
             auto p_src_grad = src_grad.host();
-            for (long n = 0; n < src.num_samples(); ++n)
+            auto p_gamma_grad = gamma_grad.host();
+            auto p_dscale = dscale.host();
+
+            // Compute gradients
+            for (long n = 0; n < ns; ++n)
             {
-                for (long i = 0; i < num; ++i)
+                for (long k = 0; k < ks; ++k)
                 {
-                    const float dx = *p_grad * p_gamma[i];
+                    float grad_sum = 0;
+                    float dscale_sum = 0;
 
-                    *p_src_grad += dx * p_scale[n] + p_dscale[n] * 2 * (*p_src) / num;
+                    for (long i = 0; i < num; ++i)
+                    {
+                        const long idx = (n * ks + k) * num + i;
+                        const float x_hat = p_src[idx] * p_scale[n * ks + k];
+                        
+                        // Compute gamma_grad
+                        p_gamma_grad[k] += p_grad_input[idx] * x_hat;
 
-                    ++p_grad;
-                    ++p_src;
-                    ++p_src_grad;
+                        // Accumulate sum for dscale
+                        dscale_sum += p_grad_input[idx] * p_gamma[k] * p_src[idx];
+                    }
+
+                    // Finalize dscale for this channel
+                    p_dscale[k] = -dscale_sum * p_scale[n * ks + k] / num;
+
+                    // Compute src_grad (gradient wrt src)
+                    for (long i = 0; i < num; ++i)
+                    {
+                        const long idx = (n * ks + k) * num + i;
+                        const float x_hat = p_src[idx] * p_scale[n * ks + k];
+                        p_src_grad[idx] = (p_grad_input[idx] * p_gamma[k] + p_dscale[k] * p_src[idx]) * p_scale[n * ks + k];
+                    }
                 }
             }
         }
@@ -344,7 +344,7 @@ namespace dlib {
 // -----------------------------------------------------------------------------------
 
         void rms_normalize(
-            const double eps,
+            const float eps,
             resizable_tensor& dest,
             resizable_tensor& scale,
             const tensor& src,
@@ -353,17 +353,23 @@ namespace dlib {
         /*!
             requires
                 - eps > 0
-                - src.num_samples() == gamma.size()
-                - gamma.num_samples() == gamma.nr() == gamma.nc() == 1
+                - src.k() == gamma.k()
+                - scale.size() == src.num_samples() * src.k()
             ensures
                 - have_same_dimensions(#dest, src) == true
-                - #scale.size() == src.num_samples()
+                - #scale.size() == src.num_samples() * src.k()
                 - #dest == the RMS normalized version of src.
-                - #scale == the scaling factors used to normalize src.
+                - #scale == the scaling factors used to normalize src, with one scaling factor
+                for each combination of sample and channel. Specifically:
+                    - #scale[n * src.k() + k] == 1.0 / sqrt(mean(square(src[n, k, :, :])) + eps)
+                    where n is the sample index and k is the channel index.
+                - Each element of #dest is computed as:
+                    - #dest[n, k, i, j] == src[n, k, i, j] * #scale[n * src.k() + k] * gamma[k]
+                    for all valid indices n, k, i, j.
         !*/
 
         void rms_normalize_gradient(
-            const double eps,
+            const float eps,
             const tensor& gradient_input,
             const tensor& scale,
             const tensor& src,
@@ -375,25 +381,29 @@ namespace dlib {
         /*!
             requires
                 - eps > 0
+                - scale.size() == src.num_samples() * src.k()
                 - scale should be the output of a call to
-                  rms_normalize(eps,dest,scale,src,gamma)
+                rms_normalize(eps, dest, scale, src, gamma)
                 - have_same_dimensions(gradient_input, src) == true
                 - have_same_dimensions(src, src_grad) == true
-                - have_same_dimensions(gamma, gamma_grad) == true
-                - scale.size() == src.num_samples()
-                - have_same_dimensions(scale, gamma) == true
+                - gamma.size() == gamma_grad.size()
             ensures
-                - Let f(src,gamma) == dot(gradient_input, dest output of
-                  rms_normalize(eps,dest,scale,src,gamma))
+                - Let f(src, gamma) == dot(gradient_input, dest output of
+                rms_normalize(eps, dest, scale, src, gamma))
                 - Adds the gradient of f() with respect to src to #src_grad.
                 - Assigns the gradient of f() with respect to gamma to #gamma_grad.
+                - #dscale.size() == scale.size()
+                - #dscale contains the gradients with respect to the scaling factors used in the 
+                rms normalization, for each sample and each channel. Specifically:
+                    - #dscale[n * src.k() + k] == the gradient of f() with respect to the scale 
+                    factor applied to the k-th channel of the n-th sample.
         !*/
 
 /* TO BE ADDED TO <tensor_tools.cpp> */
 // ----------------------------------------------------------------------------------------
 
         void rms_normalize(
-            const double eps,
+            const float eps,
             resizable_tensor& dest,
             resizable_tensor& scale,
             const tensor& src,
@@ -408,7 +418,7 @@ namespace dlib {
         }
 
         void rms_normalize_gradient(
-            const double eps,
+            const float eps,
             const tensor& gradient_input,
             const tensor& scale,
             const tensor& src,
@@ -429,13 +439,13 @@ namespace dlib {
 /* TO BE ADDED TO <layers.h> */
 // ----------------------------------------------------------------------------------------
 
-    const double DEFAULT_RMS_NORM_EPS = 1e-5;
+    const float DEFAULT_RMS_NORM_EPS = 1e-5f;
 
     class rms_norm_
     {
     public:
         explicit rms_norm_(
-            double eps_ = DEFAULT_RMS_NORM_EPS
+            float eps_ = DEFAULT_RMS_NORM_EPS
         ) :
             learning_rate_multiplier(1),
             weight_decay_multiplier(0),
@@ -444,7 +454,8 @@ namespace dlib {
 
         }
 
-        double get_eps() const { return eps; }
+        float get_eps() const { return eps; }
+        void set_eps(float eps_) { eps = eps_; }
 
         double get_learning_rate_multiplier() const { return learning_rate_multiplier; }
         double get_weight_decay_multiplier() const { return weight_decay_multiplier; }
@@ -457,10 +468,11 @@ namespace dlib {
         template <typename SUBNET>
         void setup(const SUBNET& sub)
         {
-            gamma = alias_tensor(1, sub.get_output().k(), sub.get_output().nr(), sub.get_output().nc());
+            gamma = alias_tensor(1, sub.get_output().k());
             params.set_size(gamma.size());
             gamma(params, 0) = 1;
-            dscale.copy_size(gamma(params, 0));
+            scale.copy_size(gamma(params, 0));
+            dscale.copy_size(gamma(params, 0));           
         }
 
         template <typename SUBNET>
@@ -475,6 +487,7 @@ namespace dlib {
         {
             auto g = gamma(params, 0);
             auto g_grad = gamma(params_grad, 0);
+            dscale = 0;
             tt::rms_normalize_gradient(eps, gradient_input, scale, sub.get_output(), g, sub.get_gradient_input(), g_grad, dscale);
         }
 
@@ -486,7 +499,6 @@ namespace dlib {
             serialize("rms_norm_", out);
             serialize(item.params, out);
             serialize(item.gamma, out);
-            serialize(item.scale, out);
             serialize(item.learning_rate_multiplier, out);
             serialize(item.weight_decay_multiplier, out);
             serialize(item.eps, out);
@@ -500,7 +512,6 @@ namespace dlib {
                 throw serialization_error("Unexpected version '" + version + "' found while deserializing dlib::rms_norm_.");
             deserialize(item.params, in);
             deserialize(item.gamma, in);
-            deserialize(item.scale, in);
             deserialize(item.learning_rate_multiplier, in);
             deserialize(item.weight_decay_multiplier, in);
             deserialize(item.eps, in);
@@ -509,7 +520,7 @@ namespace dlib {
         friend std::ostream& operator<<(std::ostream& out, const rms_norm_& item)
         {
             out << "rms_norm";
-            out << " eps=" << item.eps;
+            out << " (eps=" << item.eps << ")";
             out << " learning_rate_mult=" << item.learning_rate_multiplier;
             out << " weight_decay_mult=" << item.weight_decay_multiplier;
             return out;
@@ -527,13 +538,12 @@ namespace dlib {
         }
 
     private:
-        resizable_tensor params;
         alias_tensor gamma;
-        resizable_tensor scale;
-        resizable_tensor dscale;
+        resizable_tensor params;        
+        resizable_tensor scale, dscale;        
         double learning_rate_multiplier;
         double weight_decay_multiplier;
-        double eps;
+        float eps;
     };
 
     template <typename SUBNET>
