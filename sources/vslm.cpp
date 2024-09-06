@@ -216,123 +216,139 @@ namespace dlib {
 // -----------------------------------------------------------------------------------
 
         void rms_normalize(
-            const float eps,
+            const double eps,
             resizable_tensor& dest,
-            resizable_tensor& scale,
+            resizable_tensor& rms_values,
             const tensor& src,
             const tensor& gamma
         )
         {
-            DLIB_CASSERT(
-                src.k() == gamma.k() &&
-                 eps > 0,
-                "\ngamma.k():  " << gamma.k() <<
+            DLIB_CASSERT(                
+                gamma.k() == src.k() &&
+                gamma.nr() == 1 &&
+                gamma.nc() == 1 &&
+                eps > 0,
                 "\nsrc.k():    " << src.k() <<
+                "\ngamma.k():  " << gamma.k() <<
+                "\ngamma.nr(): " << gamma.nr() <<
+                "\ngamma.nc(): " << gamma.nc() <<
                 "\neps:  " << eps
             );
 
             const long ns = src.num_samples();
             const long ks = src.k();
             const long num = src.nr() * src.nc();
-            dest.copy_size(src);
-            scale.set_size(ns, ks);
-            
-            auto p_scale = scale.host();         
-            const auto p_gamma = gamma.host();
 
-            // Compute RMS and store in scale
+            dest.copy_size(src);
+            rms_values.set_size(ns);
+
+            // Compute RMS values
+            rms_values = 0;
+            const float* p_src = src.host();
+            float* p_rms = rms_values.host();            
             for (long n = 0; n < ns; ++n)
             {
                 for (long k = 0; k < ks; ++k)
                 {
-                    float sum_squares = 0.0f;
-
-                    // Sum squares for the current sample and channel
-                    const auto p_src = src.host() + (n * ks + k) * num;
                     for (long i = 0; i < num; ++i)
                     {
-                        sum_squares += p_src[i] * p_src[i];
+                        p_rms[n] += (*p_src) * (*p_src);
+                        ++p_src;
                     }
+                }
+                p_rms[n] = 1.0f / std::sqrt(p_rms[n] / (ks * num) + eps);
+            }
+            rms_values.host();
 
-                    // Store the scale for this sample and channel
-                    p_scale[n * ks + k] = 1.0f / std::sqrt(sum_squares / num + eps);
-
-                    // Normalize the input tensor
-                    auto p_dest = dest.host() + (n * ks + k) * num;                  
+            // Apply RMS normalization
+            p_src = src.host();
+            float* p_dest = dest.host();
+            const float* p_gamma = gamma.host();
+            for (long n = 0; n < ns; ++n)
+            {
+                for (long k = 0; k < ks; ++k)
+                {
                     for (long i = 0; i < num; ++i)
                     {
-                        p_dest[i] = p_src[i] * p_scale[n * ks + k] * p_gamma[k];
+                        *p_dest = (*p_src) * p_rms[n];
+                        *p_dest = (*p_dest) * p_gamma[k];
+                        ++p_src;
+                        ++p_dest;
                     }
                 }
             }
         }
 
         void rms_normalize_gradient(
-            const float eps,
+            const double eps,
             const tensor& gradient_input,
-            const tensor& scale,
+            const tensor& rms_values,
             const tensor& src,
             const tensor& gamma,
             tensor& src_grad,
             tensor& gamma_grad,
-            tensor& dscale
+            resizable_tensor& drms
         )
-        {
-            DLIB_CASSERT(
-                src.k() == gamma.k() && 
-                eps > 0, 
-                "\ngamma.k():  " << gamma.k() <<
-                "\nsrc.k():    " << src.k() <<
-                "\neps:  " << eps
-            );
+        {            
+            DLIB_CASSERT(src.num_samples() == rms_values.size());
+            DLIB_CASSERT(have_same_dimensions(gamma, gamma_grad));
+            DLIB_CASSERT(gamma.k() == src.k());
+            DLIB_CASSERT(gamma.nr() == 1);
+            DLIB_CASSERT(gamma.nc() == 1);
             DLIB_CASSERT(have_same_dimensions(gradient_input, src));
             DLIB_CASSERT(have_same_dimensions(gradient_input, src_grad));
-            DLIB_CASSERT(have_same_dimensions(gamma_grad, gamma));            
+            DLIB_CASSERT(eps > 0);
 
             const long ns = src.num_samples();
             const long ks = src.k();
             const long num = src.nr() * src.nc();
-            
-            dscale.set_size(ns, ks);
-            gamma_grad = 0;            
 
-            const auto p_scale = scale.host();
-            const auto p_src = src.host();
-            const auto p_grad_input = gradient_input.host();
+            gamma_grad = 0;
+            drms.copy_size(rms_values);
+            drms = 0;
+
+            auto p_grad = gradient_input.host();
+            auto p_src = src.host();
             const auto p_gamma = gamma.host();
-            auto p_src_grad = src_grad.host();
-            auto p_gamma_grad = gamma_grad.host();
-            auto p_dscale = dscale.host();
+            const auto p_gamma_grad = gamma_grad.host();
+            const auto p_rms = rms_values.host();
+            auto p_drms = drms.host();
 
-            // Compute gradients
+            for (long n = 0; n < ns; ++n)
+            {
+                const float rms_pow = -0.5 * std::pow(p_rms[n], 3.0f);
+                for (long k = 0; k < ks; ++k)
+                {
+                    for (long i = 0; i < num; ++i)
+                    {
+                        const float x_hat = *p_src * p_rms[n];
+                        p_gamma_grad[k] += (*p_grad) * x_hat;
+
+                        const float dx = *p_grad * p_gamma[k];
+                        p_drms[n] += dx * *p_src * rms_pow;
+
+                        ++p_grad;
+                        ++p_src;
+                    }
+                }
+            }
+
+            p_grad = gradient_input.host();
+            p_src = src.host();
+            auto p_src_grad = src_grad.host();
+            const float invnum = 1.0f / (ks * num);
             for (long n = 0; n < ns; ++n)
             {
                 for (long k = 0; k < ks; ++k)
                 {
-                    float grad_sum = 0;
-                    float dscale_sum = 0;
-
                     for (long i = 0; i < num; ++i)
                     {
-                        const long idx = (n * ks + k) * num + i;
-                        const float x_hat = p_src[idx] * p_scale[n * ks + k];
-                        
-                        // Compute gamma_grad
-                        p_gamma_grad[k] += p_grad_input[idx] * x_hat;
+                        const float dx = *p_grad * p_gamma[k];
+                        *p_src_grad += dx * p_rms[n] + p_drms[n] * 2 * *p_src * invnum;
 
-                        // Accumulate sum for dscale
-                        dscale_sum += p_grad_input[idx] * p_gamma[k] * p_src[idx];
-                    }
-
-                    // Finalize dscale for this channel
-                    p_dscale[k] = -dscale_sum * p_scale[n * ks + k] / num;
-
-                    // Compute src_grad (gradient wrt src)
-                    for (long i = 0; i < num; ++i)
-                    {
-                        const long idx = (n * ks + k) * num + i;
-                        const float x_hat = p_src[idx] * p_scale[n * ks + k];
-                        p_src_grad[idx] = (p_grad_input[idx] * p_gamma[k] + p_dscale[k] * p_src[idx]) * p_scale[n * ks + k];
+                        ++p_grad;
+                        ++p_src;
+                        ++p_src_grad;
                     }
                 }
             }
@@ -344,94 +360,85 @@ namespace dlib {
 // -----------------------------------------------------------------------------------
 
         void rms_normalize(
-            const float eps,
+            const double eps,
             resizable_tensor& dest,
-            resizable_tensor& scale,
+            resizable_tensor& rms_values,
             const tensor& src,
             const tensor& gamma
         );
         /*!
             requires
                 - eps > 0
-                - src.k() == gamma.k()
-                - scale.size() == src.num_samples() * src.k()
+                - src.num_samples() == gamma.size()
+                - gamma.num_samples() == gamma.nr() == gamma.nc() == 1
             ensures
                 - have_same_dimensions(#dest, src) == true
-                - #scale.size() == src.num_samples() * src.k()
-                - #dest == the RMS normalized version of src.
-                - #scale == the scaling factors used to normalize src, with one scaling factor
-                for each combination of sample and channel. Specifically:
-                    - #scale[n * src.k() + k] == 1.0 / sqrt(mean(square(src[n, k, :, :])) + eps)
-                    where n is the sample index and k is the channel index.
-                - Each element of #dest is computed as:
-                    - #dest[n, k, i, j] == src[n, k, i, j] * #scale[n * src.k() + k] * gamma[k]
-                    for all valid indices n, k, i, j.
+                - #rms_values.size() == src.num_samples()
+                - #dest == the RMS normalized version of src
+                - #rms_values == the RMS (Root Mean Square) values used to normalize src.
         !*/
 
         void rms_normalize_gradient(
-            const float eps,
+            const double eps,
             const tensor& gradient_input,
-            const tensor& scale,
+            const tensor& rms_values,
             const tensor& src,
             const tensor& gamma,
             tensor& src_grad,
             tensor& gamma_grad,
-            tensor& dscale
+            resizable_tensor& drms
         );
         /*!
             requires
                 - eps > 0
-                - scale.size() == src.num_samples() * src.k()
-                - scale should be the output of a call to
-                rms_normalize(eps, dest, scale, src, gamma)
+                - rms_values should be the output of a call to
+                  rms_normalize(eps,dest,rms_values,src,gamma)
                 - have_same_dimensions(gradient_input, src) == true
                 - have_same_dimensions(src, src_grad) == true
-                - gamma.size() == gamma_grad.size()
+                - have_same_dimensions(gamma, gamma_grad) == true
+                - rms_values.size() == src.num_samples()
+                - have_same_dimensions(rms_values, gamma) == true
             ensures
-                - Let f(src, gamma) == dot(gradient_input, dest output of
-                rms_normalize(eps, dest, scale, src, gamma))
+                - Let f(src,gamma) == dot(gradient_input, dest output of
+                  rms_normalize(eps,dest,rms_values,src,gamma))
                 - Adds the gradient of f() with respect to src to #src_grad.
                 - Assigns the gradient of f() with respect to gamma to #gamma_grad.
-                - #dscale.size() == scale.size()
-                - #dscale contains the gradients with respect to the scaling factors used in the 
-                rms normalization, for each sample and each channel. Specifically:
-                    - #dscale[n * src.k() + k] == the gradient of f() with respect to the scale 
-                    factor applied to the k-th channel of the n-th sample.
+                - #drms contains the gradients of f() with respect to the RMS values.
         !*/
 
 /* TO BE ADDED TO <tensor_tools.cpp> */
 // ----------------------------------------------------------------------------------------
 
         void rms_normalize(
-            const float eps,
+            const double eps,
             resizable_tensor& dest,
-            resizable_tensor& scale,
+            resizable_tensor& rms_values,
             const tensor& src,
             const tensor& gamma
         )
-        {            
+        {
 #ifdef DLIB_USE_CUDA
-            cuda::rms_normalize(eps, dest, scale, src, gamma);
+            cuda::rms_normalize(eps, dest, rms_values, src, gamma);
 #else
-            cpu::rms_normalize(eps, dest, scale, src, gamma);
+            cpu::rms_normalize(eps, dest, rms_values, src, gamma);
 #endif
         }
 
         void rms_normalize_gradient(
-            const float eps,
+            const double eps,
             const tensor& gradient_input,
-            const tensor& scale,
+            const tensor& rms_values,
             const tensor& src,
             const tensor& gamma,
             tensor& src_grad,
             tensor& gamma_grad,
-            tensor& dscale
+            resizable_tensor& drms
         )
-        {            
+        {
 #ifdef DLIB_USE_CUDA
-            cuda::rms_normalize_gradient(eps, gradient_input, scale, src, gamma, src_grad, gamma_grad, dscale);
+            cuda::rms_normalize_gradient(eps, gradient_input, rms_values, src, gamma, src_grad, gamma_grad, drms);
 #else
-            cpu::rms_normalize_gradient(eps, gradient_input, scale, src, gamma, src_grad, gamma_grad, dscale);
+            cpu::rms_normalize_gradient(eps, gradient_input, rms_values, src, gamma, src_grad, gamma_grad, drms);
 #endif
         }
     }
@@ -439,28 +446,33 @@ namespace dlib {
 /* TO BE ADDED TO <layers.h> */
 // ----------------------------------------------------------------------------------------
 
-    const float DEFAULT_RMS_NORM_EPS = 1e-5f;
+    const double DEFAULT_RMS_NORM_EPS = 1e-5;
 
     class rms_norm_
     {
     public:
         explicit rms_norm_(
-            float eps_ = DEFAULT_RMS_NORM_EPS
+            double eps_ = DEFAULT_RMS_NORM_EPS
         ) :
             learning_rate_multiplier(1),
             weight_decay_multiplier(0),
+            bias_learning_rate_multiplier(1),
+            bias_weight_decay_multiplier(1),
             eps(eps_)
         {
-
         }
 
-        float get_eps() const { return eps; }
-        void set_eps(float eps_) { eps = eps_; }
+        double get_eps() const { return eps; }
 
         double get_learning_rate_multiplier() const { return learning_rate_multiplier; }
         double get_weight_decay_multiplier() const { return weight_decay_multiplier; }
         void set_learning_rate_multiplier(double val) { learning_rate_multiplier = val; }
         void set_weight_decay_multiplier(double val) { weight_decay_multiplier = val; }
+
+        double get_bias_learning_rate_multiplier() const { return bias_learning_rate_multiplier; }
+        double get_bias_weight_decay_multiplier() const { return bias_weight_decay_multiplier; }
+        void set_bias_learning_rate_multiplier(double val) { bias_learning_rate_multiplier = val; }
+        void set_bias_weight_decay_multiplier(double val) { bias_weight_decay_multiplier = val; }
 
         inline dpoint map_input_to_output(const dpoint& p) const { return p; }
         inline dpoint map_output_to_input(const dpoint& p) const { return p; }
@@ -471,15 +483,13 @@ namespace dlib {
             gamma = alias_tensor(1, sub.get_output().k());
             params.set_size(gamma.size());
             gamma(params, 0) = 1;
-            scale.copy_size(gamma(params, 0));
-            dscale.copy_size(gamma(params, 0));           
         }
 
         template <typename SUBNET>
         void forward(const SUBNET& sub, resizable_tensor& output)
         {
             auto g = gamma(params, 0);
-            tt::rms_normalize(eps, output, scale, sub.get_output(), g);
+            tt::rms_normalize(eps, output, rms_values, sub.get_output(), g);
         }
 
         template <typename SUBNET>
@@ -487,8 +497,7 @@ namespace dlib {
         {
             auto g = gamma(params, 0);
             auto g_grad = gamma(params_grad, 0);
-            dscale = 0;
-            tt::rms_normalize_gradient(eps, gradient_input, scale, sub.get_output(), g, sub.get_gradient_input(), g_grad, dscale);
+            tt::rms_normalize_gradient(eps, gradient_input, rms_values, sub.get_output(), g, sub.get_gradient_input(), g_grad, drms);
         }
 
         const tensor& get_layer_params() const { return params; };
@@ -501,6 +510,8 @@ namespace dlib {
             serialize(item.gamma, out);
             serialize(item.learning_rate_multiplier, out);
             serialize(item.weight_decay_multiplier, out);
+            serialize(item.bias_learning_rate_multiplier, out);
+            serialize(item.bias_weight_decay_multiplier, out);
             serialize(item.eps, out);
         }
 
@@ -514,6 +525,8 @@ namespace dlib {
             deserialize(item.gamma, in);
             deserialize(item.learning_rate_multiplier, in);
             deserialize(item.weight_decay_multiplier, in);
+            deserialize(item.bias_learning_rate_multiplier, in);
+            deserialize(item.bias_weight_decay_multiplier, in);
             deserialize(item.eps, in);
         }
 
@@ -523,27 +536,34 @@ namespace dlib {
             out << " (eps=" << item.eps << ")";
             out << " learning_rate_mult=" << item.learning_rate_multiplier;
             out << " weight_decay_mult=" << item.weight_decay_multiplier;
+            out << " bias_learning_rate_mult=" << item.bias_learning_rate_multiplier;
+            out << " bias_weight_decay_mult=" << item.bias_weight_decay_multiplier;
             return out;
         }
 
         friend void to_xml(const rms_norm_& item, std::ostream& out)
         {
-            out << "rms_norm";
+            out << "<rms_norm";
             out << " eps='" << item.eps << "'";
             out << " learning_rate_mult='" << item.learning_rate_multiplier << "'";
             out << " weight_decay_mult='" << item.weight_decay_multiplier << "'";
+            out << " bias_learning_rate_mult='" << item.bias_learning_rate_multiplier << "'";
+            out << " bias_weight_decay_mult='" << item.bias_weight_decay_multiplier << "'";
             out << ">\n";
             out << mat(item.params);
             out << "</rms_norm>\n";
         }
 
     private:
+        resizable_tensor params;
         alias_tensor gamma;
-        resizable_tensor params;        
-        resizable_tensor scale, dscale;        
+        resizable_tensor rms_values;
+        resizable_tensor drms;
         double learning_rate_multiplier;
         double weight_decay_multiplier;
-        float eps;
+        double bias_learning_rate_multiplier;
+        double bias_weight_decay_multiplier;
+        double eps;
     };
 
     template <typename SUBNET>
@@ -983,24 +1003,23 @@ namespace dlib {
             output.set_size(prev_output.num_samples(), prev_output.k(), prev_output.nr(), num_outputs);
             auto w = weights(params, 0);
             
-            auto m_input = alias_tensor(prev_output.num_samples() * prev_output.k() * prev_output.nr(), prev_output.nc());
-            resizable_tensor temp_output(prev_output.num_samples() * prev_output.k() * prev_output.nr(), num_outputs);
+            long batch_size = prev_output.num_samples() * prev_output.k() * prev_output.nr();
+            if (temp_output.size() != (batch_size * num_outputs)) {
+                temp_output.set_size(batch_size, num_outputs, 1, 1);
+            }
+
+            auto m_input = alias_tensor(batch_size, prev_output.nc());
             auto m_output = alias_tensor(prev_output.num_samples(), prev_output.k(), prev_output.nr(), num_outputs);
             tt::gemm(0, temp_output, 1.0f, m_input(prev_output, 0), false, w, false);
-            tt::copy_tensor(false, output, 0, m_output(temp_output, 0), 0, m_output(temp_output, 0).k());
-
-            /*resizable_tensor m_input, m_output(prev_output.nr(), num_outputs);
-            for (int s = 0; s < prev_output.num_samples(); ++s) {
-                for (int k = 0; k < prev_output.k(); ++k) {
-                    extract_matrix(prev_output, m_input, s, k);
-                    tt::gemm(0, m_output, 1, m_input, false, w, false);
-                    if (bias_mode == LINEAR_HAS_BIAS) {
-                        auto b = biases(params, weights.size());
-                        tt::add(1, m_output, 1, b);
-                    }
-                    update_matrix(m_output, output, s, k);
+            if (bias_mode == LINEAR_HAS_BIAS) {
+                auto b = biases(params, weights.size());
+                auto temp_output_alias = alias_tensor(1, num_outputs);
+                for (long i = 0; i < batch_size; ++i) {
+                    auto temp_slice = temp_output_alias(temp_output, i * num_outputs);
+                    tt::add(1, temp_slice, 1, b);
                 }
-            }*/
+             }
+            tt::copy_tensor(false, output, 0, m_output(temp_output, 0), 0, m_output(temp_output, 0).k());
         }
 
         template <typename SUBNET>
@@ -1036,6 +1055,36 @@ namespace dlib {
                     update_matrix(prev_grad, sub.get_gradient_input(), s, k, true);
                 }
             }
+            /*const auto& prev_output = sub.get_output();
+            long batch_size = prev_output.num_samples() * prev_output.k() * prev_output.nr();
+
+            if (learning_rate_multiplier != 0) {
+                auto pw = weights(params_grad, 0);
+                auto m_input = alias_tensor(batch_size, prev_output.nc());
+                auto m_grad = alias_tensor(batch_size, num_outputs);
+
+                // Calculate gradient for weights
+                tt::gemm(0, pw, 1, m_input(prev_output, 0), true, m_grad(gradient_input, 0), false);
+                if (bias_mode == LINEAR_HAS_BIAS) {
+                    auto pb = biases(params_grad, weights.size());
+                    auto bias_grad = alias_tensor(1, num_outputs);
+                    for (long i = 0; i < batch_size; ++i) {
+                        auto grad_slice = bias_grad(gradient_input, i * num_outputs);
+                        tt::assign_conv_bias_gradient(pb, grad_slice);
+                    }
+                }
+            }
+
+            // Propagate gradients to previous layer
+            auto& prev_grad = sub.get_gradient_input();
+            auto w = weights(params, 0);
+            if (temp_output.size() != (batch_size * prev_output.nc())) {
+                temp_output.set_size(batch_size, prev_output.nc(), 1, 1);
+            }
+            auto m_prev_grad = alias_tensor(batch_size, input_features);
+            auto m_grad_input = alias_tensor(batch_size, num_outputs);
+            tt::gemm(0, temp_output, 1, m_grad_input(gradient_input, 0), false, w, true);
+            auto m_output = alias_tensor(prev_output.num_samples(), prev_output.k(), prev_output.nr(), num_outputs);*/
         }
 
         alias_tensor_instance get_weights() { return weights(params, 0); }
@@ -1116,6 +1165,7 @@ namespace dlib {
         unsigned long bias_mode;
         resizable_tensor params;
         alias_tensor weights, biases;
+        resizable_tensor temp_output;
     };
     template <unsigned long num_outputs, typename SUBNET>
     using linear = add_layer<linear_<num_outputs, LINEAR_HAS_BIAS>, SUBNET>;
@@ -1885,6 +1935,100 @@ private:
     }
 };
 
+void test_rms_normalize()
+{
+    resizable_tensor x(2, 3, 4, 5);
+    resizable_tensor y_cpu(x);
+    tt::tensor_rand rnd(0);
+    rnd.fill_uniform(x);
+    resizable_tensor rms_values_cpu(x.num_samples());
+    resizable_tensor gamma(1, x.k(), 1, 1);
+    gamma = 1;
+    const float eps = 1e-5;
+    cpu::rms_normalize(eps, y_cpu, rms_values_cpu, x, gamma);
+
+    // Check that the output is correctly normalized
+    const float* p_x = x.host();
+    const float* p_y = y_cpu.host();
+    const float* p_rms_values = rms_values_cpu.host();
+    bool error_found = false;
+    for (long n = 0; n < x.num_samples(); ++n)
+    {
+        for (long k = 0; k < x.k(); ++k)
+        {
+            for (long r = 0; r < x.nr(); ++r)
+            {
+                for (long c = 0; c < x.nc(); ++c)
+                {
+                    float x_val = p_x[tensor_index(x, n, k, r, c)];
+                    float y_val = p_y[tensor_index(y_cpu, n, k, r, c)];
+                    float rms_val = p_rms_values[n];
+                    if (std::abs(y_val - x_val * rms_val) >= 1e-5) error_found = true;
+                }
+            }
+        }
+    }
+    DLIB_TEST_MSG(!error_found, "Normalized values vs expected values");
+
+    // Check the backward pass
+    resizable_tensor gradient_input(x);
+    resizable_tensor src_grad_cpu(x), gamma_grad_cpu(1, x.k(), 1, 1);
+    resizable_tensor drms_cpu(x.num_samples());
+    rnd.fill_gaussian(gradient_input);
+    src_grad_cpu = 0;
+    cpu::rms_normalize_gradient(eps, gradient_input, rms_values_cpu, x, gamma, src_grad_cpu, gamma_grad_cpu, drms_cpu);
+
+    const float* p_gradient_input = gradient_input.host();
+    const float* p_src = x.host();
+    const float* p_src_grad_cpu = src_grad_cpu.host();
+    const float* p_gamma = gamma.host();
+    const float* p_rms_values_cpu = rms_values_cpu.host();
+    const float* p_drms_cpu = drms_cpu.host();
+
+    bool backward_error_found = false;
+    for (long n = 0; n < x.num_samples(); ++n)
+    {
+        const float rms_pow = -0.5 * std::pow(p_rms_values_cpu[n], 3.0f);
+        for (long k = 0; k < x.k(); ++k)
+        {
+            for (long r = 0; r < x.nr(); ++r)
+            {
+                for (long c = 0; c < x.nc(); ++c)
+                {
+                    float gradient_input_val = p_gradient_input[tensor_index(gradient_input, n, k, r, c)];
+                    float src_val = p_src[tensor_index(x, n, k, r, c)];
+                    float rms_val = p_rms_values_cpu[n];
+                    float expected_src_grad = gradient_input_val * p_gamma[k] * rms_val + p_drms_cpu[n] * 2 * src_val * 1.0f / (x.k() * x.nr() * x.nc());
+                    float src_grad_val = p_src_grad_cpu[tensor_index(src_grad_cpu, n, k, r, c)];
+                    if (std::abs(src_grad_val - expected_src_grad) >= 1e-4)
+                        backward_error_found = true;
+                }
+            }
+        }
+    }
+    DLIB_TEST_MSG(!backward_error_found, "Backward pass values vs expected values");
+
+#if DLIB_USE_CUDA
+    resizable_tensor y_cuda(x);
+    resizable_tensor rms_values_cuda(x.num_samples());
+    cuda::rms_normalize(eps, y_cuda, rms_values_cuda, x, gamma);
+    DLIB_TEST_MSG(max(abs(mat(y_cpu) - mat(y_cuda))) < 1e-5, "max(abs(mat(y_cpu) - mat(y_cuda))) < 1e-5");
+    DLIB_TEST_MSG(max(abs(mat(rms_values_cpu) - mat(rms_values_cuda))) < 1e-5,
+        "max(abs(mat(rms_values_cpu) - mat(rms_values_cuda))) < 1e-5");
+
+    resizable_tensor src_grad_cuda(x), gamma_grad_cuda(1, x.k(), 1, 1);
+    resizable_tensor drms_cuda(x.num_samples());
+    src_grad_cuda = 0;
+    cuda::rms_normalize_gradient(eps, gradient_input, rms_values_cuda, x, gamma, src_grad_cuda, gamma_grad_cuda, drms_cuda);
+    DLIB_TEST_MSG(max(abs(mat(src_grad_cpu) - mat(src_grad_cuda))) < 1e-5,
+        "max(abs(mat(src_grad_cpu) - mat(src_grad_cuda))) < 1e-5");
+    DLIB_TEST_MSG(max(abs(mat(gamma_grad_cpu) - mat(gamma_grad_cuda))) < 1e-5,
+        "max(abs(mat(gamma_grad_cpu) - mat(gamma_grad_cuda))) < 1e-5");
+    DLIB_TEST_MSG(max(abs(mat(drms_cpu) - mat(drms_cuda))) < 1e-4,
+        "max(abs(mat(drms_cpu) - mat(drms_cuda))) < 1e-4");
+#endif
+}
+
 int main(int argc, char* argv[]) {
     string corpus_dir;
     bool do_benchmark = false, text_generation = false;
@@ -1955,16 +2099,16 @@ int main(int argc, char* argv[]) {
     if (do_benchmark) {
         constexpr bool display_debug_info = false;
         constexpr bool skip_tests[] = {
-            false,      // 0: strings & tokenization
-            false,      // 1: extract_matrix() & update_matrix()
-            false,      // 2: linear layer
-            false,      // 3: masked attention layer
-            false,      // 4: softmax layer
-            false,      // 5: attention mechanism
-            false,      // 6: add_prev1 layer
+            true,      // 0: strings & tokenization
+            true,      // 1: extract_matrix() & update_matrix()
+            true,      // 2: linear layer
+            true,      // 3: masked attention layer
+            true,      // 4: softmax layer
+            true,      // 5: attention mechanism
+            true,      // 6: add_prev1 layer
             false,      // 7: rms_norm layer
-            false,      // 8: multihead attention model
-            false       // 9: "shakespeare" example
+            true,      // 8: multihead attention model
+            true       // 9: "shakespeare" example
         };
 
         // test: tokenization
@@ -2329,74 +2473,12 @@ int main(int argc, char* argv[]) {
         if (!skip_tests[7]) {
             if (display_debug_info) cout << "\ntest: rms_norm layer\n";
             {
-                resizable_tensor x(2, 3, 4, 5);
-                resizable_tensor y_cpu(x);
-                tt::tensor_rand rnd(0);
-                rnd.fill_uniform(x);
-                resizable_tensor scale_cpu(x.num_samples());
-                resizable_tensor gamma(1, x.k(), x.nr(), x.nc());
-                gamma = 1;
-                const float eps = 1e-5;
-                cpu::rms_normalize(eps, y_cpu, scale_cpu, x, gamma);
-
-                // check that the RMS per sample is close to 1 and that the scale is correctly applied
-                const float* p_x = x.host();
-                const float* p_y = y_cpu.host();
-                const float* p_scale = scale_cpu.host();
-                for (long n = 0; n < y_cpu.num_samples(); ++n)
+                test_rms_normalize();
                 {
-                    double sum_squared_x = 0;
-                    double sum_squared_y = 0;
-                    long count = 0;
-                    for (long k = 0; k < y_cpu.k(); ++k)
-                    {
-                        for (long r = 0; r < y_cpu.nr(); ++r)
-                        {
-                            for (long c = 0; c < y_cpu.nc(); ++c)
-                            {
-                                float val_x = p_x[tensor_index(x, n, k, r, c)];
-                                float val_y = p_y[tensor_index(y_cpu, n, k, r, c)];
-                                sum_squared_x += val_x * val_x;
-                                sum_squared_y += val_y * val_y;
-                                count++;
-                            }
-                        }
-                    }
-
-                    // Calculate RMS of input and output
-                    float rms_x = std::sqrt(sum_squared_x / count);
-                    float rms_y = std::sqrt(sum_squared_y / count);
-
-                    // Check that output RMS is close to 1
-                    DLIB_TEST_MSG(std::abs(rms_y - 1.0f) < 1e-4,
-                        "rms_norm layer, abs(rms_y - 1.0f) < 1e-4, got " << rms_y);
-
-                    // Check that the computed scale correctly transforms input RMS to output RMS
-                    float computed_scale = p_scale[n];
-                    float expected_scale = 1.0f / std::sqrt(sum_squared_x / count + eps);
-                    DLIB_TEST_MSG(std::abs(computed_scale - expected_scale) < 1e-5,
-                        "rms_norm layer, abs(computed_scale - expected_scale) < 1e-5, got "
-                        << computed_scale << " vs expected " << expected_scale);
+                    rms_norm_ l;
+                    auto res = test_layer(l);
+                    DLIB_TEST_MSG(res, res);
                 }
-                // check that the CPU and the CUDA implementation are equivalent 
-#ifdef DLIB_USE_CUDA 
-                resizable_tensor y_cuda(x);
-                resizable_tensor scale_cuda(x.num_samples());
-                cuda::rms_normalize(eps, y_cuda, scale_cuda, x, gamma);
-                DLIB_TEST_MSG(max(abs(mat(y_cpu) - mat(y_cuda))) < 1e-5, "rms_norm layer, max(abs(mat(y_cpu) - mat(y_cuda))) < 1e-5");
-                DLIB_TEST_MSG(max(abs(mat(scale_cpu) - mat(scale_cuda))) < 1e-5, "rms_norm layer, max(abs(mat(scale_cpu) - mat(scale_cuda))) < 1e-5");
-                resizable_tensor gradient_input(x);
-                resizable_tensor src_grad_cpu(x), gamma_grad_cpu(1, x.k(), x.nr(), x.nc());
-                resizable_tensor src_grad_cuda(x), gamma_grad_cuda(1, x.k(), x.nr(), x.nc());
-                resizable_tensor dscale_cpu(x.num_samples()), dscale_cuda(x.num_samples());
-                rnd.fill_gaussian(gradient_input);
-                src_grad_cpu = 0;
-                src_grad_cuda = 0;
-                cpu::rms_normalize_gradient(eps, gradient_input, scale_cpu, x, gamma, src_grad_cpu, gamma_grad_cpu, dscale_cpu);
-                cuda::rms_normalize_gradient(eps, gradient_input, scale_cuda, x, gamma, src_grad_cuda, gamma_grad_cuda, dscale_cuda);
-                DLIB_TEST_MSG(max(abs(mat(src_grad_cpu) - mat(src_grad_cuda))) < 1e-5, "rms_norm layer, max(abs(mat(src_grad_cpu) - mat(src_grad_cuda))) < 1e-5");
-                DLIB_TEST_MSG(max(abs(mat(gamma_grad_cpu) - mat(gamma_grad_cuda))) < 1e-5, "rms_norm layer, max(abs(mat(gamma_grad_cpu) - mat(gamma_grad_cuda))) < 1e-5");
-#endif 
             }
         }
 
