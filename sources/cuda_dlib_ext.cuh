@@ -12,7 +12,7 @@ namespace dlib
     {
 #ifdef DLIB_USE_CUDA
         void rms_normalize(
-            const float eps,
+            const double eps,
             resizable_tensor& dest,
             resizable_tensor& scale,
             const tensor& src,
@@ -20,14 +20,31 @@ namespace dlib
         );
 
         void rms_normalize_gradient(
-            const float eps,
             const tensor& gradient_input,
             const tensor& scale,
             const tensor& src,
             const tensor& gamma,
             tensor& src_grad,
             tensor& gamma_grad,
-            tensor& dscale
+            resizable_tensor& dscale
+        );
+
+        void transpose(
+            tensor& dest,
+            const tensor& src
+        );
+
+        void transpose_add(
+            tensor& dest,
+            const tensor& src
+        );
+
+        void batch_multiply(
+            tensor& out,
+            const tensor& a,
+            bool a_trans,
+            const tensor& b,
+            bool b_trans
         );
 #else // if DLIB_USE_CUDA NOT DEFINED
 #endif // DLIB_USE_CUDA
