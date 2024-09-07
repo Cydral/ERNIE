@@ -2267,8 +2267,7 @@ void test_rms_normalize()
                     float rms_val = p_scale_cpu[n];
                     float expected_src_grad = gradient_input_val * p_gamma[k] * rms_val + p_dscale_cpu[n] * 2 * src_val * 1.0f / (x.k() * x.nr() * x.nc());
                     float src_grad_val = p_src_grad_cpu[tensor_index(src_grad_cpu, n, k, r, c)];
-                    if (std::abs(src_grad_val - expected_src_grad) >= 1e-4)
-                        backward_error_found = true;
+                    if (std::abs(src_grad_val - expected_src_grad) >= 1e-5) backward_error_found = true;
                 }
             }
         }
@@ -2291,8 +2290,8 @@ void test_rms_normalize()
         "max(abs(mat(src_grad_cpu) - mat(src_grad_cuda))) < 1e-5");
     DLIB_TEST_MSG(max(abs(mat(gamma_grad_cpu) - mat(gamma_grad_cuda))) < 1e-5,
         "max(abs(mat(gamma_grad_cpu) - mat(gamma_grad_cuda))) < 1e-5");
-    DLIB_TEST_MSG(max(abs(mat(dscale_cpu) - mat(dscale_cuda))) < 1e-4,
-        "max(abs(mat(dscale_cpu) - mat(dscale_cuda))) < 1e-4");
+    DLIB_TEST_MSG(max(abs(mat(dscale_cpu) - mat(dscale_cuda))) < 1e-5,
+        "max(abs(mat(dscale_cpu) - mat(dscale_cuda))) < 1e-5");
 #endif
 }
 
