@@ -11,6 +11,12 @@ namespace dlib
     namespace cuda
     {
 #ifdef DLIB_USE_CUDA
+        void apply_positional_encoding(
+            const tensor& pe,
+            const tensor& input,
+            resizable_tensor& output
+        );
+
         void rms_normalize(
             const double eps,
             resizable_tensor& dest,

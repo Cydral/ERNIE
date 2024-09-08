@@ -63,9 +63,9 @@ using namespace dlib;
 // Global parameters for the Transformer network
 constexpr int vocab_size = 8000;                                            // Size of the vocabulary
 constexpr int sequence_size = 24;                                           // Length of the sequence
-constexpr int number_of_heads = 4;                                          // Number of attention heads
+constexpr int number_of_heads = 8;                                          // Number of attention heads
 constexpr int number_of_blocks = 6;                                         // Number of transformer blocks
-constexpr int embedding_size = (32 / number_of_heads) * number_of_heads;   // Size of the embedding
+constexpr int embedding_size = (64 / number_of_heads) * number_of_heads;   // Size of the embedding
 constexpr int bos_id = 0, eos_id = 1, unk_id = 2, pad_id = 3;
 
 // Other global parameters
@@ -119,27 +119,29 @@ namespace utils {
         std::string output;
         output.reserve(input.size());
 
-        size_t lastPos = 0;
-        size_t findPos = 0;
+size_t lastPos = 0;
+size_t findPos = 0;
 
-        while ((findPos = input.find('&', lastPos)) != std::string::npos) {
-            output.append(input, lastPos, findPos - lastPos);
-            auto endPos = input.find(';', findPos);
-            if (endPos != std::string::npos) {
-                std::string entity = input.substr(findPos, endPos - findPos + 1);
-                auto it = htmlEntities.find(entity);
-                if (it != htmlEntities.end()) {
-                    output.append(it->second);
-                } else {
-                    output.append(entity);
-                }
-                lastPos = endPos + 1;
-            } else {
-                break;
-            }
+while ((findPos = input.find('&', lastPos)) != std::string::npos) {
+    output.append(input, lastPos, findPos - lastPos);
+    auto endPos = input.find(';', findPos);
+    if (endPos != std::string::npos) {
+        std::string entity = input.substr(findPos, endPos - findPos + 1);
+        auto it = htmlEntities.find(entity);
+        if (it != htmlEntities.end()) {
+            output.append(it->second);
         }
-        output.append(input, lastPos, std::string::npos);
-        return output;
+        else {
+            output.append(entity);
+        }
+        lastPos = endPos + 1;
+    }
+    else {
+        break;
+    }
+}
+output.append(input, lastPos, std::string::npos);
+return output;
     }
 
     bool is_unicode(char32_t c) {
@@ -211,9 +213,52 @@ using utils::concatenate_files;
 
 namespace dlib {
     namespace cpu {
-/* TO BE ADDED TO <cpu_dlib.cpp> */
-// -----------------------------------------------------------------------------------
+        /* TO BE ADDED TO <cpu_dlib.cpp> */
+        // -----------------------------------------------------------------------------------
 
+        void apply_positional_encoding(
+            const tensor& pe,
+            const tensor& input,
+            resizable_tensor& output
+        )
+        {
+            DLIB_CASSERT(
+                pe.num_samples() == input.nr() &&
+                pe.k() == input.nc() &&
+                pe.nr() == 1 &&
+                pe.nc() == 1,
+                "\npe.num_samples():    " << pe.num_samples() <<
+                "\npe.k():  " << pe.k() <<
+                "\npe.nr(): " << pe.nr() <<
+                "\npe.nc(): " << pe.nc() <<
+                "\ninput.nr(): " << input.nr() <<
+                "\ninput.nc(): " << input.nc()
+            );
+
+            output.copy_size(input);
+
+            const long ns = input.num_samples();
+            const long nk = input.k();
+            const long nr = input.nr();
+            const long nc = input.nc();
+
+            const float* pe_data = pe.host();
+            float* output_data = output.host();
+
+            for (long s = 0; s < ns; ++s) {
+                for (long k = 0; k < nk; ++k) {
+                    long offset_output = s * nk * nr * nc + k * nr * nc;
+
+                    for (long r = 0; r < nr; ++r) {
+                        long offset_pe = r * nc;
+                        long offset_output_row = offset_output + r * nc;
+
+                        std::copy(pe_data + offset_pe, pe_data + offset_pe + nc, output_data + offset_output_row);
+                    }
+                }
+            }
+        }
+        
         void rms_normalize(
             const double eps,
             resizable_tensor& dest,
@@ -575,100 +620,133 @@ namespace dlib {
     namespace tt {
 /* TO BE ADDED TO <tensor_tools.h> */
 // -----------------------------------------------------------------------------------
-
-        void rms_normalize(
-            const double eps,
-            resizable_tensor& dest,
-            resizable_tensor& scale,
-            const tensor& src,
-            const tensor& gamma
+        void apply_positional_encoding(
+            const tensor& pe,
+            const tensor& input,
+            resizable_tensor& output
         );
         /*!
             requires
-                - eps > 0
-                - gamma.k() == src.k()
-                - gamma.nr() == 1
-                - gamma.nc() == 1
+                - pe.num_samples() == 1
+                - pe.k() == 1
+                - pe.nr() == input.nr()
+                - pe.nc() == input.nc()
+                - have_same_dimensions(output, input)
             ensures
-                - have_same_dimensions(#dest, src) == true
-                - #scale.size() == src.num_samples()
-                - #dest == the RMS normalized version of src
-                - #scale contains the RMS (Root Mean Square) values used to normalize each sample of src.
-                - Each element of #dest is computed as:
-                    - #dest[n, k, i, j] == src[n, k, i, j] * gamma[k] / scale[n]
-                where n is the sample index, k is the channel index, and i, j are the spatial indices.
+                - Applies the positional encoding stored in pe to the input tensor and stores the result in output.
+                - The positional encoding is applied to all channels of the input tensor.
+                - For all valid s, k, r, c:
+                    - #output(s,k,r,c) == pe(r,c)
         !*/
 
-        void rms_normalize_gradient(
-            const tensor& gradient_input,
-            const tensor& scale,
-            const tensor& src,
-            const tensor& gamma,
-            tensor& src_grad,
-            tensor& gamma_grad,
-            resizable_tensor& dscale
-        );
-        /*!
-            requires
-                - scale.size() == src.num_samples()
-                - have_same_dimensions(gamma, gamma_grad)
-                - gamma.k() == src.k()
-                - gamma.nr() == 1
-                - gamma.nc() == 1
-                - have_same_dimensions(gradient_input, src)
-                - have_same_dimensions(gradient_input, src_grad)
-            ensures
-                - Let f(src, gamma) == dot(gradient_input, dest output of
-                  rms_normalize(eps, dest, scale, src, gamma))
-                - Adds the gradient of f() with respect to src to #src_grad
-                - Assigns the gradient of f() with respect to gamma to #gamma_grad
-                - #dscale contains the gradients of f() with respect to the RMS values.
-        !*/
+void rms_normalize(
+    const double eps,
+    resizable_tensor& dest,
+    resizable_tensor& scale,
+    const tensor& src,
+    const tensor& gamma
+);
+/*!
+    requires
+        - eps > 0
+        - gamma.k() == src.k()
+        - gamma.nr() == 1
+        - gamma.nc() == 1
+    ensures
+        - have_same_dimensions(#dest, src) == true
+        - #scale.size() == src.num_samples()
+        - #dest == the RMS normalized version of src
+        - #scale contains the RMS (Root Mean Square) values used to normalize each sample of src.
+        - Each element of #dest is computed as:
+            - #dest[n, k, i, j] == src[n, k, i, j] * gamma[k] / scale[n]
+        where n is the sample index, k is the channel index, and i, j are the spatial indices.
+!*/
 
-        void transpose(
-            tensor& dest,
-            const tensor& src
-        );
-        /*!
-            requires
-                - dest.num_samples() == src.num_samples()
-                - dest.k() == src.k()
-                - dest.nr() == src.nc()
-                - dest.nc() == src.nr()
-                - is_same_object(dest, src) == false
-            ensures
-                - Performs a transpose operation on the nr() x nc() matrices within src and stores the result in dest.
-                - For all valid n, k, r, c:
-                    - #dest(n,k,c,r) == src(n,k,r,c)
-        !*/
+void rms_normalize_gradient(
+    const tensor& gradient_input,
+    const tensor& scale,
+    const tensor& src,
+    const tensor& gamma,
+    tensor& src_grad,
+    tensor& gamma_grad,
+    resizable_tensor& dscale
+);
+/*!
+    requires
+        - scale.size() == src.num_samples()
+        - have_same_dimensions(gamma, gamma_grad)
+        - gamma.k() == src.k()
+        - gamma.nr() == 1
+        - gamma.nc() == 1
+        - have_same_dimensions(gradient_input, src)
+        - have_same_dimensions(gradient_input, src_grad)
+    ensures
+        - Let f(src, gamma) == dot(gradient_input, dest output of
+          rms_normalize(eps, dest, scale, src, gamma))
+        - Adds the gradient of f() with respect to src to #src_grad
+        - Assigns the gradient of f() with respect to gamma to #gamma_grad
+        - #dscale contains the gradients of f() with respect to the RMS values.
+!*/
 
-        void transpose_add(
-            tensor& dest,
-            const tensor& src
-        );
-        /*!
-            requires
-                - dest.num_samples() == src.num_samples()
-                - dest.k() == src.k()
-                - dest.nr() == src.nc()
-                - dest.nc() == src.nr()
-                - is_same_object(dest, src) == false
-            ensures
-                - Performs a transpose operation on the nr() x nc() matrices within src and adds the result to dest.
-                - For all valid n, k, r, c:
-                    - #dest(n,k,c,r) == dest(n,k,c,r) + src(n,k,r,c)
-        !*/
+void transpose(
+    tensor& dest,
+    const tensor& src
+);
+/*!
+    requires
+        - dest.num_samples() == src.num_samples()
+        - dest.k() == src.k()
+        - dest.nr() == src.nc()
+        - dest.nc() == src.nr()
+        - is_same_object(dest, src) == false
+    ensures
+        - Performs a transpose operation on the nr() x nc() matrices within src and stores the result in dest.
+        - For all valid n, k, r, c:
+            - #dest(n,k,c,r) == src(n,k,r,c)
+!*/
 
-        void batch_multiply(
-            tensor& out,
-            const tensor& a,
-            bool a_trans,
-            const tensor& b,
-            bool b_trans
-        );
+void transpose_add(
+    tensor& dest,
+    const tensor& src
+);
+/*!
+    requires
+        - dest.num_samples() == src.num_samples()
+        - dest.k() == src.k()
+        - dest.nr() == src.nc()
+        - dest.nc() == src.nr()
+        - is_same_object(dest, src) == false
+    ensures
+        - Performs a transpose operation on the nr() x nc() matrices within src and adds the result to dest.
+        - For all valid n, k, r, c:
+            - #dest(n,k,c,r) == dest(n,k,c,r) + src(n,k,r,c)
+!*/
+
+void batch_multiply(
+    tensor& out,
+    const tensor& a,
+    bool a_trans,
+    const tensor& b,
+    bool b_trans
+);
 
 /* TO BE ADDED TO <tensor_tools.cpp> */
 // ----------------------------------------------------------------------------------------
+
+        void apply_positional_encoding(
+            const tensor& pe,
+            const tensor& input,
+            resizable_tensor& output
+        )
+        {
+#ifdef DLIB_USE_CUDA
+            cuda::apply_positional_encoding(pe, input, output);
+#else
+            cpu::apply_positional_encoding(pe, input, output);
+#endif
+        }
+
+        // ----------------------------------------------------------------------------------------
 
         void rms_normalize(
             const double eps,
@@ -703,6 +781,7 @@ namespace dlib {
         }
 
         // ----------------------------------------------------------------------------------------
+
         void transpose(
             tensor& dest,
             const tensor& src
@@ -1172,52 +1251,43 @@ namespace dlib {
     template <int nb_embeddings, int embedding_length, typename SUBNET>
     using static_embedding = add_layer<embedding_<nb_embeddings, embedding_length, false>, SUBNET>;
 
-    template<int sequence_dim_, int embedding_dim_>
     class positional_encoding_ {
     public:
-        positional_encoding_() : sequence_dim(sequence_dim_), embedding_dim(embedding_dim_) {}
+        positional_encoding_() {}
         
         template <typename SUBNET>
         void setup(const SUBNET& sub) {
-            if (pe.size() == 0) {
-                pe.set_size(sequence_dim, embedding_dim, 1, 1);
+            if (params.size() == 0) {
+                sequence_dim = sub.get_output().nr();
+                embedding_dim = sub.get_output().nc();
+                params.set_size(sequence_dim, embedding_dim, 1, 1);
                 const float n = 10000.0f;
                 for (int r = 0; r < sequence_dim; ++r) {
                     for (int c = 0; c < embedding_dim; ++c) {
                         float theta = static_cast<float>(r) / std::pow(n, static_cast<float>(c) / embedding_dim);
-                        if (c % 2 == 0) pe.host()[tensor_index(pe, r, c, 0, 0)] = std::sin(theta);
-                        else pe.host()[tensor_index(pe, r, c, 0, 0)] = std::cos(theta);
+                        if (c % 2 == 0) params.host()[tensor_index(params, r, c, 0, 0)] = std::sin(theta);
+                        else params.host()[tensor_index(params, r, c, 0, 0)] = std::cos(theta);
                     }
                 }
             }
         }
-
+        
         template <typename SUBNET>
         void forward(const SUBNET& sub, resizable_tensor& output) {
-            const auto& prev_output = sub.get_output();
-            DLIB_CASSERT(prev_output.k() == 1);
-            output.set_size(prev_output.num_samples(), prev_output.k(), prev_output.nr(), prev_output.nc());
-            long num_samples = output.num_samples(), nr = output.nr(), nc = output.nc();
-
-            for (long s = 0; s < num_samples; ++s) {
-                parallel_for(0, nr, [&](long r) {
-                    for (long c = 0; c < nc; ++c) {
-                        output.host()[tensor_index(output, s, 0, r, c)] = pe.host()[tensor_index(pe, r, c, 0, 0)];
-                    }
-                });
-            }
+            tt::apply_positional_encoding(params, sub.get_output(), output);
         }
+
         template <typename SUBNET>
         void backward(const tensor& gradient_input, SUBNET& sub, tensor& /*params_grad*/) {
-            tt::copy_tensor(true, sub.get_gradient_input(), 0, gradient_input, 0, gradient_input.k());
+            tt::copy_tensor(false, sub.get_gradient_input(), 0, gradient_input, 0, gradient_input.k());
         }
 
-        const tensor& get_layer_params() const { return pe; }
-        tensor& get_layer_params() { return pe; }
+        const tensor& get_layer_params() const { return params; }
+        tensor& get_layer_params() { return params; }
 
         friend void serialize(const positional_encoding_& item, std::ostream& out) {
             serialize("positional_encoding_", out);
-            serialize(item.pe, out);
+            serialize(item.params, out);
             serialize(item.sequence_dim, out);
             serialize(item.embedding_dim, out);
         }
@@ -1226,7 +1296,7 @@ namespace dlib {
             deserialize(version, in);
             if (version != "positional_encoding_")
                 throw serialization_error("Unexpected version '" + version + "' found while deserializing dlib::positional_encoding_.");
-            deserialize(item.pe, in);
+            deserialize(item.params, in);
             deserialize(item.sequence_dim, in);
             deserialize(item.embedding_dim, in);
         }
@@ -1237,20 +1307,20 @@ namespace dlib {
         }
         friend void to_xml(const positional_encoding_& item, std::ostream& out) {
             out << "<positional_encoding sequence_dim='" << item.sequence_dim << "' embedding_dim='" << item.embedding_dim << "'>\n";
-            out << mat(item.pe);
+            out << mat(item.params);
             out << "</positional_encoding>\n";
         }
     private:
-        int sequence_dim;
-        int embedding_dim;
-        resizable_tensor pe;
+        resizable_tensor params;
+        long sequence_dim;
+        long embedding_dim;
     };
-    template <int sequence_length, int embedding_length, typename SUBNET>
-    using positional_encoding = add_layer<positional_encoding_<sequence_length, embedding_length>, SUBNET>;
+    template <typename SUBNET>
+    using positional_encoding = add_layer<positional_encoding_, SUBNET>;
     template <int sequence_length, int nb_embeddings, int embedding_length, typename SUBNET>
-    using embeddings = add_prev9<positional_encoding<sequence_length, embedding_length, tag9<embedding<nb_embeddings, embedding_length, tag10<SUBNET>>>>>;
+    using embeddings = add_prev9<positional_encoding<tag9<embedding<nb_embeddings, embedding_length, tag10<SUBNET>>>>>;
     template <int sequence_length, int nb_embeddings, int embedding_length, typename SUBNET>
-    using static_embeddings = add_prev9<positional_encoding<sequence_length, embedding_length, tag9<static_embedding<nb_embeddings, embedding_length, tag10<SUBNET>>>>>;
+    using static_embeddings = add_prev9<positional_encoding<tag9<static_embedding<nb_embeddings, embedding_length, tag10<SUBNET>>>>>;
 
     enum linear_bias_mode { LINEAR_HAS_BIAS = 0, LINEAR_NO_BIAS = 1 };
     struct num_linear_outputs {
@@ -2202,6 +2272,51 @@ private:
     }
 };
 
+void test_apply_positional_encoding()
+{
+    const long num_samples = 2;
+    const long k = 3;
+    const long nr = 4;
+    const long nc = 5;
+
+    resizable_tensor input(num_samples, k, nr, nc);
+    resizable_tensor output_cpu(input);
+    resizable_tensor pe(nr, nc, 1, 1);
+    tt::tensor_rand rnd(0);
+    rnd.fill_uniform(input);
+    rnd.fill_uniform(pe);
+
+    tt::apply_positional_encoding(pe, input, output_cpu);
+
+    const float* p_input = input.host();
+    const float* p_output_cpu = output_cpu.host();
+    const float* p_pe = pe.host();
+    bool error_found = false;
+    for (long s = 0; s < num_samples; ++s)
+    {
+        for (long k = 0; k < input.k(); ++k)
+        {
+            for (long r = 0; r < input.nr(); ++r)
+            {
+                for (long c = 0; c < input.nc(); ++c)
+                {
+                    float expected_value = p_pe[r * nc + c];
+                    float output_value = p_output_cpu[tensor_index(output_cpu, s, k, r, c)];
+                    if (std::abs(output_value - expected_value) >= 1e-5) error_found = true;
+                }
+            }
+        }
+    }
+    DLIB_TEST_MSG(!error_found, "CPU positional encoding output v/s expected values");
+
+#ifdef DLIB_USE_CUDA
+    resizable_tensor output_cuda(input);
+    cuda::apply_positional_encoding(pe, input, output_cuda);
+    DLIB_TEST_MSG(max(abs(mat(output_cpu) - mat(output_cuda))) < 1e-5,
+        "max(abs(mat(output_cpu) - mat(output_cuda))) < 1e-5");
+#endif
+}
+
 void test_rms_normalize()
 {
     resizable_tensor x(2, 3, 4, 5);
@@ -2372,9 +2487,10 @@ int main(int argc, char* argv[]) {
             true,      // 4: softmax layer
             true,      // 5: attention mechanism
             true,      // 6: batch_multiply low level function
-            false,      // 7: rms_norm layer
-            false,      // 8: multihead attention model
-            false       // 9: "shakespeare" example
+            false,     // 7: positional_encoding & embedding layers
+            true,      // 8: rms_norm layer
+            true,      // 9: multihead attention model
+            true       // 10: "shakespeare" example
         };
 
         // test: tokenization
@@ -2950,8 +3066,21 @@ int main(int argc, char* argv[]) {
         }
         */
 
-        // test: rms_norm layer
+        // test: positional_encoding & embedding layers
         if (!skip_tests[7]) {
+            if (display_debug_info) cout << "\ntest: positional_encoding & embedding layers\n";
+            {
+                test_apply_positional_encoding();
+                {                    
+                    positional_encoding_ l;
+                    auto res = test_layer(l);
+                    DLIB_TEST_MSG(res, res);
+                }
+            }
+        }
+
+        // test: rms_norm layer
+        if (!skip_tests[8]) {
             if (display_debug_info) cout << "\ntest: rms_norm layer\n";
             {
                 test_rms_normalize();
@@ -3043,7 +3172,7 @@ Be all my sins remembered.)";
             }
            
             // Train multihead attention model
-            if (!skip_tests[8]) {
+            if (!skip_tests[9]) {
                 dnn_trainer<net_type_a> trainer_b(net_a);
                 trainer_b.set_learning_rate(learning_rate);
                 trainer_b.set_min_learning_rate(min_learning_rate);
@@ -3065,7 +3194,7 @@ Be all my sins remembered.)";
             }
 
             // "shakespeare" example
-            if (!skip_tests[9]) {
+            if (!skip_tests[10]) {
                 // Lambda function to convert a vector of integers to a string of unsigned chars
                 auto to_unsigned_char_string = [](const matrix<int, 0, 1>& ints) -> string {
                     string result;

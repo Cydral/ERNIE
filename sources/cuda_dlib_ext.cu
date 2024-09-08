@@ -4,6 +4,59 @@ namespace dlib
 {
     namespace cuda
     {
+        __global__ void _cuda_apply_positional_encoding_optimized(
+            const float* pe_data,
+            float* output_data,
+            const size_t te,
+            const size_t nk,
+            const size_t nr,
+            const size_t nc
+        )
+        {
+            for (auto i : grid_stride_range(0, te)) {
+                const size_t s = i / (nk * nr * nc);
+                const size_t k = (i / (nr * nc)) % nk;
+                const size_t r = (i / nc) % nr;
+                const size_t c = i % nc;
+
+                const size_t offset_output = s * nk * nr * nc + k * nr * nc + r * nc + c;
+                output_data[offset_output] = pe_data[r * nc + c];
+            }
+        }
+
+        void apply_positional_encoding(
+            const tensor& pe,
+            const tensor& input,
+            resizable_tensor& output
+        )
+        {
+            DLIB_CASSERT(
+                pe.num_samples() == input.nr() &&
+                pe.k() == input.nc() &&
+                pe.nr() == 1 &&
+                pe.nc() == 1,
+                "\npe.num_samples():    " << pe.num_samples() <<
+                "\npe.k():  " << pe.k() <<
+                "\npe.nr(): " << pe.nr() <<
+                "\npe.nc(): " << pe.nc() <<
+                "\ninput.nr(): " << input.nr() <<
+                "\ninput.nc(): " << input.nc()
+            );
+
+            output.copy_size(input);
+
+            const size_t ns = input.num_samples();
+            const size_t nk = input.k();
+            const size_t nr = input.nr();
+            const size_t nc = input.nc();
+            const size_t total_elements = ns * nk * nr * nc;
+
+            launch_kernel(_cuda_apply_positional_encoding_optimized, max_jobs(total_elements),
+                pe.device(), output.device(), total_elements, nk, nr, nc);
+        }
+
+        // ----------------------------------------------------------------------------------------
+
         __global__ void _cuda_rms_normalize(
             float* dest,
             float* scale,
@@ -19,7 +72,7 @@ namespace dlib
             {
                 const auto ps = src + n * ks * num;
                 float sum_squares = 0.0f;
-                for (auto i : grid_stride_range(0, ks * num))
+                for (auto i : grid_stride_range(0, ks* num))
                 {
                     sum_squares += ps[i] * ps[i];
                 }
@@ -40,7 +93,7 @@ namespace dlib
             {
                 const auto ps = src + n * ks * num;
                 const auto pd = dest + n * ks * num;
-                for (auto i : grid_stride_range(0, ks * num))
+                for (auto i : grid_stride_range(0, ks* num))
                 {
                     pd[i] = ps[i] * scale[n] * gamma[i / num];
                 }
@@ -54,7 +107,7 @@ namespace dlib
             const tensor& src,
             const tensor& gamma
         )
-        {            
+        {
             DLIB_CASSERT(
                 gamma.k() == src.k() &&
                 gamma.nr() == 1 &&
@@ -155,7 +208,6 @@ namespace dlib
             dscale.copy_size(scale);
             dscale = 0;
 
-            // Lancement du kernel CUDA
             launch_kernel(_cuda_rms_normalize_gradient, max_jobs(ks * num, ns),
                 src_grad.device(), gamma_grad.device(), dscale.device(),
                 src.device(), gradient_input.device(), scale.device(), gamma.device(),
