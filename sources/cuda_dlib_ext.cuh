@@ -14,7 +14,7 @@ namespace dlib
         void apply_positional_encoding(
             const tensor& pe,
             const tensor& input,
-            resizable_tensor& output
+            tensor& output
         );
 
         void rms_normalize(

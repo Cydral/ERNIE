@@ -63,9 +63,9 @@ using namespace dlib;
 // Global parameters for the Transformer network
 constexpr int vocab_size = 8000;                                            // Size of the vocabulary
 constexpr int sequence_size = 24;                                           // Length of the sequence
-constexpr int number_of_heads = 8;                                          // Number of attention heads
-constexpr int number_of_blocks = 6;                                         // Number of transformer blocks
-constexpr int embedding_size = (64 / number_of_heads) * number_of_heads;   // Size of the embedding
+constexpr int number_of_heads = 4;                                          // Number of attention heads
+constexpr int number_of_blocks = 4;                                         // Number of transformer blocks
+constexpr int embedding_size = (128 / number_of_heads) * number_of_heads;   // Size of the embedding
 constexpr int bos_id = 0, eos_id = 1, unk_id = 2, pad_id = 3;
 
 // Other global parameters
@@ -219,14 +219,15 @@ namespace dlib {
         void apply_positional_encoding(
             const tensor& pe,
             const tensor& input,
-            resizable_tensor& output
+            tensor& output
         )
         {
             DLIB_CASSERT(
                 pe.num_samples() == input.nr() &&
                 pe.k() == input.nc() &&
                 pe.nr() == 1 &&
-                pe.nc() == 1,
+                pe.nc() == 1 &&
+                have_same_dimensions(input, output),
                 "\npe.num_samples():    " << pe.num_samples() <<
                 "\npe.k():  " << pe.k() <<
                 "\npe.nr(): " << pe.nr() <<
@@ -234,9 +235,6 @@ namespace dlib {
                 "\ninput.nr(): " << input.nr() <<
                 "\ninput.nc(): " << input.nc()
             );
-
-            output.copy_size(input);
-
             const long ns = input.num_samples();
             const long nk = input.k();
             const long nr = input.nr();
@@ -623,7 +621,7 @@ namespace dlib {
         void apply_positional_encoding(
             const tensor& pe,
             const tensor& input,
-            resizable_tensor& output
+            tensor& output
         );
         /*!
             requires
@@ -736,7 +734,7 @@ void batch_multiply(
         void apply_positional_encoding(
             const tensor& pe,
             const tensor& input,
-            resizable_tensor& output
+            tensor& output
         )
         {
 #ifdef DLIB_USE_CUDA
@@ -1064,19 +1062,19 @@ void batch_multiply(
 
     // ----------------------------------------------------------------------------------------
     /* TO BE ADDED TO <layers_abstract.h> & <layers.h> */
-    const double DEFAULT_MAX_NORM_VALUE = 3.0;
 
-    template<int num_embeddings_, int embedding_dim_, bool is_trainable_>
-    class embedding_ {
+    template<unsigned long num_embeddings_, unsigned long embedding_dim_>
+    class embeddings_
+    {
         static_assert(num_embeddings_ > 0, "The size of the dictionary of embeddings must be > 0");
         static_assert(embedding_dim_ > 0, "The size of each embedding vector must be > 0");
 
     public:
-        embedding_() : num_embeddings(num_embeddings_),
+        embeddings_() : num_embeddings(num_embeddings_),
             embedding_dim(embedding_dim_),
             learning_rate_multiplier(1),
-            scale_grad_by_freq(true),
-            max_norm(DEFAULT_MAX_NORM_VALUE) {}
+            scale_grad_by_freq(false),
+            apply_max_norm(true) {}
 
         double get_learning_rate_multiplier() const { return learning_rate_multiplier; }
         void set_learning_rate_multiplier(double val) { learning_rate_multiplier = val; }
@@ -1084,202 +1082,206 @@ void batch_multiply(
         void set_scale_grad_by_freq(bool val) { scale_grad_by_freq = val; }
         bool get_scale_grad_by_freq() const { return scale_grad_by_freq; }
 
-        void set_max_norm(std::optional<double> new_max_norm) { max_norm = new_max_norm; }
-        void set_max_norm(double new_max_norm = 3.0) { max_norm = new_max_norm; }
-        std::optional<double> get_max_norm() const { return max_norm; }
-        void disable_max_norm() { max_norm = std::nullopt; }
+        void set_apply_max_norm(bool val) { apply_max_norm = val; }
+        bool get_apply_max_norm() const { return apply_max_norm; }
 
         unsigned long get_num_embeddings() const { return num_embeddings; }
-        void set_num_embeddings(unsigned long num) {
+        void set_num_embeddings(unsigned long num)
+        {
             DLIB_CASSERT(num > 0);
-            if (num != num_embeddings) {
+            if (num != num_embeddings)
+            {
                 DLIB_CASSERT(get_layer_params().size() == 0,
                     "You can't change size of the dictionary of embeddings if the parameter has already been allocated.");                
             }
         }
 
         template <typename SUBNET>
-        void setup(const SUBNET& sub) {
-            if (embeddings.size() == 0) {
-                DLIB_CASSERT(sub.get_output().nc() == 1);
-                DLIB_CASSERT(sub.get_output().nr() > 0);
-                embeddings.set_size(num_embeddings, embedding_dim);
+        void setup(const SUBNET& sub)
+        {
+            //DLIB_CASSERT(sub.get_output().nc() == 1);
+            //DLIB_CASSERT(sub.get_output().nr() > 0);
+            params.set_size(num_embeddings, embedding_dim);
 
-                dlib::rand rnd(std::rand());
-                randomize_parameters(embeddings, num_embeddings_ + embedding_dim_, rnd);
-            }
+            tt::tensor_rand rnd(0);
+            rnd.fill_gaussian(params);
         }
 
         template <typename SUBNET>
-        void forward(const SUBNET& sub, resizable_tensor& output) {
+        void forward(const SUBNET& sub, resizable_tensor& output)
+        {
             const auto& prev = sub.get_output();
-            output.set_size(prev.num_samples(), 1, prev.nr(), embedding_dim);
+            output.set_size(prev.num_samples(), prev.k(), prev.nr(), embedding_dim);
+            long num_samples = output.num_samples(), nk = output.k(), nr = output.nr(), nc = output.nc();
 
             const float* prev_data = prev.host();
             float* output_data = output.host();
-            const float* embeddings_data = embeddings.host();
-            long num_samples = output.num_samples(), nr = output.nr(), nc = output.nc();
+            const float* embeddings_data = params.host();
 
-            for (long s = 0; s < num_samples; ++s) {
-                parallel_for(0, nr, [&](long r) {
-                    long token_idx = static_cast<long>(prev_data[tensor_index(prev, s, 0, r, 0)]);
-                    if (token_idx < num_embeddings) {
-                        for (long c = 0; c < nc; ++c) {
-                            output_data[tensor_index(output, s, 0, r, c)] = embeddings_data[tensor_index(embeddings, token_idx, c, 0, 0)];
+            parallel_for(0, num_samples, [&](long s) {
+                for (long r = 0; r < nr; ++r)
+                {
+                    for (long k = 0; k < nk; ++k)
+                    {
+                        const unsigned long token_idx = static_cast<unsigned long>(prev_data[tensor_index(prev, s, k, r, 0)]);
+                        if (token_idx < num_embeddings)
+                        {
+                            for (long c = 0; c < nc; ++c)
+                                output_data[tensor_index(output, s, k, r, c)] = embeddings_data[tensor_index(params, token_idx, c, 0, 0)];
+                        } else
+                        {
+                            for (long c = 0; c < nc; ++c)
+                                output_data[tensor_index(output, s, k, r, c)] = 0;
                         }
                     }
-                    else {
-                        // Thread-safe logging of warning
-                        static std::mutex cout_mutex;
-                        std::lock_guard<std::mutex> lock(cout_mutex);
-                        std::cout << "Warning: token_idx (" << token_idx << ") exceeds num_embeddings (" << num_embeddings << ")" << std::endl;
-                    }
-                });
-            }
+                }
+            });
         }
 
         template <typename SUBNET>
-        void backward(const tensor& gradient_input, SUBNET& sub, tensor& /* params_grad */) {
-            tt::resize_bilinear_gradient(sub.get_gradient_input(), gradient_input);
-            if (is_trainable_ && learning_rate_multiplier != 0) {
+        void backward(const tensor& gradient_input, SUBNET& sub, tensor& /* params_grad */)
+        {
+            if (learning_rate_multiplier != 0) {
                 auto& prev = sub.get_output();
                 const float* prev_data = prev.host();
                 const float* gradient_input_data = gradient_input.host();
-                float* embeddings_data = embeddings.host();
+                float* embeddings_data = params.host();
                 long num_samples = gradient_input.num_samples(), nr = gradient_input.nr(), nc = gradient_input.nc();
-                std::unordered_map<long, long> token_freq;
+                
+                std::vector<std::mutex> embedding_mutexes(num_embeddings);
+                std::unordered_map<unsigned long, unsigned long> token_freq;
 
-                if (scale_grad_by_freq) {
-                    for (long s = 0; s < num_samples; ++s) {
-                        for (long r = 0; r < nr; ++r) {
-                            long token_idx = static_cast<long>(prev_data[tensor_index(prev, s, 0, r, 0)]);
+                if (scale_grad_by_freq)
+                {
+                    for (long s = 0; s < num_samples; ++s)
+                    {
+                        for (long r = 0; r < nr; ++r)
+                        {
+                            const unsigned long token_idx = static_cast<unsigned long>(prev_data[tensor_index(prev, s, 0, r, 0)]);
                             if (token_idx < num_embeddings) token_freq[token_idx]++;
                         }
                     }
                 }
 
-                for (long s = 0; s < num_samples; ++s) {
-                    parallel_for(0, nr, [&](long r) {
-                        long token_idx = static_cast<long>(prev_data[tensor_index(prev, s, 0, r, 0)]);
-                        if (token_idx < num_embeddings) {
+                parallel_for(0, num_samples, [&](long s)
+                {
+                    for (long r = 0; r < nr; ++r)
+                    {
+                        const unsigned long token_idx = static_cast<unsigned long>(prev_data[tensor_index(prev, s, 0, r, 0)]);
+                        if (token_idx < num_embeddings)
+                        {
                             float freq_scale = 1.0f;
-                            if (scale_grad_by_freq) {
+                            if (scale_grad_by_freq)
+                            {
                                 auto it = token_freq.find(token_idx);
-                                freq_scale = (it != token_freq.end()) ? (1.0f / it->second) : 1.0f;
+                                if (it != token_freq.end()) freq_scale = (1.0f / it->second);
                             }
 
-                            for (long c = 0; c < nc; ++c) {
-                                float& embedding = embeddings_data[tensor_index(embeddings, token_idx, c, 0, 0)];
+                            std::lock_guard<std::mutex> lock(embedding_mutexes[token_idx]);
+                            for (long c = 0; c < nc; ++c)
+                            {
+                                float& embedding = embeddings_data[tensor_index(params, token_idx, c, 0, 0)];
                                 float gradient = gradient_input_data[tensor_index(gradient_input, s, 0, r, c)];
                                 float update = learning_rate_multiplier * gradient * freq_scale;
-
-                                // Use atomic operation for thread-safe update
-                                std::atomic<float>* atomic_embedding = reinterpret_cast<std::atomic<float>*>(&embedding);
-                                atomic_embedding->fetch_sub(update, std::memory_order_relaxed);
+                                embedding -= update;
                             }
-
-                            if (max_norm.has_value()) {
-                                apply_max_norm(embeddings_data + token_idx * embedding_dim, embedding_dim);
+                            if (apply_max_norm)
+                            {
+                                float* embedding_vector = embeddings_data + token_idx * embedding_dim;
+                                float max_abs = 0.0f;
+                                for (long i = 0; i < nc; ++i)
+                                    max_abs = std::max(max_abs, std::abs(embedding_vector[i]));
+                                if (max_abs != 0.0f)
+                                {
+                                    for (long i = 0; i < nc; ++i) embedding_vector[i] /= max_abs;
+                                }                                                 
                             }
                         }
-                        else {
-                            // Thread-safe logging of warning
-                            static std::mutex cout_mutex;
-                            std::lock_guard<std::mutex> lock(cout_mutex);
-                            std::cout << "Warning: token_idx (" << token_idx << ") exceeds num_embeddings (" << num_embeddings << ")" << std::endl;
-                        }
-                    });
-                }
+                    }
+                });
             }
         }
 
-        const tensor& get_layer_params() const { return embeddings; }
-        tensor& get_layer_params() { return embeddings; }
+        const tensor& get_layer_params() const { return params; }
+        tensor& get_layer_params() { return params; }
 
-        friend void serialize(const embedding_& item, std::ostream& out) {
-            serialize("embedding_", out);
-            serialize(item.embeddings, out);
+        friend void serialize(const embeddings_& item, std::ostream& out) {
+            serialize("embeddings_", out);
+            serialize(item.params, out);
             serialize(item.num_embeddings, out);
             serialize(item.embedding_dim, out);
             serialize(item.learning_rate_multiplier, out);
         }
-        friend void deserialize(embedding_& item, std::istream& in) {
+        friend void deserialize(embeddings_& item, std::istream& in) {
             std::string version;
             deserialize(version, in);
-            if (version != "embedding_")
-                throw serialization_error("Unexpected version found while deserializing dlib::embedding_.");
-            deserialize(item.embeddings, in);
+            if (version != "embeddings_")
+                throw serialization_error("Unexpected version found while deserializing dlib::embeddings_.");
+            deserialize(item.params, in);
             deserialize(item.num_embeddings, in);
             deserialize(item.embedding_dim, in);
             deserialize(item.learning_rate_multiplier, in);
         }
 
-        friend std::ostream& operator<<(std::ostream& out, const embedding_& item) {
+        friend std::ostream& operator<<(std::ostream& out, const embeddings_& item) {
             out << "embedding (num_embeddings=" << item.num_embeddings << ", embedding_dim=" << item.embedding_dim << ") learning_rate_mult=" << item.learning_rate_multiplier;
             return out;
         }
-        friend void to_xml(const embedding_& item, std::ostream& out) {
+        friend void to_xml(const embeddings_& item, std::ostream& out) {
             out << "<embedding num_embeddings='" << item.num_embeddings << "' embedding_dim='" << item.embedding_dim << "' learning_rate_mult='" << item.learning_rate_multiplier << "'>\n";
-            out << mat(item.embeddings);
+            out << mat(item.params);
             out << "</embedding>\n";
         }
 
     private:
-        int num_embeddings;
-        int embedding_dim;
+        resizable_tensor params;
+        unsigned long num_embeddings;
+        unsigned long embedding_dim;
         double learning_rate_multiplier;
         bool scale_grad_by_freq;
-        std::optional<double> max_norm;
-        resizable_tensor embeddings;
-
-        void apply_max_norm(float* embedding_vector, long dim) {
-            double norm_sq = 0.0;
-            for (long i = 0; i < dim; ++i) {
-                norm_sq += embedding_vector[i] * embedding_vector[i];
-            }
-
-            if (norm_sq > max_norm.value() * max_norm.value()) {
-                double scale = max_norm.value() / std::sqrt(norm_sq);
-                for (long i = 0; i < dim; ++i) {
-                    embedding_vector[i] *= scale;
-                }
-            }
-        }
+        bool apply_max_norm;
     };
-    template <int nb_embeddings, int embedding_length, typename SUBNET>
-    using embedding = add_layer<embedding_<nb_embeddings, embedding_length, true>, SUBNET>;
-    template <int nb_embeddings, int embedding_length, typename SUBNET>
-    using static_embedding = add_layer<embedding_<nb_embeddings, embedding_length, false>, SUBNET>;
+    template <unsigned long nb_embeddings, unsigned long embedding_length, typename SUBNET>
+    using embeddings = add_layer<embeddings_<nb_embeddings, embedding_length>, SUBNET>;
 
     class positional_encoding_ {
     public:
-        positional_encoding_() {}
+        positional_encoding_(unsigned long sequence_dim_ = 1, unsigned long embedding_dim_ = 1) :
+            sequence_dim(sequence_dim_), embedding_dim(embedding_dim_) {}
+        positional_encoding_(const positional_encoding_& item) : 
+            params(item.params), sequence_dim(item.sequence_dim), embedding_dim(item.embedding_dim) {}
+        positional_encoding_& operator= (const positional_encoding_& item) {
+            if (this == &item) return *this;
+            params = item.params;
+            sequence_dim = item.sequence_dim;
+            embedding_dim = item.embedding_dim;
+            return *this;
+        }
         
         template <typename SUBNET>
         void setup(const SUBNET& sub) {
-            if (params.size() == 0) {
-                sequence_dim = sub.get_output().nr();
-                embedding_dim = sub.get_output().nc();
-                params.set_size(sequence_dim, embedding_dim, 1, 1);
-                const float n = 10000.0f;
-                for (int r = 0; r < sequence_dim; ++r) {
-                    for (int c = 0; c < embedding_dim; ++c) {
-                        float theta = static_cast<float>(r) / std::pow(n, static_cast<float>(c) / embedding_dim);
-                        if (c % 2 == 0) params.host()[tensor_index(params, r, c, 0, 0)] = std::sin(theta);
-                        else params.host()[tensor_index(params, r, c, 0, 0)] = std::cos(theta);
-                    }
-                }
-            }
+              sequence_dim = sub.get_output().nr();
+              embedding_dim = sub.get_output().nc();
+              params.set_size(sequence_dim, embedding_dim, 1, 1);
+              const float n = 10000.0f;
+              for (unsigned long r = 0; r < sequence_dim; ++r) {
+                  for (unsigned long c = 0; c < embedding_dim; ++c) {
+                      float theta = static_cast<float>(r) / std::pow(n, static_cast<float>(c) / embedding_dim);
+                      if (c % 2 == 0) params.host()[tensor_index(params, r, c, 0, 0)] = std::sin(theta);
+                      else params.host()[tensor_index(params, r, c, 0, 0)] = std::cos(theta);
+                  }
+              }
         }
         
-        template <typename SUBNET>
-        void forward(const SUBNET& sub, resizable_tensor& output) {
-            tt::apply_positional_encoding(params, sub.get_output(), output);
+        void forward_inplace(const tensor& data_input, tensor& data_output) {
+            tt::apply_positional_encoding(params, data_input, data_output);
         }
 
-        template <typename SUBNET>
-        void backward(const tensor& gradient_input, SUBNET& sub, tensor& /*params_grad*/) {
-            tt::copy_tensor(false, sub.get_gradient_input(), 0, gradient_input, 0, gradient_input.k());
+        void backward_inplace(const tensor& gradient_input, tensor& data_grad, tensor& /*params_grad*/) {
+            if (is_same_object(gradient_input, data_grad))
+                tt::copy_tensor(false, data_grad, 0, gradient_input, 0, gradient_input.k());
+            else
+                tt::copy_tensor(true, data_grad, 0, gradient_input, 0, gradient_input.k());
         }
 
         const tensor& get_layer_params() const { return params; }
@@ -1312,15 +1314,13 @@ void batch_multiply(
         }
     private:
         resizable_tensor params;
-        long sequence_dim;
-        long embedding_dim;
+        unsigned long sequence_dim;
+        unsigned long embedding_dim;
     };
     template <typename SUBNET>
     using positional_encoding = add_layer<positional_encoding_, SUBNET>;
-    template <int sequence_length, int nb_embeddings, int embedding_length, typename SUBNET>
-    using embeddings = add_prev9<positional_encoding<tag9<embedding<nb_embeddings, embedding_length, tag10<SUBNET>>>>>;
-    template <int sequence_length, int nb_embeddings, int embedding_length, typename SUBNET>
-    using static_embeddings = add_prev9<positional_encoding<tag9<static_embedding<nb_embeddings, embedding_length, tag10<SUBNET>>>>>;
+    template <unsigned long nb_embeddings, unsigned long embedding_length, typename SUBNET>
+    using positional_embeddings = add_prev9<positional_encoding<tag9<embeddings<nb_embeddings, embedding_length, tag10<SUBNET>>>>>;
 
     enum linear_bias_mode { LINEAR_HAS_BIAS = 0, LINEAR_NO_BIAS = 1 };
     struct num_linear_outputs {
@@ -2042,7 +2042,7 @@ void batch_multiply(
     // VSLM network
     using llm_net = classification_head<vocab_size,        
         repeat<number_of_blocks, transformer_block,
-        embeddings<sequence_size, vocab_size, embedding_size,
+        positional_embeddings<vocab_size, embedding_size,
         input<matrix<int, 0, 1>>>>>;
 }
 
@@ -2415,7 +2415,7 @@ int main(int argc, char* argv[]) {
     bool do_benchmark = false, text_generation = false;
     bool voc_training = false, model_training = false, model_prompting = false, use_sync_file = false;
     double learning_rate = 1e-3, min_learning_rate = 1e-6, weight_decay = 0.001, beta1 = 0.9, beta2 = 0.999, temperature = 0.9;
-    long mini_batch_size = 32, iterations_without_progress_threshold = 8500, top_k = 3;
+    long mini_batch_size = 32, iterations_without_progress_threshold = 10000, top_k = 3;
     std::vector<int> gpus = { 0 };
     set_dnn_prefer_fastest_algorithms();
        
@@ -2488,9 +2488,9 @@ int main(int argc, char* argv[]) {
             true,      // 5: attention mechanism
             true,      // 6: batch_multiply low level function
             false,     // 7: positional_encoding & embedding layers
-            true,      // 8: rms_norm layer
+            true,     // 8: rms_norm layer
             true,      // 9: multihead attention model
-            true       // 10: "shakespeare" example
+            false       // 10: "shakespeare" example
         };
 
         // test: tokenization
@@ -3071,8 +3071,13 @@ int main(int argc, char* argv[]) {
             if (display_debug_info) cout << "\ntest: positional_encoding & embedding layers\n";
             {
                 test_apply_positional_encoding();
-                {                    
+                {
                     positional_encoding_ l;
+                    auto res = test_layer(l);
+                    DLIB_TEST_MSG(res, res);
+                }
+                {
+                    embeddings_<5000, 128> l;
                     auto res = test_layer(l);
                     DLIB_TEST_MSG(res, res);
                 }
@@ -3144,7 +3149,7 @@ Be all my sins remembered.)";
             net_type_a net_a;
             using net_type_b = classification_head<num_classes,
                 repeat<2, transformer_block,
-                embeddings<sequence_size, num_classes, embedding_size,
+                positional_embeddings<num_classes, embedding_size,
                 input<matrix<int, 0, 1>>>>>;
             net_type_b net_b;            
 

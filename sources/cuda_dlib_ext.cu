@@ -27,14 +27,15 @@ namespace dlib
         void apply_positional_encoding(
             const tensor& pe,
             const tensor& input,
-            resizable_tensor& output
+            tensor& output
         )
         {
             DLIB_CASSERT(
                 pe.num_samples() == input.nr() &&
                 pe.k() == input.nc() &&
                 pe.nr() == 1 &&
-                pe.nc() == 1,
+                pe.nc() == 1 &&
+                have_same_dimensions(input, output),
                 "\npe.num_samples():    " << pe.num_samples() <<
                 "\npe.k():  " << pe.k() <<
                 "\npe.nr(): " << pe.nr() <<
@@ -42,9 +43,6 @@ namespace dlib
                 "\ninput.nr(): " << input.nr() <<
                 "\ninput.nc(): " << input.nc()
             );
-
-            output.copy_size(input);
-
             const size_t ns = input.num_samples();
             const size_t nk = input.k();
             const size_t nr = input.nr();
