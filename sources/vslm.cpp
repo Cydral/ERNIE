@@ -65,7 +65,7 @@ constexpr int vocab_size = 8000;                                            // S
 constexpr int sequence_size = 24;                                           // Length of the sequence
 constexpr int number_of_heads = 4;                                          // Number of attention heads
 constexpr int number_of_blocks = 4;                                         // Number of transformer blocks
-constexpr int embedding_size = (128 / number_of_heads) * number_of_heads;   // Size of the embedding
+constexpr int embedding_size = (72 / number_of_heads) * number_of_heads;   // Size of the embedding
 constexpr int bos_id = 0, eos_id = 1, unk_id = 2, pad_id = 3;
 
 // Other global parameters
@@ -396,19 +396,97 @@ namespace dlib {
 // -----------------------------------------------------------------------------------
 
         void transpose(
+            bool add,
             tensor& dest,
-            const tensor& src
+            const tensor& src            
         )
         {
             DLIB_CASSERT(dest.num_samples() == src.num_samples() &&
                 dest.k() == src.k() &&
                 dest.nr() == src.nc() &&
-                dest.nc() == src.nr());
+                dest.nc() == src.nr(),
+                "Incompatible tensor dimensions.");
 
             const float* src_data = src.host();
             float* dest_data = dest.host();
 
-            for (long n = 0; n < src.num_samples(); ++n)
+            const long num_samples = src.num_samples();
+            const long k_dim = src.k();
+            const long src_nr = src.nr();
+            const long src_nc = src.nc();
+            const long dest_nr = dest.nr();
+            const long dest_nc = dest.nc();
+
+            parallel_for(0, num_samples * k_dim, [&](long i) {
+                const long n = i / k_dim;
+                const long k = i % k_dim;
+                const long src_nk_offset = (n * src.k() + k) * src_nr;
+                const long dest_nk_offset = (n * dest.k() + k) * dest_nr;
+
+                for (long r = 0; r < src_nr; ++r) {
+                    for (long c = 0; c < src_nc; ++c) {
+                        const long src_idx = (src_nk_offset + r) * src_nc + c;
+                        const long dest_idx = (dest_nk_offset + c) * dest_nc + r;
+
+                        if (add) {
+                            dest_data[dest_idx] += src_data[src_idx];
+                        }
+                        else {
+                            dest_data[dest_idx] = src_data[src_idx];
+                        }
+                    }
+                }
+            });
+        }
+
+// -----------------------------------------------------------------------------------
+
+        void split_columns(
+            bool add_to,
+            tensor& dest,
+            const tensor& src,
+            const long num_heads
+        ) {
+            DLIB_CASSERT(is_same_object(dest, src) == false);
+            DLIB_CASSERT(dest.num_samples() == src.num_samples() &&
+                dest.k() == num_heads &&
+                src.k() == 1 &&
+                dest.nc() == (src.nc() / num_heads) &&
+                src.nc() % num_heads == 0,
+                "Incompatible tensor dimensions.");
+
+            for (long s = 0; s < dest.num_samples(); ++s)
+            {
+                for (long k = 0; k < dest.k(); ++k)
+                {
+                    for (long r = 0; r < dest.nr(); ++r)
+                    {
+                        for (long c = 0; c < dest.nc(); ++c)
+                        {
+                            if (add_to) dest.host()[tensor_index(dest, s, k, r, c)] += src.host()[tensor_index(src, s, 0, r, (k * dest.nc()) + c)];
+                            else dest.host()[tensor_index(dest, s, k, r, c)] = src.host()[tensor_index(src, s, 0, r, (k * dest.nc()) + c)];
+                        }
+                    }
+                }
+            }
+        }
+
+// -----------------------------------------------------------------------------------
+
+        void merge_columns(
+            bool add_to,
+            tensor& dest,
+            const tensor& src
+        ) {
+            DLIB_CASSERT(is_same_object(dest, src) == false);
+            DLIB_CASSERT(dest.num_samples() == src.num_samples() &&
+                dest.k() == 1 &&
+                src.k() > 1 &&
+                dest.nr() == src.nr() &&
+                dest.nc() == (src.nc() * src.k()),
+                "Incompatible tensor dimensions.");
+
+            for (long s = 0; s < src.num_samples(); ++s)
             {
                 for (long k = 0; k < src.k(); ++k)
                 {
@@ -416,42 +494,14 @@ namespace dlib {
                     {
                         for (long c = 0; c < src.nc(); ++c)
                         {
-                            dest_data[((n * dest.k() + k) * dest.nr() + c) * dest.nc() + r] =
-                                src_data[((n * src.k() + k) * src.nr() + r) * src.nc() + c];
+                            if (add_to) dest.host()[tensor_index(dest, s, 0, r, (k * src.nc()) + c)] += src.host()[tensor_index(src, s, k, r, c)];
+                            else dest.host()[tensor_index(dest, s, 0, r, (k * src.nc()) + c)] = src.host()[tensor_index(src, s, k, r, c)];
                         }
                     }
                 }
             }
         }
 
-        void transpose_add(
-            tensor& dest,
-            const tensor& src
-        )
-        {
-            DLIB_CASSERT(dest.num_samples() == src.num_samples() &&
-                dest.k() == src.k() &&
-                dest.nr() == src.nc() &&
-                dest.nc() == src.nr());
-
-            const float* src_data = src.host();
-            float* dest_data = dest.host();
-
-            for (long n = 0; n < src.num_samples(); ++n)
-            {
-                for (long k = 0; k < src.k(); ++k)
-                {
-                    for (long r = 0; r < src.nr(); ++r)
-                    {
-                        for (long c = 0; c < src.nc(); ++c)
-                        {
-                            dest_data[((n * dest.k() + k) * dest.nr() + c) * dest.nc() + r] +=
-                                src_data[((n * src.k() + k) * src.nr() + r) * src.nc() + c];
-                        }
-                    }
-                }
-            }
-        }
 
 // -----------------------------------------------------------------------------------
         /*void batch_multiply(
@@ -687,6 +737,7 @@ void rms_normalize_gradient(
 !*/
 
 void transpose(
+    bool add_to,
     tensor& dest,
     const tensor& src
 );
@@ -698,26 +749,71 @@ void transpose(
         - dest.nc() == src.nr()
         - is_same_object(dest, src) == false
     ensures
-        - Performs a transpose operation on the nr() x nc() matrices within src and stores the result in dest.
-        - For all valid n, k, r, c:
-            - #dest(n,k,c,r) == src(n,k,r,c)
+        - Performs a transpose operation on the nr() x nc() matrices within src.
+        - If (add_to) is false:
+            - The result is stored in dest, overwriting its previous contents.
+            - For all valid n, k, r, c:
+                - #dest(n,k,c,r) == src(n,k,r,c)
+        - If (add_to) is true:
+            - The result is added to the existing contents of dest.
+            - For all valid n, k, r, c:
+                - #dest(n,k,c,r) == dest(n,k,c,r) + src(n,k,r,c)
 !*/
 
-void transpose_add(
+void split_columns(
+    bool add_to,
+    tensor& dest,
+    const tensor& src,
+    const long num_heads
+);
+/*!
+    requires
+        - is_same_object(dest, src) == false
+        - dest.num_samples() == src.num_samples()
+        - dest.k() == num_heads
+        - src.k() == 1
+        - dest.nr() == src.nr()
+        - dest.nc() == (src.nc() / num_heads)
+        - src.nc() % num_heads == 0        
+    ensures
+        - Splits the columns of src into num_heads separate heads in dest.
+        - If (add_to) is false:
+            - The result is stored in dest, overwriting its previous contents.
+            - For all valid n, h, s, d:
+                - #dest(n,h,s,d) == src(n,0,s,h*head_dim + d)
+                  where head_dim = src.nc() / num_heads
+        - If (add_to) is true:
+            - The result is added to the existing contents of dest.
+            - For all valid n, h, s, d:
+                - #dest(n,h,s,d) == dest(n,h,s,d) + src(n,0,s,h*head_dim + d)
+                  where head_dim = src.nc() / num_heads
+!*/
+
+void merge_columns(
+    bool add_to,
     tensor& dest,
     const tensor& src
 );
 /*!
     requires
-        - dest.num_samples() == src.num_samples()
-        - dest.k() == src.k()
-        - dest.nr() == src.nc()
-        - dest.nc() == src.nr()
         - is_same_object(dest, src) == false
+        - dest.num_samples() == src.num_samples()
+        - dest.k() == 1
+        - src.k() > 1
+        - dest.nr() == src.nr()
+        - dest.nc() == (src.nc() * src.k())        
     ensures
-        - Performs a transpose operation on the nr() x nc() matrices within src and adds the result to dest.
-        - For all valid n, k, r, c:
-            - #dest(n,k,c,r) == dest(n,k,c,r) + src(n,k,r,c)
+        - Merges the columns from separate heads in src back into a single tensor dest.
+        - If (add_to) is false:
+            - The result is stored in dest, overwriting its previous contents.
+            - For all valid n, r, c:
+                - #dest(n,0,r,c) == src(n,h,r,d)
+                  where h = c / src.nc() and d = c % src.nc()
+        - If (add_to) is true:
+            - The result is added to the existing contents of dest.
+            - For all valid n, r, c:
+                - #dest(n,0,r,c) == dest(n,0,r,c) + src(n,h,r,d)
+                  where h = c / src.nc() and d = c % src.nc()
 !*/
 
 void batch_multiply(
@@ -781,26 +877,44 @@ void batch_multiply(
         // ----------------------------------------------------------------------------------------
 
         void transpose(
+            bool add_to,
             tensor& dest,
             const tensor& src
         )
         {
 #ifdef DLIB_USE_CUDA
-            cuda::transpose(dest, src);
+            cuda::transpose(add_to, dest, src);
 #else
-            cpu::transpose(dest, src);
+            cpu::transpose(add_to, dest, src);
 #endif
         }
 
-        void transpose_add(
+        // ----------------------------------------------------------------------------------------
+        void split_columns(
+            bool add_to,
+            tensor& dest,
+            const tensor& src,
+            const long num_heads
+        )
+        {
+#ifdef DLIB_USE_CUDA
+            cuda::split_columns(add_to, dest, src, num_heads);
+#else
+            cpu::split_columns(add_to, dest, src, num_heads);
+#endif
+        }
+
+        // ----------------------------------------------------------------------------------------
+        void merge_columns(
+            bool add_to,
             tensor& dest,
             const tensor& src
         )
         {
 #ifdef DLIB_USE_CUDA
-            cuda::transpose_add(dest, src);
+            cuda::merge_columns(add_to, dest, src);
 #else
-            cpu::transpose_add(dest, src);
+            cpu::merge_columns(add_to, dest, src);
 #endif
         }
 
@@ -1073,17 +1187,13 @@ void batch_multiply(
         embeddings_() : num_embeddings(num_embeddings_),
             embedding_dim(embedding_dim_),
             learning_rate_multiplier(1),
-            scale_grad_by_freq(false),
-            apply_max_norm(true) {}
+            scale_grad_by_freq(false) {}
 
         double get_learning_rate_multiplier() const { return learning_rate_multiplier; }
         void set_learning_rate_multiplier(double val) { learning_rate_multiplier = val; }
 
         void set_scale_grad_by_freq(bool val) { scale_grad_by_freq = val; }
         bool get_scale_grad_by_freq() const { return scale_grad_by_freq; }
-
-        void set_apply_max_norm(bool val) { apply_max_norm = val; }
-        bool get_apply_max_norm() const { return apply_max_norm; }
 
         unsigned long get_num_embeddings() const { return num_embeddings; }
         void set_num_embeddings(unsigned long num)
@@ -1112,30 +1222,32 @@ void batch_multiply(
         {
             const auto& prev = sub.get_output();
             output.set_size(prev.num_samples(), prev.k(), prev.nr(), embedding_dim);
-            long num_samples = output.num_samples(), nk = output.k(), nr = output.nr(), nc = output.nc();
+            long ns = output.num_samples(), nk = output.k(), nr = output.nr(), nc = output.nc();
 
             const float* prev_data = prev.host();
             float* output_data = output.host();
             const float* embeddings_data = params.host();
 
-            parallel_for(0, num_samples, [&](long s) {
-                for (long r = 0; r < nr; ++r)
+            for (long s = 0; s < ns; ++s)
+            {
+                for (long k = 0; k < nk; ++k)
                 {
-                    for (long k = 0; k < nk; ++k)
-                    {
+                    for (long r = 0; r < nr; ++r)
+                    {                        
                         const unsigned long token_idx = static_cast<unsigned long>(prev_data[tensor_index(prev, s, k, r, 0)]);
                         if (token_idx < num_embeddings)
                         {
                             for (long c = 0; c < nc; ++c)
                                 output_data[tensor_index(output, s, k, r, c)] = embeddings_data[tensor_index(params, token_idx, c, 0, 0)];
-                        } else
+                        }
+                        else
                         {
                             for (long c = 0; c < nc; ++c)
                                 output_data[tensor_index(output, s, k, r, c)] = 0;
                         }
                     }
                 }
-            });
+            }
         }
 
         template <typename SUBNET>
@@ -1146,55 +1258,50 @@ void batch_multiply(
                 const float* prev_data = prev.host();
                 const float* gradient_input_data = gradient_input.host();
                 float* embeddings_data = params.host();
-                long num_samples = gradient_input.num_samples(), nr = gradient_input.nr(), nc = gradient_input.nc();
+                long ns = gradient_input.num_samples(), nk = gradient_input.k(), nr = gradient_input.nr(), nc = gradient_input.nc();
                 
                 std::vector<std::mutex> embedding_mutexes(num_embeddings);
                 std::unordered_map<unsigned long, unsigned long> token_freq;
 
                 if (scale_grad_by_freq)
                 {
-                    for (long s = 0; s < num_samples; ++s)
+                    for (long k = 0; k < nk; ++k)
+                    {
+                        for (long s = 0; s < ns; ++s)
+                        {
+                            for (long r = 0; r < nr; ++r)
+                            {
+                                const unsigned long token_idx = static_cast<unsigned long>(prev_data[tensor_index(prev, s, k, r, 0)]);
+                                if (token_idx < num_embeddings) token_freq[token_idx]++;
+                            }
+                        }
+                    }                    
+                }
+
+                parallel_for(0, ns, [&](long s)
+                {
+                    for (long k = 0; k < nk; ++k)
                     {
                         for (long r = 0; r < nr; ++r)
                         {
-                            const unsigned long token_idx = static_cast<unsigned long>(prev_data[tensor_index(prev, s, 0, r, 0)]);
-                            if (token_idx < num_embeddings) token_freq[token_idx]++;
-                        }
-                    }
-                }
-
-                parallel_for(0, num_samples, [&](long s)
-                {
-                    for (long r = 0; r < nr; ++r)
-                    {
-                        const unsigned long token_idx = static_cast<unsigned long>(prev_data[tensor_index(prev, s, 0, r, 0)]);
-                        if (token_idx < num_embeddings)
-                        {
-                            float freq_scale = 1.0f;
-                            if (scale_grad_by_freq)
+                            const unsigned long token_idx = static_cast<unsigned long>(prev_data[tensor_index(prev, s, k, r, 0)]);
+                            if (token_idx < num_embeddings)
                             {
-                                auto it = token_freq.find(token_idx);
-                                if (it != token_freq.end()) freq_scale = (1.0f / it->second);
-                            }
-
-                            std::lock_guard<std::mutex> lock(embedding_mutexes[token_idx]);
-                            for (long c = 0; c < nc; ++c)
-                            {
-                                float& embedding = embeddings_data[tensor_index(params, token_idx, c, 0, 0)];
-                                float gradient = gradient_input_data[tensor_index(gradient_input, s, 0, r, c)];
-                                float update = learning_rate_multiplier * gradient * freq_scale;
-                                embedding -= update;
-                            }
-                            if (apply_max_norm)
-                            {
-                                float* embedding_vector = embeddings_data + token_idx * embedding_dim;
-                                float max_abs = 0.0f;
-                                for (long i = 0; i < nc; ++i)
-                                    max_abs = std::max(max_abs, std::abs(embedding_vector[i]));
-                                if (max_abs != 0.0f)
+                                float freq_scale = 1.0f;
+                                if (scale_grad_by_freq)
                                 {
-                                    for (long i = 0; i < nc; ++i) embedding_vector[i] /= max_abs;
-                                }                                                 
+                                    auto it = token_freq.find(token_idx);
+                                    if (it != token_freq.end()) freq_scale = (1.0f / it->second);
+                                }
+
+                                std::lock_guard<std::mutex> lock(embedding_mutexes[token_idx]);
+                                for (long c = 0; c < nc; ++c)
+                                {
+                                    float& embedding = embeddings_data[tensor_index(params, token_idx, c, 0, 0)];
+                                    float gradient = gradient_input_data[tensor_index(gradient_input, s, k, r, c)];
+                                    float update = learning_rate_multiplier * gradient * freq_scale;
+                                    embedding -= update;
+                                }                                
                             }
                         }
                     }
@@ -1239,7 +1346,6 @@ void batch_multiply(
         unsigned long embedding_dim;
         double learning_rate_multiplier;
         bool scale_grad_by_freq;
-        bool apply_max_norm;
     };
     template <unsigned long nb_embeddings, unsigned long embedding_length, typename SUBNET>
     using embeddings = add_layer<embeddings_<nb_embeddings, embedding_length>, SUBNET>;
@@ -1288,12 +1394,10 @@ void batch_multiply(
         void forward(const SUBNET& sub, resizable_tensor& output)
         {            
             const auto& prev_output = sub.get_output();            
-            if (pe.size() == 0 || pe.num_samples() != prev_output.num_samples()) setup(sub);
-            DLIB_CASSERT(prev_output.nr() == sequence_dim && prev_output.nc() == embedding_dim);
+            if (pe.size() == 0 || pe.size() != prev_output.size()) setup(sub);
             
             output.set_size(prev_output.num_samples(), prev_output.k(), sequence_dim, embedding_dim);
-            tt::copy_tensor(false, output, 0, prev_output, 0, prev_output.k());
-            tt::copy_tensor(true, output, 0, pe, 0, pe.k());
+            tt::add(output, prev_output, pe);
         }
 
         template <typename SUBNET>
@@ -1336,7 +1440,7 @@ void batch_multiply(
     template <typename SUBNET>
     using positional_encodings = add_layer<positional_encodings_, SUBNET>;
     template <unsigned long nb_embeddings, unsigned long embedding_length, typename SUBNET>
-    using positional_embeddings = positional_encodings<embeddings<nb_embeddings, embedding_length, tag10<SUBNET>>>;
+    using positional_embeddings = positional_encodings<htan<embeddings<nb_embeddings, embedding_length, tag10<SUBNET>>>>;
 
     enum linear_bias_mode { LINEAR_HAS_BIAS = 0, LINEAR_NO_BIAS = 1 };
     struct num_linear_outputs {
@@ -1541,12 +1645,14 @@ void batch_multiply(
     const int DEFAULT_NUM_HEADS = 4;
 
     template <int nb_heads>
-    class split_heads_ {
+    class split_heads_
+    {
     public:
         split_heads_(int nb_heads_ = DEFAULT_NUM_HEADS) : num_heads(nb_heads_) {}
 
         template <typename SUBNET>
-        void setup(const SUBNET& sub) {
+        void setup(const SUBNET& sub)
+        {
             const auto& input = sub.get_output();
             DLIB_CASSERT(input.k() == 1, "Input must have k() == 1");
             DLIB_CASSERT(num_heads > 1 && input.nc() % num_heads == 0, "Input dimension must be divisible by number of heads");
@@ -1555,7 +1661,11 @@ void batch_multiply(
         template <typename SUBNET>
         void forward(const SUBNET& sub, resizable_tensor& output)
         {
-            const auto& input = sub.get_output();
+            const auto& prev = sub.get_output();
+            output.set_size(prev.num_samples(), num_heads, prev.nr(), prev.nc() / num_heads);
+
+            tt::split_columns(false, output, prev, num_heads);
+            /*const auto& input = sub.get_output();
             long batch_size = input.num_samples();
             long seq_length = input.nr();
             long embed_dim = input.nc();
@@ -1573,13 +1683,15 @@ void batch_multiply(
                         std::memcpy(out_ptr, in_ptr, head_dim * sizeof(float));
                     }
                 }
-            }
+            }*/
         }
 
         template <typename SUBNET>
         void backward(const tensor& gradient_input, SUBNET& sub, tensor& /*params_grad*/)
         {
             auto& grad = sub.get_gradient_input();
+            tt::merge_columns(true, grad, gradient_input);
+            /*auto& grad = sub.get_gradient_input();
             long batch_size = grad.num_samples();
             long seq_length = grad.nr();
             long embed_dim = grad.nc();
@@ -1596,17 +1708,19 @@ void batch_multiply(
                         for (long d = 0; d < head_dim; ++d) out_ptr[d] += in_ptr[d];
                     }
                 }
-            }
+            }*/
         }
 
         const tensor& get_layer_params() const { return params; }
         tensor& get_layer_params() { return params; }
 
-        friend void serialize(const split_heads_& item, std::ostream& out) {
+        friend void serialize(const split_heads_& item, std::ostream& out)
+        {
             serialize("split_heads_", out);
             serialize(item.num_heads, out);
         }
-        friend void deserialize(split_heads_& item, std::istream& in) {
+        friend void deserialize(split_heads_& item, std::istream& in)
+        {
             std::string version;
             deserialize(version, in);
             if (version != "split_heads_")
@@ -1614,22 +1728,100 @@ void batch_multiply(
             deserialize(item.num_heads, in);
         }
 
-        friend std::ostream& operator<<(std::ostream& out, const split_heads_& item) {
+        friend std::ostream& operator<<(std::ostream& out, const split_heads_& item)
+        {
             out << "split_heads (" << "num_heads=" << item.num_heads << ")";
             return out;
         }
-        friend void to_xml(const split_heads_& item, std::ostream& out) {
+        friend void to_xml(const split_heads_& item, std::ostream& out)
+        {
             out << "<split_heads num_heads='" << item.num_heads << "''>\n";
             out << "</split_heads>\n";
         }
 
     private:
-        resizable_tensor params; // Not used
+        resizable_tensor params; // unused
         int num_heads;
     };
 
     template <int num_heads, typename SUBNET>
     using split_heads = add_layer<split_heads_<num_heads>, SUBNET>;
+
+    class hstack_
+    {
+    public:
+        hstack_() {}
+        template <typename SUBNET>
+        void setup(const SUBNET& /* sub */) {}
+
+        template <typename SUBNET>
+        void forward(const SUBNET& sub, resizable_tensor& output)
+        {
+            const auto& prev = sub.get_output();
+            output.set_size(prev.num_samples(), 1, prev.nr(), prev.nc() * prev.k());
+
+            tt::merge_columns(false, output, prev);
+            /*auto& prev = sub.get_output();
+            output.set_size(prev.num_samples(), 1, prev.nr(), prev.nc() * prev.k());
+            output = 0;
+            for (int s = 0; s < prev.num_samples(); ++s) {
+                for (int k = 0; k < prev.k(); ++k) {
+                    for (int r = 0; r < prev.nr(); ++r) {
+                        for (int c = 0; c < prev.nc(); ++c) {
+                            output.host()[tensor_index(output, s, 0, r, (k * prev.nc()) + c)] = prev.host()[tensor_index(prev, s, k, r, c)];
+                        }
+                    }
+                }
+            }*/
+        }
+        template <typename SUBNET>
+        void backward(const tensor& gradient_input, SUBNET& sub, tensor& /*params_grad*/)
+        {
+            auto& grad = sub.get_gradient_input();
+            tt::split_columns(true, grad, gradient_input, grad.k());
+            /*auto& prev = sub.get_gradient_input();
+            for (int s = 0; s < prev.num_samples(); ++s) {
+                for (int k = 0; k < prev.k(); ++k) {
+                    for (int r = 0; r < prev.nr(); ++r) {
+                        for (int c = 0; c < prev.nc(); ++c) {
+                            prev.host()[tensor_index(prev, s, k, r, c)] += gradient_input.host()[tensor_index(gradient_input, s, 0, r, (k * prev.nc()) + c)];
+                        }
+                    }
+                }
+            }*/
+        }
+
+        const tensor& get_layer_params() const { return params; }
+        tensor& get_layer_params() { return params; }
+
+        friend void serialize(const hstack_& /* item */, std::ostream& out)
+        {
+            serialize("hstack_", out);
+        }
+        friend void deserialize(hstack_& /* item */, std::istream& in)
+        {
+            std::string version;
+            deserialize(version, in);
+            if (version != "hstack_")
+                throw serialization_error("Unexpected version '" + version + "' found while deserializing dlib::hstack_.");
+        }
+
+        friend std::ostream& operator<<(std::ostream& out, const hstack_& /* item */)
+        {
+            out << "hstack";
+            return out;
+        }
+        friend void to_xml(const hstack_& /* item */, std::ostream& out)
+        {
+            out << "<hstack />\n";
+        }
+    private:
+        dlib::resizable_tensor params; // Unused
+    };
+
+    template <typename SUBNET>
+    using hstack = add_layer<hstack_, SUBNET>;
+
 
     class transpose_ {
     public:
@@ -1640,12 +1832,27 @@ void batch_multiply(
             auto& prev = sub.get_output();
 
             output.set_size(prev.num_samples(), prev.k(), prev.nc(), prev.nr());
-            tt::transpose(output, prev);           
+            tt::transpose(false, output, prev);           
         }
 
         template <typename SUBNET> void backward(const tensor& gradient_input, SUBNET& sub, tensor& /*params_grad*/) {
             auto& prev = sub.get_gradient_input();
-            tt::transpose_add(prev, gradient_input);
+            tt::transpose(true, prev, gradient_input);
+        }
+
+        inline dpoint map_input_to_output(dpoint p) const
+        {
+            dpoint temp_p;
+            temp_p.x() = p.y();
+            temp_p.y() = p.x();
+            return temp_p;
+        }
+        inline dpoint map_output_to_input(dpoint p) const
+        {
+            dpoint temp_p;
+            temp_p.x() = p.y();
+            temp_p.y() = p.x();
+            return temp_p;
         }
 
         const tensor& get_layer_params() const { return params; }
@@ -1670,7 +1877,7 @@ void batch_multiply(
         }
 
     private:
-        dlib::resizable_tensor params; // Unused
+        dlib::resizable_tensor params; // unused
     };
 
     template <typename SUBNET> using transpose = add_layer<transpose_, SUBNET>;
@@ -1833,64 +2040,6 @@ void batch_multiply(
     using multm_prev3_ = multm_prev_<tag3>;
     using multm_prev4_ = multm_prev_<tag4>;
     using multm_prev5_ = multm_prev_<tag5>;
-
-    class hstack_ {
-    public:
-        hstack_() {}
-        template <typename SUBNET> void setup(const SUBNET& /* sub */) {}
-
-        template <typename SUBNET> void forward(const SUBNET& sub, resizable_tensor& output) {
-            auto& prev = sub.get_output();
-            output.set_size(prev.num_samples(), 1, prev.nr(), prev.nc() * prev.k());
-            output = 0;
-            for (int s = 0; s < prev.num_samples(); ++s) {
-                for (int k = 0; k < prev.k(); ++k) {
-                    for (int r = 0; r < prev.nr(); ++r) {
-                        for (int c = 0; c < prev.nc(); ++c) {
-                            output.host()[tensor_index(output, s, 0, r, (k * prev.nc()) + c)] = prev.host()[tensor_index(prev, s, k, r, c)];
-                        }
-                    }
-                }                
-            }
-        }
-        template <typename SUBNET> void backward(const tensor& gradient_input, SUBNET& sub, tensor& /*params_grad*/) {
-            auto& prev = sub.get_gradient_input();
-            for (int s = 0; s < prev.num_samples(); ++s) {
-                for (int k = 0; k < prev.k(); ++k) {
-                    for (int r = 0; r < prev.nr(); ++r) {
-                        for (int c = 0; c < prev.nc(); ++c) {
-                            prev.host()[tensor_index(prev, s, k, r, c)] += gradient_input.host()[tensor_index(gradient_input, s, 0, r, (k * prev.nc()) + c)];
-                        }
-                    }
-                }
-            }
-        }
-
-        const tensor& get_layer_params() const { return params; }
-        tensor& get_layer_params() { return params; }
-
-        friend void serialize(const hstack_& /* item */, std::ostream& out) {
-            serialize("hstack_", out);
-        }
-        friend void deserialize(hstack_& /* item */, std::istream& in) {
-            std::string version;
-            deserialize(version, in);
-            if (version != "hstack_")
-                throw serialization_error("Unexpected version '" + version + "' found while deserializing dlib::hstack_.");
-        }
-
-        friend std::ostream& operator<<(std::ostream& out, const hstack_& /* item */) {
-            out << "hstack";
-            return out;
-        }
-        friend void to_xml(const hstack_& /* item */, std::ostream& out) {
-            out << "<hstack />\n";
-        }
-    private:
-        dlib::resizable_tensor params; // Unused
-    };
-    template <typename SUBNET>
-    using hstack = add_layer<hstack_, SUBNET>;
 
     template <unsigned long number_of_heads_, unsigned long embedding_dim_>
     class scale_weights_ : public multiply_ {
@@ -2283,6 +2432,51 @@ private:
     }
 };
 
+void test_transpose()
+{
+    const long num_samples = 2;
+    const long k = 3;
+    const long nr = 4;
+    const long nc = 5;
+
+    resizable_tensor input(num_samples, k, nr, nc);
+    resizable_tensor output_cpu_a(num_samples, k, nc, nr);    
+    tt::tensor_rand rnd(0);
+    rnd.fill_uniform(input);
+    resizable_tensor output_cpu_b(input);
+
+    cpu::transpose(false, output_cpu_a, input);
+    cpu::transpose(true, output_cpu_b, output_cpu_a);
+    input *= 2;
+    DLIB_TEST_MSG(max(abs(mat(output_cpu_b) - mat(input))) < 1e-5,
+        "transpose_cpu: max(abs(mat(output_cpu_b) - mat(input))) < 1e-5");
+
+#ifdef DLIB_USE_CUDA
+    input /= 2;
+    resizable_tensor output_cuda_a, output_cuda_b(input);    
+    output_cuda_a.copy_size(output_cpu_a);
+    cuda::transpose(false, output_cuda_a, input);
+    cuda::transpose(true, output_cuda_b, output_cuda_a);
+    DLIB_TEST_MSG(max(abs(mat(output_cpu_a) - mat(output_cuda_a))) < 1e-5,
+        "transpose_cuda: max(abs(mat(output_cpu_a) - mat(output_cuda_a))) < 1e-5");
+    DLIB_TEST_MSG(max(abs(mat(output_cpu_b) - mat(output_cuda_b))) < 1e-5,
+        "transpose_cuda: max(abs(mat(output_cpu_b) - mat(output_cuda_b))) < 1e-5");
+#endif
+
+    const long num_heads = 2;
+    input.set_size(2, 1, 4, 6);
+    rnd.fill_uniform(input);
+    resizable_tensor output, input2;
+    output.set_size(input.num_samples(), input.k() * num_heads,
+        input.nr(), input.nc() / num_heads);
+    input2.copy_size(input);
+    cuda::split_columns(false, output, input, num_heads);
+    DBG_INFO("split_src: ", input, true);
+    DBG_INFO("split_dst: ", output, true);
+    cuda::merge_columns(false, input2, output);
+    DBG_INFO("merge_dst: ", input2, true);
+}
+
 void test_apply_positional_encodings()
 {
     const long num_samples = 2;
@@ -2498,9 +2692,9 @@ int main(int argc, char* argv[]) {
             true,      // 4: softmax layer
             true,      // 5: attention mechanism
             true,      // 6: batch_multiply low level function
-            false,     // 7: positional_encoding & embedding layers
+            false,     // 7: transpose, positional_encoding & embedding layers
             true,     // 8: rms_norm layer
-            true,      // 9: multihead attention model
+            false,      // 9: multihead attention model
             false       // 10: "shakespeare" example
         };
 
@@ -3077,15 +3271,21 @@ int main(int argc, char* argv[]) {
         }
         */
 
-        // test: positional_encoding & embedding layers
+        // test: transpose, positional_encoding & embedding layers
         if (!skip_tests[7]) {
-            if (display_debug_info) cout << "\ntest: positional_encoding & embedding layers\n";
+            if (display_debug_info) cout << "\ntest: transpose, positional_encoding & embedding layers\n";
             {
-                test_apply_positional_encodings();
+                test_transpose();
                 {
-                    positional_encodings_ l;
+                    transpose_ l;
                     auto res = test_layer(l);
                     DLIB_TEST_MSG(res, res);
+                }
+                //test_apply_positional_encodings();
+                {
+                    //positional_encodings_ l;
+                    //auto res = test_layer(l);
+                    //DLIB_TEST_MSG(res, res);
                 }
                 {
                     //embeddings_<5000, 128> l;
@@ -3171,7 +3371,7 @@ Be all my sins remembered.)";
             for (int i = 0; i < num_samples; ++i) {
                 matrix<float> sample(sequence_size, embedding_size);
                 for (int r = 0; r < sequence_size; ++r) {
-                    for (int c = 0; c < embedding_size; ++c) sample(r, c) = rnd.get_random_float();
+                    for (int c = 0; c < embedding_size; ++c) sample(r, c) = rnd.get_random_float() * 2.0f - 1.0f;
                 }
                 samples.push_back(sample);
                 labels.push_back(rnd.get_random_32bit_number() % num_classes);
