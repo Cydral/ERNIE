@@ -212,116 +212,172 @@ namespace dlib
                 ns, ks, num);
         }
 
-        __global__ void transpose_kernel(
-            float* dest,
-            const float* src,
-            const long num_samples,
-            const long k,
-            const long src_nr,
-            const long src_nc
-        )
+        __global__ void _cuda_transpose(size_t dsize, size_t dk, size_t dnr, size_t dnc, float* d,
+            size_t sk, size_t snr, int snc, const float* s, const bool add_to)
         {
-            const long n = blockIdx.x * blockDim.x + threadIdx.x;
-            const long k_idx = blockIdx.y * blockDim.y + threadIdx.y;
-            const long r = blockIdx.z * blockDim.z + threadIdx.z;
-
-            if (n < num_samples && k_idx < k && r < src_nr)
+            const auto plane_size = dnr * dnc;
+            const auto sample_size = dk * plane_size;
+            for (auto i : grid_stride_range(0, dsize))
             {
-                for (long c = 0; c < src_nc; ++c)
-                {
-                    dest[((n * k + k_idx) * src_nc + c) * src_nr + r] =
-                        src[((n * k + k_idx) * src_nr + r) * src_nc + c];
-                }
-            }
-        }
+                const auto n = i / sample_size;
+                const auto idx = i % plane_size;
+                const auto in_k = (i / plane_size) % dk;
+                const auto in_r = idx % dnc;
+                const auto in_c = idx / dnc;
 
-        __global__ void transpose_add_kernel(
-            float* dest,
-            const float* src,
-            const long num_samples,
-            const long k,
-            const long src_nr,
-            const long src_nc
-        )
-        {
-            const long n = blockIdx.x * blockDim.x + threadIdx.x;
-            const long k_idx = blockIdx.y * blockDim.y + threadIdx.y;
-            const long r = blockIdx.z * blockDim.z + threadIdx.z;
-
-            if (n < num_samples && k_idx < k && r < src_nr)
-            {
-                for (long c = 0; c < src_nc; ++c)
-                {
-                    atomicAdd(&dest[((n * k + k_idx) * src_nc + c) * src_nr + r],
-                        src[((n * k + k_idx) * src_nr + r) * src_nc + c]);
-                }
+                const auto in_idx = ((n * sk + in_k) * snr + in_r) * snc + in_c;
+                if (add_to) d[i] += s[in_idx];
+                else d[i] = s[in_idx];
             }
         }
 
         void transpose(
+            bool add_to,
             tensor& dest,
-            const tensor& src
+            const tensor& src            
         )
         {
+            DLIB_CASSERT(is_same_object(dest, src) == false);
             DLIB_CASSERT(dest.num_samples() == src.num_samples() &&
                 dest.k() == src.k() &&
                 dest.nr() == src.nc() &&
-                dest.nc() == src.nr());
+                dest.nc() == src.nr(),
+                "Incompatible tensor dimensions.");
 
-            cudaDeviceProp prop;
-            int device;
-            cudaGetDevice(&device);
-            cudaGetDeviceProperties(&prop, device);
+            launch_kernel(_cuda_transpose, max_jobs(dest.size()), dest.size(),
+                dest.k(), dest.nr(), dest.nc(), dest.device(),
+                src.k(), src.nr(), src.nc(), src.device(), add_to);
+        }
+           
+        __global__ void cuda_split_columns(
+            size_t size,
+            size_t snr,
+            size_t snc,
+            size_t nh,
+            size_t hd,
+            const float* input,
+            float* output,
+            const bool add_to
+        )
+        {
+            for (auto i : grid_stride_range(0, size))
+            {
+                const auto n = i / (nh * snr * hd);
+                const auto r = i % (nh * snr * hd);
+                const auto h = r / (snr * hd);
+                const auto s = (r / hd) % snr;
+                const auto d = r % hd;
 
-            // Dynamic block size adjustment
-            dim3 block(32, 32, 1);
-            while (block.x * block.y * block.z > (unsigned int)(prop.maxThreadsPerBlock)) {
-                if (block.z > 1) block.z /= 2;
-                else if (block.y > 1) block.y /= 2;
-                else block.x /= 2;
+                const auto input_idx = ((n * snr + s) * snc) + (h * hd + d);
+                if (add_to) output[i] += input[input_idx];
+                else output[i] = input[input_idx];
+
             }
-
-            const dim3 grid(
-                (src.num_samples() + block.x - 1) / block.x,
-                (src.k() + block.y - 1) / block.y,
-                (src.nr() + block.z - 1) / block.z
-            );
-
-            transpose_kernel << <grid, block >> > (dest.device(), src.device(),
-                src.num_samples(), src.k(), src.nr(), src.nc());
         }
 
-        void transpose_add(
+        void split_columns(
+            bool add_to,
             tensor& dest,
+            const tensor& src,
+            const long num_heads)
+        {
+            DLIB_CASSERT(is_same_object(dest, src) == false);
+            DLIB_CASSERT(dest.num_samples() == src.num_samples() &&
+                dest.k() == num_heads &&
+                src.k() == 1 &&
+                dest.nc() == (src.nc() / num_heads) &&
+                src.nc() % num_heads == 0,
+                "Incompatible tensor dimensions.");
+
+            launch_kernel(cuda_split_columns, max_jobs(dest.size()),
+                dest.size(), src.nr(), src.nc(), num_heads, src.nc() / num_heads,
+                src.device(), dest.device(), add_to);
+        }
+
+        __global__ void cuda_merge_columns(
+            size_t size,
+            size_t dnr,
+            size_t dnc,
+            size_t nh,
+            size_t hd,
+            const float* input,
+            float* output,
+            const bool add_to
+        )
+        {
+            for (auto i : grid_stride_range(0, size))
+            {
+                const auto n = i / (dnr * dnc);
+                const auto r = (i / dnc) % dnr;
+                const auto c = i % dnc;
+                const auto h = c / hd;
+                const auto d = c % hd;
+
+                const auto input_idx = ((n * nh + h) * dnr + r) * hd + d;
+                if (add_to) output[i] += input[input_idx];
+                else output[i] = input[input_idx];
+            }
+        }
+
+        void merge_columns(
+            bool add_to,
+            tensor& dest,
+            const tensor& src)
+        {
+            DLIB_CASSERT(is_same_object(dest, src) == false);
+            DLIB_CASSERT(dest.num_samples() == src.num_samples() &&
+                dest.k() == 1 &&
+                src.k() > 1 &&
+                dest.nr() == src.nr() &&
+                dest.nc() == (src.nc() * src.k()),
+                "Incompatible tensor dimensions.");
+
+            launch_kernel(cuda_merge_columns, max_jobs(dest.size()),
+                dest.size(), dest.nr(), dest.nc(), src.k(), src.nc(),
+                src.device(), dest.device(), add_to);
+        }
+
+        __global__ void _cuda_reorg2(size_t dsize, size_t dk, size_t dnr, size_t dnc, float* d,
+            size_t sk, size_t snr, int snc, const float* s,
+            const size_t row_stride, const size_t col_stride)
+        {
+            const auto out_plane_size = dnr * dnc;
+            const auto out_sample_size = dk * out_plane_size;
+            for (auto i : grid_stride_range(0, dsize))
+            {
+                const auto n = i / out_sample_size;
+                const auto out_idx = i % out_sample_size;
+                const auto out_k = out_idx / out_plane_size;
+                const auto out_rc = out_idx % out_plane_size;
+                const auto out_r = out_rc / dnc;
+                const auto out_c = out_rc % dnc;
+
+                const auto in_k = out_k % sk;
+                const auto in_r = out_r * row_stride + (out_k / sk) / col_stride;
+                const auto in_c = out_c * col_stride + (out_k / sk) % col_stride;
+
+                const auto in_idx = ((n * sk + in_k) * snr + in_r) * snc + in_c;
+                d[i] = s[in_idx];
+            }
+        }
+
+        void reorg2(
+            tensor& dest,
+            const int row_stride,
+            const int col_stride,
             const tensor& src
         )
         {
-            DLIB_CASSERT(dest.num_samples() == src.num_samples() &&
-                dest.k() == src.k() &&
-                dest.nr() == src.nc() &&
-                dest.nc() == src.nr());
+            DLIB_CASSERT(is_same_object(dest, src) == false);
+            DLIB_CASSERT(src.nr() % row_stride == 0);
+            DLIB_CASSERT(src.nc() % col_stride == 0);
+            DLIB_CASSERT(dest.num_samples() == src.num_samples());
+            DLIB_CASSERT(dest.k() == src.k() * row_stride * col_stride);
+            DLIB_CASSERT(dest.nr() == src.nr() / row_stride);
+            DLIB_CASSERT(dest.nc() == src.nc() / col_stride);
 
-            cudaDeviceProp prop;
-            int device;
-            cudaGetDevice(&device);
-            cudaGetDeviceProperties(&prop, device);
-
-            // Dynamic block size adjustment
-            dim3 block(32, 32, 1);
-            while (block.x * block.y * block.z > (unsigned int)(prop.maxThreadsPerBlock)) {
-                if (block.z > 1) block.z /= 2;
-                else if (block.y > 1) block.y /= 2;
-                else block.x /= 2;
-            }
-
-            const dim3 grid(
-                (src.num_samples() + block.x - 1) / block.x,
-                (src.k() + block.y - 1) / block.y,
-                (src.nr() + block.z - 1) / block.z
-            );
-
-            transpose_add_kernel << <grid, block >> > (dest.device(), src.device(),
-                src.num_samples(), src.k(), src.nr(), src.nc());
+            launch_kernel(_cuda_reorg2, dest.size(), dest.k(), dest.nr(), dest.nc(), dest.device(),
+                src.k(), src.nr(), src.nc(), src.device(), row_stride, col_stride);
         }
 
         __global__ void batch_multiply_kernel(

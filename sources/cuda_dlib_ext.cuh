@@ -36,12 +36,28 @@ namespace dlib
         );
 
         void transpose(
+            bool add_to,
             tensor& dest,
             const tensor& src
         );
 
-        void transpose_add(
+        void split_columns(
+            bool add_to,
             tensor& dest,
+            const tensor& src,
+            const long num_heads
+        );
+
+        void merge_columns(
+            bool add_to,
+            tensor& dest,
+            const tensor& src
+        );
+
+        void reorg2(
+            tensor& dest,
+            const int row_stride,
+            const int col_stride,
             const tensor& src
         );
 
