@@ -62,10 +62,10 @@ using namespace dlib;
 
 // Global parameters for the Transformer network
 constexpr int vocab_size = 8000;                                            // Size of the vocabulary
-constexpr int sequence_size = 24;                                           // Length of the sequence
+constexpr int sequence_size = 26;                                           // Length of the sequence
 constexpr int number_of_heads = 4;                                          // Number of attention heads
 constexpr int number_of_blocks = 4;                                         // Number of transformer blocks
-constexpr int embedding_size = (72 / number_of_heads) * number_of_heads;   // Size of the embedding
+constexpr int embedding_size = (32 / number_of_heads) * number_of_heads;    // Size of the embedding
 constexpr int bos_id = 0, eos_id = 1, unk_id = 2, pad_id = 3;
 
 // Other global parameters
@@ -214,6 +214,95 @@ using utils::concatenate_files;
 namespace dlib {
     namespace cpu {
         /* TO BE ADDED TO <cpu_dlib.cpp> */
+       
+        // -----------------------------------------------------------------------------------
+        void reorg2(
+            bool add_to,
+            tensor& dest,
+            const int row_stride,
+            const int col_stride,
+            const tensor& src
+        )
+        {
+            DLIB_CASSERT(!is_same_object(dest, src), "Destination and source must be distinct objects.");
+            DLIB_CASSERT(src.nr() % row_stride == 0, "The number of rows in src must be divisible by row_stride.");
+            DLIB_CASSERT(src.nc() % col_stride == 0, "The number of columns in src must be divisible by col_stride.");
+            DLIB_CASSERT(dest.num_samples() == src.num_samples(), "The number of samples must match.");
+            DLIB_CASSERT(dest.k() == src.k() * row_stride * col_stride, "The number of channels must match.");
+            DLIB_CASSERT(dest.nr() == src.nr() / row_stride, "The number of rows must match.");
+            DLIB_CASSERT(dest.nc() == src.nc() / col_stride, "The number of columns must match.");
+
+            const float* s = src.host();
+            float* d = dest.host();
+
+            const size_t sk = src.k(), snr = src.nr(), snc = src.nc();
+            const size_t dk = dest.k(), dnr = dest.nr(), dnc = dest.nc(), dsize = dest.size();
+
+            dlib::parallel_for(0, dsize, [&](long i)
+            {
+                const size_t out_plane_size = dnr * dnc;
+                const size_t out_sample_size = dk * out_plane_size;
+
+                const size_t n = i / out_sample_size;
+                const size_t out_idx = i % out_sample_size;
+                const size_t out_k = out_idx / out_plane_size;
+                const size_t out_rc = out_idx % out_plane_size;
+                const size_t out_r = out_rc / dnc;
+                const size_t out_c = out_rc % dnc;
+
+                const size_t in_k = out_k % sk;
+                const size_t in_r = out_r * row_stride + (out_k / sk) / col_stride;
+                const size_t in_c = out_c * col_stride + (out_k / sk) % col_stride;
+
+                const size_t in_idx = ((n * sk + in_k) * snr + in_r) * snc + in_c;
+
+                if (add_to) d[i] += s[in_idx];
+                else d[i] = s[in_idx];
+            });
+        }
+
+        void reorg_gradient2(
+            bool add_to,
+            tensor& grad,
+            const int row_stride,
+            const int col_stride,
+            const tensor& gradient_input
+        )
+        {
+            DLIB_CASSERT(!is_same_object(grad, gradient_input), "Grad and gradient_input must be distinct objects.");
+            DLIB_CASSERT(grad.nr() % row_stride == 0, "The number of rows in grad must be divisible by row_stride.");
+            DLIB_CASSERT(grad.nc() % col_stride == 0, "The number of columns in grad must be divisible by col_stride.");
+            DLIB_CASSERT(grad.num_samples() == gradient_input.num_samples(), "The number of samples in grad and gradient_input must match.");
+            DLIB_CASSERT(grad.k() == gradient_input.k() / row_stride / col_stride, "The number of channels in grad must be gradient_input.k() divided by row_stride and col_stride.");
+            DLIB_CASSERT(grad.nr() == gradient_input.nr() * row_stride, "The number of rows in grad must be gradient_input.nr() multiplied by row_stride.");
+            DLIB_CASSERT(grad.nc() == gradient_input.nc() * col_stride, "The number of columns in grad must be gradient_input.nc() multiplied by col_stride.");
+
+            const float* gi = gradient_input.host();
+            float* g = grad.host();
+
+            parallel_for(0, gradient_input.num_samples(), [&](long n)
+            {
+                for (long k = 0; k < gradient_input.k(); ++k)
+                {
+                    for (long r = 0; r < gradient_input.nr(); ++r)
+                    {
+                        for (long c = 0; c < gradient_input.nc(); ++c)
+                        {
+                                const auto in_idx = tensor_index(gradient_input, n, k, r, c);
+                                const auto out_idx = tensor_index(grad,
+                                    n,
+                                    k % grad.k(),
+                                    r * row_stride + (k / grad.k()) / col_stride,
+                                    c * col_stride + (k / grad.k()) % col_stride);
+                                
+                                if (add_to) g[out_idx] += gi[in_idx];
+                                else g[out_idx] = gi[in_idx];
+                        }
+                    }
+                }
+            });
+        }
+        
         // -----------------------------------------------------------------------------------
 
         void apply_positional_encoding(
@@ -428,12 +517,8 @@ namespace dlib {
                         const long src_idx = (src_nk_offset + r) * src_nc + c;
                         const long dest_idx = (dest_nk_offset + c) * dest_nc + r;
 
-                        if (add) {
-                            dest_data[dest_idx] += src_data[src_idx];
-                        }
-                        else {
-                            dest_data[dest_idx] = src_data[src_idx];
-                        }
+                        if (add) dest_data[dest_idx] += src_data[src_idx];
+                        else dest_data[dest_idx] = src_data[src_idx];
                     }
                 }
             });
@@ -871,6 +956,38 @@ void batch_multiply(
             cuda::rms_normalize_gradient(gradient_input, scale, src, gamma, src_grad, gamma_grad, dscale);
 #else
             cpu::rms_normalize_gradient(gradient_input, scale, src, gamma, src_grad, gamma_grad, dscale);
+#endif
+        }
+
+        // ----------------------------------------------------------------------------------------
+
+        void reorg2(
+            bool add_to,
+            tensor& dest,
+            const int row_stride,
+            const int col_stride,
+            const tensor& src
+        )
+        {
+#ifdef DLIB_USE_CUDA
+            cuda::reorg2(add_to, dest, row_stride, col_stride, src);
+#else
+            cpu::reorg2(add_to, dest, row_stride, col_stride, src);
+#endif
+        }
+
+        void reorg_gradient2(
+            bool add_to,
+            tensor& grad,
+            const int row_stride,
+            const int col_stride,
+            const tensor& gradient_input             
+        )
+        {
+#ifdef DLIB_USE_CUDA
+            cuda::reorg_gradient2(add_to, grad, row_stride, col_stride, gradient_input);
+#else
+            cpu::reorg_gradient2(add_to, grad, row_stride, col_stride, gradient_input);
 #endif
         }
 
@@ -1642,19 +1759,18 @@ void batch_multiply(
     using linear_no_bias = add_layer<linear_<num_outputs, LINEAR_NO_BIAS>, SUBNET>;
 
     // ----------------------------------------------------------------------------------------
-    const int DEFAULT_NUM_HEADS = 4;
+    const long DEFAULT_NUM_HEADS = 4;
 
-    template <int nb_heads>
-    class split_heads_
+    template <long nb_heads>
+    class hsplit_
     {
     public:
-        split_heads_(int nb_heads_ = DEFAULT_NUM_HEADS) : num_heads(nb_heads_) {}
+        hsplit_(long nb_heads_ = DEFAULT_NUM_HEADS) : num_heads(nb_heads_) {}
 
         template <typename SUBNET>
         void setup(const SUBNET& sub)
         {
             const auto& input = sub.get_output();
-            DLIB_CASSERT(input.k() == 1, "Input must have k() == 1");
             DLIB_CASSERT(num_heads > 1 && input.nc() % num_heads == 0, "Input dimension must be divisible by number of heads");
         }
 
@@ -1662,90 +1778,53 @@ void batch_multiply(
         void forward(const SUBNET& sub, resizable_tensor& output)
         {
             const auto& prev = sub.get_output();
-            output.set_size(prev.num_samples(), num_heads, prev.nr(), prev.nc() / num_heads);
-
-            tt::split_columns(false, output, prev, num_heads);
-            /*const auto& input = sub.get_output();
-            long batch_size = input.num_samples();
-            long seq_length = input.nr();
-            long embed_dim = input.nc();
-            long head_dim = embed_dim / num_heads;
-
-            output.set_size(batch_size, num_heads, seq_length, head_dim);
-            for (long n = 0; n < batch_size; ++n)
-            {
-                for (long h = 0; h < num_heads; ++h)
-                {
-                    for (long s = 0; s < seq_length; ++s)
-                    {
-                        const float* in_ptr = input.host() + ((n * seq_length + s) * embed_dim + h * head_dim);
-                        float* out_ptr = output.host() + ((n * num_heads + h) * seq_length + s) * head_dim;
-                        std::memcpy(out_ptr, in_ptr, head_dim * sizeof(float));
-                    }
-                }
-            }*/
+            output.set_size(prev.num_samples(), prev.k() * num_heads, prev.nr(), prev.nc() / num_heads);
+            tt::reorg2(false, output, 1, num_heads, prev);
         }
 
         template <typename SUBNET>
         void backward(const tensor& gradient_input, SUBNET& sub, tensor& /*params_grad*/)
         {
             auto& grad = sub.get_gradient_input();
-            tt::merge_columns(true, grad, gradient_input);
-            /*auto& grad = sub.get_gradient_input();
-            long batch_size = grad.num_samples();
-            long seq_length = grad.nr();
-            long embed_dim = grad.nc();
-            long head_dim = embed_dim / num_heads;
-
-            for (long n = 0; n < batch_size; ++n)
-            {
-                for (long h = 0; h < num_heads; ++h)
-                {
-                    for (long s = 0; s < seq_length; ++s)
-                    {
-                        const float* in_ptr = gradient_input.host() + ((n * num_heads + h) * seq_length + s) * head_dim;
-                        float* out_ptr = grad.host() + ((n * seq_length + s) * embed_dim + h * head_dim);
-                        for (long d = 0; d < head_dim; ++d) out_ptr[d] += in_ptr[d];
-                    }
-                }
-            }*/
-        }
+            tt::reorg_gradient2(true, grad, 1, num_heads, gradient_input);
+            //tt::merge_columns(true, grad, gradient_input);
+       }
 
         const tensor& get_layer_params() const { return params; }
         tensor& get_layer_params() { return params; }
 
-        friend void serialize(const split_heads_& item, std::ostream& out)
+        friend void serialize(const hsplit_& item, std::ostream& out)
         {
-            serialize("split_heads_", out);
+            serialize("hsplit_", out);
             serialize(item.num_heads, out);
         }
-        friend void deserialize(split_heads_& item, std::istream& in)
+        friend void deserialize(hsplit_& item, std::istream& in)
         {
             std::string version;
             deserialize(version, in);
-            if (version != "split_heads_")
-                throw serialization_error("Unexpected version '" + version + "' found while deserializing dlib::split_heads_.");
+            if (version != "hsplit_")
+                throw serialization_error("Unexpected version '" + version + "' found while deserializing dlib::hsplit_.");
             deserialize(item.num_heads, in);
         }
 
-        friend std::ostream& operator<<(std::ostream& out, const split_heads_& item)
+        friend std::ostream& operator<<(std::ostream& out, const hsplit_& item)
         {
-            out << "split_heads (" << "num_heads=" << item.num_heads << ")";
+            out << "hsplit (" << "num_heads=" << item.num_heads << ")";
             return out;
         }
-        friend void to_xml(const split_heads_& item, std::ostream& out)
+        friend void to_xml(const hsplit_& item, std::ostream& out)
         {
-            out << "<split_heads num_heads='" << item.num_heads << "''>\n";
-            out << "</split_heads>\n";
+            out << "<hsplit num_heads='" << item.num_heads << "''>\n";
+            out << "</hsplit>\n";
         }
 
     private:
         resizable_tensor params; // unused
-        int num_heads;
+        long num_heads;
     };
 
-    template <int num_heads, typename SUBNET>
-    using split_heads = add_layer<split_heads_<num_heads>, SUBNET>;
+    template <long num_heads, typename SUBNET>
+    using hsplit = add_layer<hsplit_<num_heads>, SUBNET>;
 
     class hstack_
     {
@@ -1759,36 +1838,15 @@ void batch_multiply(
         {
             const auto& prev = sub.get_output();
             output.set_size(prev.num_samples(), 1, prev.nr(), prev.nc() * prev.k());
-
-            tt::merge_columns(false, output, prev);
-            /*auto& prev = sub.get_output();
-            output.set_size(prev.num_samples(), 1, prev.nr(), prev.nc() * prev.k());
-            output = 0;
-            for (int s = 0; s < prev.num_samples(); ++s) {
-                for (int k = 0; k < prev.k(); ++k) {
-                    for (int r = 0; r < prev.nr(); ++r) {
-                        for (int c = 0; c < prev.nc(); ++c) {
-                            output.host()[tensor_index(output, s, 0, r, (k * prev.nc()) + c)] = prev.host()[tensor_index(prev, s, k, r, c)];
-                        }
-                    }
-                }
-            }*/
+            tt::reorg_gradient2(false, output, 1, prev.k(), prev);
+            //tt::merge_columns(false, output, prev);
         }
         template <typename SUBNET>
         void backward(const tensor& gradient_input, SUBNET& sub, tensor& /*params_grad*/)
         {
             auto& grad = sub.get_gradient_input();
-            tt::split_columns(true, grad, gradient_input, grad.k());
-            /*auto& prev = sub.get_gradient_input();
-            for (int s = 0; s < prev.num_samples(); ++s) {
-                for (int k = 0; k < prev.k(); ++k) {
-                    for (int r = 0; r < prev.nr(); ++r) {
-                        for (int c = 0; c < prev.nc(); ++c) {
-                            prev.host()[tensor_index(prev, s, k, r, c)] += gradient_input.host()[tensor_index(gradient_input, s, 0, r, (k * prev.nc()) + c)];
-                        }
-                    }
-                }
-            }*/
+            //tt::split_columns(true, grad, gradient_input, grad.k());
+            tt::reorg2(true, grad, 1, grad.k(), gradient_input);
         }
 
         const tensor& get_layer_params() const { return params; }
@@ -1816,12 +1874,11 @@ void batch_multiply(
             out << "<hstack />\n";
         }
     private:
-        dlib::resizable_tensor params; // Unused
+        resizable_tensor params; // unused
     };
 
     template <typename SUBNET>
     using hstack = add_layer<hstack_, SUBNET>;
-
 
     class transpose_ {
     public:
@@ -2168,9 +2225,9 @@ void batch_multiply(
         tril_mask<
         scale_weights<nb_heads, embedding_dim,
         multm_prev2<
-        split_heads<nb_heads, query<embedding_dim, skip3<
-        tag2<transpose<split_heads<nb_heads, key<embedding_dim, skip3<
-        tag1<split_heads<nb_heads, value<embedding_dim,
+        hsplit<nb_heads, query<embedding_dim, skip3<
+        tag2<transpose<hsplit<nb_heads, key<embedding_dim, skip3<
+        tag1<hsplit<nb_heads, value<embedding_dim,
         tag3<SUBNET>>>>>>>>>>>>>>>>>>>>>;
 
     // Feedforward blocks
@@ -2440,7 +2497,7 @@ void test_transpose()
     const long nc = 5;
 
     resizable_tensor input(num_samples, k, nr, nc);
-    resizable_tensor output_cpu_a(num_samples, k, nc, nr);    
+    resizable_tensor output_cpu_a(num_samples, k, nc, nr);
     tt::tensor_rand rnd(0);
     rnd.fill_uniform(input);
     resizable_tensor output_cpu_b(input);
@@ -2453,7 +2510,7 @@ void test_transpose()
 
 #ifdef DLIB_USE_CUDA
     input /= 2;
-    resizable_tensor output_cuda_a, output_cuda_b(input);    
+    resizable_tensor output_cuda_a, output_cuda_b(input);
     output_cuda_a.copy_size(output_cpu_a);
     cuda::transpose(false, output_cuda_a, input);
     cuda::transpose(true, output_cuda_b, output_cuda_a);
@@ -2462,20 +2519,91 @@ void test_transpose()
     DLIB_TEST_MSG(max(abs(mat(output_cpu_b) - mat(output_cuda_b))) < 1e-5,
         "transpose_cuda: max(abs(mat(output_cpu_b) - mat(output_cuda_b))) < 1e-5");
 #endif
+}
+void test_hsplit_hstack() {
+    const long num_heads = 4;
+    const long num_samples = 1;
+    const long input_k = 1;
+    const long input_nr = 8;
+    const long input_nc = 12;
 
-    const long num_heads = 2;
+    using net_type = hstack<hsplit<num_heads, input<matrix<float>>>>;
+    net_type net;
+
+    resizable_tensor input_tensor;
+    input_tensor.set_size(num_samples, input_k, input_nr, input_nc);
+    tt::tensor_rand rnd;
+    rnd.fill_uniform(input_tensor);
+
+    net.forward(input_tensor);
+    const auto& output_tensor = net.get_output();
+
+    DLIB_TEST_MSG(output_tensor.num_samples() == input_tensor.num_samples(),
+        "hsplit_hstack: output_tensor.num_samples() == input_tensor.num_samples()");
+    DLIB_TEST_MSG(output_tensor.k() == input_tensor.k(),
+        "hsplit_hstack: output_tensor.k() == input_tensor.k()");
+    DLIB_TEST_MSG(output_tensor.nr() == input_tensor.nr(),
+        "hsplit_hstack: output_tensor.nr() == input_tensor.nr()");
+    DLIB_TEST_MSG(output_tensor.nc() == input_tensor.nc(),
+        "hsplit_hstack: output_tensor.nc() == input_tensor.nc()");
+    DLIB_TEST_MSG(max(abs(mat(output_tensor) - mat(input_tensor))) < 1e-5,
+        "hsplit_hstack: max(abs(mat(output_tensor) - mat(input_tensor))) < 1e-5");
+
+    /*const long num_samples = 1;
+    const long num_channels = 1;
+    const long num_rows = 4;
+    const long num_cols = 6;
+
+    resizable_tensor input;
+    input.set_size(num_samples, num_channels, num_rows, num_cols);
+    tt::tensor_rand rnd(0);
+    rnd.fill_uniform(input);
+
+    const int row_stride = 1;
+    const int col_stride = 2;
+    const long output_channels = num_channels * row_stride * col_stride;
+    const long output_rows = num_rows / row_stride;
+    const long output_cols = num_cols / col_stride;
+
+    resizable_tensor output_cpu, output_cpu2;
+    output_cpu.set_size(num_samples, output_channels, output_rows, output_cols);
+    output_cpu2.set_size(num_samples, output_channels, output_rows, output_cols);
+
+#ifdef DLIB_USE_CUDA
+    resizable_tensor output_cuda;
+    output_cuda.set_size(num_samples, output_channels, output_rows, output_cols);
+#endif
+
+    cpu::reorg(output_cpu, row_stride, col_stride, input);
+    cpu::reorg2(false, output_cpu2, row_stride, col_stride, input);
+    DBG_INFO("reorg_input: ", input, true);
+    DBG_INFO("reorg_output: ", output_cpu, true);
+    DBG_INFO("reorg2_output: ", output_cpu2, true);
+
+    resizable_tensor grad_cpu;
+    grad_cpu.copy_size(input);
+    cpu::reorg_gradient2(false, grad_cpu, row_stride, col_stride, output_cpu2);
+    DBG_INFO("reorg_gradient2_output: ", grad_cpu, true);
+    DLIB_TEST_MSG(max(abs(mat(grad_cpu) - mat(input))) < 1e-5,
+        "reorg_cpu: max(abs(mat(grad_cpu) - mat(input))) < 1e-5");*/
+}
+
+/*    const long num_heads = 2;
     input.set_size(2, 1, 4, 6);
     rnd.fill_uniform(input);
     resizable_tensor output, input2;
     output.set_size(input.num_samples(), input.k() * num_heads,
         input.nr(), input.nc() / num_heads);
     input2.copy_size(input);
+
+#ifdef DLIB_USE_CUDA
     cuda::split_columns(false, output, input, num_heads);
     DBG_INFO("split_src: ", input, true);
     DBG_INFO("split_dst: ", output, true);
     cuda::merge_columns(false, input2, output);
     DBG_INFO("merge_dst: ", input2, true);
-}
+#endif
+}*/
 
 void test_apply_positional_encodings()
 {
@@ -3271,28 +3399,32 @@ int main(int argc, char* argv[]) {
         }
         */
 
-        // test: transpose, positional_encoding & embedding layers
+        // test: transpose, hsplit/hstack, positional_encoding & embedding layers
         if (!skip_tests[7]) {
-            if (display_debug_info) cout << "\ntest: transpose, positional_encoding & embedding layers\n";
-            {
-                test_transpose();
-                {
-                    transpose_ l;
-                    auto res = test_layer(l);
-                    DLIB_TEST_MSG(res, res);
-                }
-                //test_apply_positional_encodings();
-                {
-                    //positional_encodings_ l;
-                    //auto res = test_layer(l);
-                    //DLIB_TEST_MSG(res, res);
-                }
-                {
-                    //embeddings_<5000, 128> l;
-                    //auto res = test_layer(l);
-                    //DLIB_TEST_MSG(res, res);
-                }
-            }
+            if (display_debug_info) cout << "\ntest: transpose, hsplit/hstack, positional_encoding & embedding layers\n";
+              test_transpose();
+              {
+                  transpose_ l;
+                  auto res = test_layer(l);
+                  DLIB_TEST_MSG(res, res);
+              }
+              test_hsplit_hstack();              
+              {
+                  hstack_ l;
+                  auto res = test_layer(l);
+                  DLIB_TEST_MSG(res, res);
+              }
+              //test_apply_positional_encodings();
+              {
+                  //positional_encodings_ l;
+                  //auto res = test_layer(l);
+                  //DLIB_TEST_MSG(res, res);
+              }
+              {
+                  //embeddings_<5000, 128> l;
+                  //auto res = test_layer(l);
+                  //DLIB_TEST_MSG(res, res);
+              }
         }
 
         // test: rms_norm layer
