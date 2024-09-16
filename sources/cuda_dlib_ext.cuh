@@ -55,10 +55,19 @@ namespace dlib
         );
 
         void reorg2(
+            bool add_to,
             tensor& dest,
             const int row_stride,
             const int col_stride,
             const tensor& src
+        );
+
+        void reorg_gradient2(
+            bool add_to,
+            tensor& grad,
+            const int row_stride,
+            const int col_stride,
+            const tensor& gradient_input
         );
 
         void batch_multiply(
