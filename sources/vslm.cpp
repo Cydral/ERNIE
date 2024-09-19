@@ -63,9 +63,9 @@ using namespace dlib;
 // Global parameters for the Transformer network
 constexpr int vocab_size = 8000;                                            // Size of the vocabulary
 constexpr int sequence_size = 26;                                           // Length of the sequence
-constexpr int number_of_heads = 4;                                          // Number of attention heads
+constexpr int number_of_heads = 8;                                          // Number of attention heads
 constexpr int number_of_blocks = 4;                                         // Number of transformer blocks
-constexpr int embedding_size = (32 / number_of_heads) * number_of_heads;    // Size of the embedding
+constexpr int embedding_size = (64 / number_of_heads) * number_of_heads;    // Size of the embedding
 constexpr int bos_id = 0, eos_id = 1, unk_id = 2, pad_id = 3;
 
 // Other global parameters
@@ -94,6 +94,44 @@ void configure_console() {
     SetConsoleOutputCP(CP_UTF8);
     _setmode(_fileno(stdout), _O_TEXT);
     cout.imbue(std::locale("en_US.UTF-8"));    
+}
+
+void DBG_INFO(std::string dbg_msg) {
+    if (!dbg_msg.empty()) cout << dbg_msg << endl;
+}
+void DBG_INFO(std::string dbg_msg, const tensor& t, const bool display_t = false, int S = 10, int K = 5, int R = 8, int C = 8) {
+    if (!dbg_msg.empty()) {
+        cout << dbg_msg << "num_samples=" << t.num_samples() << ", k=" << t.k() << ", nr=" << t.nr() << ", nc=" << t.nc() << endl;
+        if (display_t) {
+            S = std::min(K, static_cast<int>(t.num_samples()));
+            K = std::min(K, static_cast<int>(t.k()));
+            R = std::min(R, static_cast<int>(t.nr()));
+            C = std::min(C, static_cast<int>(t.nc()));
+            for (int s = 0; s < t.num_samples(); ++s) {
+                cout << "[";
+                for (int k = 0; k < t.k(); ++k) {
+                    cout << "[\t";
+                    for (int r = 0; r < t.nr(); ++r) {
+                        for (int c = 0; c < t.nc(); ++c) {
+                            if (c < C) cout << setw(8) << fixed << setprecision(3) << t.host()[tensor_index(t, s, k, r, c)] << " ";
+                            else if (c == C) {
+                                cout << "...";
+                                break;
+                            }
+                        }
+                        if (r < R) cout << endl << "\t";
+                        else if (r == R) {
+                            cout << endl << "(...)" << endl;
+                            break;
+                        }
+                    }
+                    cout << "]";
+                }
+                if (s < S) cout << "]" << endl;
+                if (s == (S - 1)) break;
+            }
+        }
+    }
 }
 
 namespace utils {
@@ -912,6 +950,109 @@ void batch_multiply(
 /* TO BE ADDED TO <tensor_tools.cpp> */
 // ----------------------------------------------------------------------------------------
 
+        template <typename T>
+        bool is_matrix(const T& tensor) {
+            return (tensor.num_samples() == 1 && tensor.k() == 1) || (tensor.nr() == 1 && tensor.nc() == 1);
+        }
+        void c_gemm(
+            float beta,
+            tensor& dest,
+            float alpha,
+            const tensor& lhs,
+            bool trans_lhs,
+            const tensor& rhs,
+            bool trans_rhs
+        )
+        {
+#ifdef DLIB_USE_CUDA
+            cuda::c_gemm(beta, dest, alpha, lhs, trans_lhs, rhs, trans_rhs);
+#else
+            long num_samples = std::max({ lhs.num_samples(), rhs.num_samples(), dest.num_samples() });
+            long num_channels = std::max({ lhs.k(), rhs.k(), dest.k() });
+            const bool lhs_is_matrix = is_matrix(lhs), rhs_is_matrix = is_matrix(rhs), dest_is_matrix = is_matrix(dest);
+
+            if (lhs_is_matrix && rhs_is_matrix && dest_is_matrix) {
+                num_samples = num_channels = 1;
+            }
+            else
+            {
+                auto adjust = [&](const auto& tensor) {
+                    if (!is_matrix(tensor)) {
+                        if (tensor.num_samples() < num_samples) num_samples = tensor.num_samples();
+                        if (tensor.k() < num_channels) num_channels = tensor.k();
+                    }
+                };
+                adjust(lhs);
+                adjust(rhs);
+                adjust(dest);                
+            }
+
+            long lhs_rows = (lhs_is_matrix && lhs.num_samples() > 1) ? lhs.num_samples() : lhs.nr();
+            long lhs_cols = (lhs_is_matrix && lhs.k() > 1) ? lhs.k() : lhs.nc();
+            long rhs_rows = (rhs_is_matrix && rhs.num_samples() > 1) ? rhs.num_samples() : rhs.nr();
+            long rhs_cols = (rhs_is_matrix && rhs.k() > 1) ? rhs.k() : rhs.nc();
+            long dest_rows = (dest_is_matrix && dest.num_samples() > 1) ? dest.num_samples() : dest.nr();
+            long dest_cols = (dest_is_matrix && dest.k() > 1) ? dest.k() : dest.nc();
+
+            /*if (trans_lhs) std::swap(lhs_rows, lhs_cols);
+            if (trans_rhs) std::swap(rhs_rows, rhs_cols);
+
+            DLIB_CASSERT((!rhs_is_matrix && num_samples == rhs.num_samples()) || rhs_is_matrix, "Batch dimensions must match");
+            DLIB_CASSERT((!rhs_is_matrix && num_channels == rhs.k()) || rhs_is_matrix, "Channel dimensions must match");
+            DLIB_CASSERT(lhs_cols == rhs_rows, "Inner dimensions must match for matrix multiplication");
+            DLIB_CASSERT((!dest_is_matrix && 
+                num_samples == dest.num_samples() &&
+                num_channels == dest.k() &&
+                lhs_rows == dest.nr() &&
+                rhs_cols == dest.nc()) || (dest_is_matrix &&
+                ((dest.num_samples() == lhs_rows && dest.k() == rhs_cols) ||
+                 (dest.nr() == lhs_rows && dest.nc() == rhs_cols))), "Incompatible destination tensor");
+
+            if (trans_lhs) std::swap(lhs_rows, lhs_cols);
+            if (trans_rhs) std::swap(rhs_rows, rhs_cols);*/
+
+            const size_t lhs_plane_size = lhs_rows * lhs_cols;
+            const size_t rhs_plane_size = rhs_rows * rhs_cols;
+            const size_t dest_plane_size = dest_rows * dest_cols;
+
+            for (long b = 0; b < num_samples; ++b)
+            {
+                for (long c = 0; c < num_channels; ++c)
+                {
+                    auto lhs_slice = lhs_is_matrix ? alias_tensor(lhs_rows, lhs_cols)(lhs, 0) :
+                        alias_tensor(lhs_rows, lhs_cols)(lhs, (b * num_channels + c) * lhs_plane_size);
+                    auto rhs_slice = rhs_is_matrix ? alias_tensor(rhs_rows, rhs_cols)(rhs, 0) :
+                        alias_tensor(rhs_rows, rhs_cols)(rhs, (b * num_channels + c) * rhs_plane_size);
+                    auto dest_slice = dest_is_matrix ? alias_tensor(dest_rows, dest_cols)(dest, 0) :
+                        alias_tensor(dest_rows, dest_cols)(dest, (b * num_channels + c) * dest_plane_size);
+
+                    if (beta != 0)
+                    {
+                        if (trans_lhs && trans_rhs)
+                            dest_slice = alpha * trans(mat(lhs_slice)) * trans(mat(rhs_slice)) + beta * mat(dest_slice);
+                        else if (!trans_lhs && trans_rhs)
+                            dest_slice = alpha * mat(lhs_slice) * trans(mat(rhs_slice)) + beta * mat(dest_slice);
+                        else if (trans_lhs && !trans_rhs)
+                            dest_slice = alpha * trans(mat(lhs_slice)) * mat(rhs_slice) + beta * mat(dest_slice);
+                        else
+                            dest_slice = alpha * mat(lhs_slice) * mat(rhs_slice) + beta * mat(dest_slice);
+                    }
+                    else
+                    {
+                        if (trans_lhs && trans_rhs)
+                            dest_slice = alpha * trans(mat(lhs_slice)) * trans(mat(rhs_slice));
+                        else if (!trans_lhs && trans_rhs)
+                            dest_slice = alpha * mat(lhs_slice) * trans(mat(rhs_slice));
+                        else if (trans_lhs && !trans_rhs)
+                            dest_slice = alpha * trans(mat(lhs_slice)) * mat(rhs_slice);
+                        else
+                            dest_slice = alpha * mat(lhs_slice) * mat(rhs_slice);
+                    }
+                }
+            }
+#endif
+        }
+
         void apply_positional_encoding(
             const tensor& pe,
             const tensor& input,
@@ -1179,44 +1320,6 @@ void batch_multiply(
     using rms_norm = add_layer<rms_norm_, SUBNET>;
 
 // ----------------------------------------------------------------------------------------
-
-    void DBG_INFO(std::string dbg_msg) {
-        if (!dbg_msg.empty()) cout << dbg_msg << endl;
-    }
-    void DBG_INFO(std::string dbg_msg, const tensor& t, const bool display_t = false, int S = 10, int K = 5, int R = 8, int C = 8) {
-        if (!dbg_msg.empty()) {
-            cout << dbg_msg << "num_samples=" << t.num_samples() << ", k=" << t.k() << ", nr=" << t.nr() << ", nc=" << t.nc() << endl;
-            if (display_t) {
-                S = std::min(K, static_cast<int>(t.num_samples()));
-                K = std::min(K, static_cast<int>(t.k()));
-                R = std::min(R, static_cast<int>(t.nr()));
-                C = std::min(C, static_cast<int>(t.nc()));
-                for (int s = 0; s < t.num_samples(); ++s) {
-                    cout << "[";
-                    for (int k = 0; k < t.k(); ++k) {
-                        cout << "[\t";
-                        for (int r = 0; r < t.nr(); ++r) {                            
-                            for (int c = 0; c < t.nc(); ++c) {
-                                if (c < C) cout << setw(8) << fixed << setprecision(3) << t.host()[tensor_index(t, s, k, r, c)] << " ";
-                                else if (c == C) {
-                                    cout << "...";
-                                    break;
-                                }
-                            }
-                            if (r < R) cout << endl << "\t";
-                            else if (r == R) {
-                                cout << endl << "(...)" << endl;
-                                break;
-                            }
-                        }
-                        cout << "]";
-                    }
-                    if (s < S) cout << "]" << endl;
-                    if (s == (S - 1)) break;
-                }
-            }
-        }
-    }
 
     class display_tensor_ {
     public:
@@ -1521,7 +1624,7 @@ void batch_multiply(
         void backward(const tensor& gradient_input, SUBNET& sub, tensor& params_grad)
         {
             auto& prev_grad = sub.get_gradient_input();
-            tt::copy_tensor(true, prev_grad, 0, gradient_input, 0, gradient_input.k());
+            tt::add(prev_grad, prev_grad, gradient_input);
         }
 
         const tensor& get_layer_params() const { return params; }
@@ -1610,14 +1713,14 @@ void batch_multiply(
 
             output.set_size(prev_output.num_samples(), prev_output.k(), prev_output.nr(), num_outputs);
             auto w = weights(params, 0);
-            tt::batch_multiply(output, prev_output, false, w, false);
+            tt::c_gemm(0, output, 1, prev_output, false, w, false);            
 
             if (bias_mode == LINEAR_HAS_BIAS) {
                 const auto b = biases(params, weights.size());
-                alias_tensor output_mat(1, num_outputs);
+                const long output_plane_size = output.nr() * output.nc();
                 for (long n = 0; n < output.num_samples(); ++n) {
                     for (long k = 0; k < output.k(); ++k) {
-                        auto output_slice = output_mat(output, (n * output.k() + k) * num_outputs);
+                        auto output_slice = alias_tensor(output.nr(), output.nc())(output, (n * output.k() + k) * output_plane_size);
                         tt::add(1, output_slice, 1, b);
                     }
                 }
@@ -1626,39 +1729,19 @@ void batch_multiply(
 
         template <typename SUBNET>
         void backward(const tensor& gradient_input, SUBNET& sub, tensor& params_grad) {
-            /*const auto& prev_output = sub.get_output();
-            long batch_size = prev_output.num_samples() * prev_output.k() * prev_output.nr();
-            long input_features = prev_output.nc();
-            alias_tensor flattened_gradient = alias_tensor(batch_size, num_outputs);
-
-            if (learning_rate_multiplier != 0) {
-                resizable_tensor m_input, i_grad;
-                auto pw = weights(params_grad, 0);
-                for (int s = 0; s < prev_output.num_samples(); ++s) {
-                    for (int k = 0; k < prev_output.k(); ++k) {
-                        extract_matrix(prev_output, m_input, s, k);
-                        extract_matrix(gradient_input, i_grad, s, k);
-                        tt::gemm(0, pw, 1, m_input, true, i_grad, false);
-                        if (bias_mode == LINEAR_HAS_BIAS) {
-                            auto pb = biases(params_grad, weights.size());
-                            tt::assign_bias_gradient(pb, i_grad);
-                        }
-                    }
-                }
-            }*/
             const auto& prev_output = sub.get_output();
 
             if (learning_rate_multiplier != 0) {
                 auto pw = weights(params_grad, 0);
                 // Calculate weight gradients
-                tt::batch_multiply(pw, prev_output, true, gradient_input, false);
+                tt::c_gemm(0, pw, 1, prev_output, true, gradient_input, false);
                 if (bias_mode == LINEAR_HAS_BIAS) {
                     auto pb = biases(params_grad, weights.size());
                     // Sum gradients for bias
-                    alias_tensor grad_mat(1, num_outputs);
+                    const long grad_plane_size = gradient_input.nr() * gradient_input.nc();
                     for (long n = 0; n < gradient_input.num_samples(); ++n) {
                         for (long k = 0; k < gradient_input.k(); ++k) {
-                            auto grad_slice = grad_mat(gradient_input, (n * gradient_input.k() + k) * num_outputs);
+                            auto grad_slice = alias_tensor(gradient_input.nr(), gradient_input.nc())(gradient_input, (n * gradient_input.k() + k) * grad_plane_size);
                             tt::assign_bias_gradient(pb, grad_slice);
                         }
                     }
@@ -1668,7 +1751,7 @@ void batch_multiply(
             // Propagate gradients to previous layer
             auto& prev_grad = sub.get_gradient_input();
             auto w = weights(params, 0);
-            tt::batch_multiply(prev_grad, gradient_input, false, w, true);
+            tt::c_gemm(1, prev_grad, 1, gradient_input, false, w, true);
         }
 
         alias_tensor_instance get_weights() { return weights(params, 0); }
@@ -2047,7 +2130,7 @@ void batch_multiply(
             auto& t2 = layer<tag>(sub).subnet().get_output();
             output.set_size(t1.num_samples(), t1.k(), t1.nr(), t2.nc());
 
-            tt::batch_multiply(output, t1, false, t2, false);
+            tt::c_gemm(0, output, 1, t1, false, t2, false);
         }
 
         template <typename SUBNET>
@@ -2055,8 +2138,16 @@ void batch_multiply(
             auto& prev = sub.get_gradient_input();
             auto& prev_tag = layer<tag>(sub).get_gradient_input();
 
-            tt::batch_multiply(prev, gradient_input, false, layer<tag>(sub).subnet().get_output(), true);
-            tt::batch_multiply(prev_tag, sub.get_output(), true, gradient_input, false);
+            /*tt::c_gemm(0, prev, 1, gradient_input, false, layer<tag>(sub).subnet().get_output(), true);
+            tt::c_gemm(0, prev_tag, 1, sub.get_output(), true, gradient_input, false);*/
+            
+            //auto& t1 = sub.get_output();
+            //auto& t2 = layer<tag>(sub).get_output();
+
+            //tt::c_gemm(1, sub.get_gradient_input(), 1, gradient_input, false, t2, true);
+            tt::c_gemm(1, prev, 1, gradient_input, false, layer<tag>(sub).get_output(), true);
+            //tt::c_gemm(1, layer<tag>(sub).get_gradient_input(), 1, t1, true, gradient_input, false);
+            tt::c_gemm(1, prev_tag, 1, sub.get_output(), true, gradient_input, false);
         }
 
         const tensor& get_layer_params() const { return params; }
@@ -2527,7 +2618,7 @@ void test_hsplit_hstack() {
     const long input_nr = 8;
     const long input_nc = 12;
 
-    using net_type = hstack<hsplit<num_heads, input<matrix<float>>>>;
+    using net_type = tag1<hstack<hsplit<num_heads, input<matrix<float>>>>>;
     net_type net;
 
     resizable_tensor input_tensor;
@@ -2536,7 +2627,7 @@ void test_hsplit_hstack() {
     rnd.fill_uniform(input_tensor);
 
     net.forward(input_tensor);
-    const auto& output_tensor = net.get_output();
+    auto& output_tensor = layer<tag1>(net).get_output();
 
     DLIB_TEST_MSG(output_tensor.num_samples() == input_tensor.num_samples(),
         "hsplit_hstack: output_tensor.num_samples() == input_tensor.num_samples()");
@@ -2760,7 +2851,7 @@ int main(int argc, char* argv[]) {
         "██╔══╝  ██╔══██╗██║╚██╗██║██║██╔══╝  \n"
         "███████╗██║  ██║██║ ╚████║██║███████╗\n"
         "╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝╚══════╝\n"
-        "Welcome to the ERNIE generative AI program! (version 1.0.8)\n\n";
+        "Welcome to the ERNIE generative AI program! (version 1.1.2)\n\n";
     try {
         string msg_learning_rate = string("Initial learning rate for training (") + std::format("{:g}", learning_rate) + string(")"),
             msg_min_learning_rate = string("Minimum learning rate (") + std::format("{:g}", min_learning_rate) + string(")"),
@@ -2813,16 +2904,16 @@ int main(int argc, char* argv[]) {
     if (do_benchmark) {
         constexpr bool display_debug_info = false;
         constexpr bool skip_tests[] = {
-            true,      // 0: strings & tokenization
-            true,      // 1: extract_matrix() & update_matrix()
-            true,      // 2: linear layer
-            true,      // 3: tril layer
-            true,      // 4: softmax layer
-            true,      // 5: attention mechanism
+            false,      // 0: strings & tokenization
+            false,      // 1: extract_matrix() & update_matrix()
+            false,     // 2: linear layer
+            false,      // 3: tril layer
+            false,      // 4: softmax layer
+            false,      // 5: attention mechanism
             true,      // 6: batch_multiply low level function
-            false,     // 7: transpose, positional_encoding & embedding layers
+            true,     // 7: transpose, positional_encoding & embedding layers
             true,     // 8: rms_norm layer
-            false,      // 9: multihead attention model
+            true,      // 9: multihead attention model
             false       // 10: "shakespeare" example
         };
 
@@ -2906,11 +2997,11 @@ int main(int argc, char* argv[]) {
                 // Expected output tensor (manually set for comparison)
                 resizable_tensor expected_output;
                 expected_output.set_size(1, 1, 2, 5);
-                matrix<float> w = mat(layer<tag1>(net).subnet().layer_details().get_weights());
+                auto w = mat(layer<tag1>(net).subnet().layer_details().get_weights());
                 for (long i = 0; i < input_tensor.nr(); ++i) {
                     for (long j = 0; j < input_tensor.nc(); ++j) {
                         for (long k = 0; k < w.nc(); ++k) {
-                            float val = 0;
+                            float val = 0.0f;
                             for (long l = 0; l < w.nr(); ++l) val += input_tensor.host()[tensor_index(input_tensor, 0, 0, i, l)] * w(l, k);
                             expected_output.host()[tensor_index(expected_output, 0, 0, i, k)] = val;
                         }
@@ -2919,6 +3010,11 @@ int main(int argc, char* argv[]) {
                 // Compare output tensor with expected output
                 auto& net_ouput = layer<tag1>(net).get_output();
                 DLIB_TEST_MSG(max(abs(mat(net_ouput) - mat(expected_output))) < 1e-5, "linear layer");
+            }
+            {
+                //linear_<10, LINEAR_HAS_BIAS> l;
+                //auto res = test_layer(l);
+                //DLIB_TEST_MSG(res, " linear layer\n" + res);
             }
         }
 
@@ -3406,13 +3502,13 @@ int main(int argc, char* argv[]) {
               {
                   transpose_ l;
                   auto res = test_layer(l);
-                  DLIB_TEST_MSG(res, res);
+                  DLIB_TEST_MSG(res, " transpose layer\n" + res);
               }
               test_hsplit_hstack();              
               {
                   hstack_ l;
                   auto res = test_layer(l);
-                  DLIB_TEST_MSG(res, res);
+                  DLIB_TEST_MSG(res, " hsplit&hstack layer\n" + res);
               }
               //test_apply_positional_encodings();
               {
@@ -3435,7 +3531,7 @@ int main(int argc, char* argv[]) {
                 {
                     rms_norm_ l;
                     auto res = test_layer(l);
-                    DLIB_TEST_MSG(res, res);
+                    DLIB_TEST_MSG(res, " RMS normalize layer" + res);
                 }
             }
         }
@@ -3568,12 +3664,12 @@ Be all my sins remembered.)";
                 cout << "batch size: " << mini_batch_size << endl;
                 cout << "samples used for the training: " << samples_txt.size() << endl;
                 std::vector<unsigned long> labels_txt;
-                for (size_t i = 0; i < samples_txt.size(); ++i) labels_txt.push_back(static_cast<unsigned long>(shakespeare_text[i + sequence_size])); // Next character as label
+                for (size_t i = 0; i < samples_txt.size(); ++i) labels_txt.push_back(static_cast<unsigned long>(shakespeare_text[i + sequence_size])); // Next character as label              
                 dnn_trainer<net_type_b, adam> trainer_c(net_b, adam(weight_decay, beta1, beta2), gpus);
                 trainer_c.set_learning_rate(learning_rate);
                 trainer_c.set_min_learning_rate(min_learning_rate);
                 trainer_c.set_mini_batch_size(mini_batch_size);
-                trainer_c.be_verbose();                
+                trainer_c.be_verbose();
                 trainer_c.set_synchronization_file("llm_shakespeare_model_a.ckp", std::chrono::minutes(5));
                 trainer_c.set_iterations_without_progress_threshold(400);
                 std::vector<matrix<int, 0, 1>> samples;
@@ -3662,14 +3758,16 @@ Be all my sins remembered.)";
                         string generated_sonnet = sonnet_start;
                         matrix<int> next_input(sequence_size, 1);
 
-                        cout << "generated sonnet:\n\n";
+                        cout << "generated sonnet starting by \"" << sonnet_start << "\":\n\n" << sonnet_start << "\n";
                         for (int i = 0; i < 700 && !input_tokens.empty(); ++i) {
                             unsigned long next_char = net_b(input_tokens.back());
                             unsigned char c = static_cast<unsigned char>(next_char);
                             generated_sonnet += c;
                             cout << c;
-                            if (c == '\n') generated_sonnet += '\n';  // Double newline for readability
-                            cout << "\n";
+                            if (c == '\n') {
+                                generated_sonnet += '\n';  // Double newline for readability
+                                cout << "\n";
+                            }
 
                             for (int j = 0; j < (sequence_size - 1); ++j) next_input(j, 0) = input_tokens.back()(j + 1, 0);
                             next_input(sequence_size - 1, 0) = static_cast<int>(next_char);
