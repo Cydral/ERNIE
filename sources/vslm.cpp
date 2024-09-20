@@ -62,8 +62,8 @@ using namespace dlib;
 
 // Global parameters for the Transformer network
 constexpr int vocab_size = 8000;                                            // Size of the vocabulary
-constexpr int sequence_size = 26;                                           // Length of the sequence
-constexpr int number_of_heads = 8;                                          // Number of attention heads
+constexpr int sequence_size = 24;                                           // Length of the sequence
+constexpr int number_of_heads = 4;                                          // Number of attention heads
 constexpr int number_of_blocks = 4;                                         // Number of transformer blocks
 constexpr int embedding_size = (64 / number_of_heads) * number_of_heads;    // Size of the embedding
 constexpr int bos_id = 0, eos_id = 1, unk_id = 2, pad_id = 3;
@@ -1663,25 +1663,33 @@ void batch_multiply(
     using positional_embeddings = positional_encodings<htan<embeddings<nb_embeddings, embedding_length, tag10<SUBNET>>>>;
 
     enum linear_bias_mode { LINEAR_HAS_BIAS = 0, LINEAR_NO_BIAS = 1 };
-    struct num_linear_outputs {
+    struct num_linear_outputs
+    {
         num_linear_outputs(unsigned long n) : num_outputs(n) {}
         unsigned long num_outputs;
     };
     template <unsigned long num_outputs_, linear_bias_mode bias_mode_>
-    class linear_ {
+    class linear_
+    {
         static_assert(num_outputs_ > 0, "The number of outputs from a linear_ layer must be > 0");
 
     public:
-        linear_(num_linear_outputs o) : num_outputs(o.num_outputs), num_inputs(0), learning_rate_multiplier(1), bias_mode(bias_mode_) {}
+        linear_(num_linear_outputs o) :
+            num_outputs(o.num_outputs),
+            num_inputs(0),
+            learning_rate_multiplier(1),
+            bias_mode(bias_mode_) {}
         linear_() : linear_(num_linear_outputs(num_outputs_)) {}
 
         double get_learning_rate_multiplier() const { return learning_rate_multiplier; }
         void set_learning_rate_multiplier(double val) { learning_rate_multiplier = val; }
 
         unsigned long get_num_outputs() const { return num_outputs; }
-        void set_num_outputs(long num) {
+        void set_num_outputs(long num)
+        {
             DLIB_CASSERT(num > 0);
-            if (num != (long)num_outputs) {
+            if (num != (long)num_outputs)
+            {
                 DLIB_CASSERT(get_layer_params().size() == 0,
                     "You can't change the number of filters in linear_ if the parameter tensor has already been allocated.");
                 num_outputs = num;
@@ -1690,7 +1698,8 @@ void batch_multiply(
         linear_bias_mode get_bias_mode() const { return bias_mode; }
 
         template <typename SUBNET>
-        void setup(const SUBNET& sub) {
+        void setup(const SUBNET& sub)
+        {
             num_inputs = sub.get_output().nc();
             DLIB_CASSERT(num_inputs > 0, "The input to a linear layer must have a non-zero number of rows");
             DLIB_CASSERT(num_outputs > 0, "The number of outputs for a linear layer must be > 0");
@@ -1699,14 +1708,16 @@ void batch_multiply(
             dlib::rand rnd;
             randomize_parameters(params, num_inputs + num_outputs, rnd);
             weights = alias_tensor(num_inputs, num_outputs);
-            if (bias_mode == LINEAR_HAS_BIAS) {
+            if (bias_mode == LINEAR_HAS_BIAS)
+            {
                 biases = alias_tensor(1, num_outputs);
                 biases(params, weights.size()) = 0;
             }
         }
 
         template <typename SUBNET>
-        void forward(const SUBNET& sub, resizable_tensor& output) {
+        void forward(const SUBNET& sub, resizable_tensor& output)
+        {
             const auto& prev_output = sub.get_output();
             DLIB_CASSERT((long)num_inputs == prev_output.nc(),
                 "The number of input features to this linear layer doesn't match the size the linear layer was trained with");
@@ -1715,11 +1726,14 @@ void batch_multiply(
             auto w = weights(params, 0);
             tt::c_gemm(0, output, 1, prev_output, false, w, false);            
 
-            if (bias_mode == LINEAR_HAS_BIAS) {
+            if (bias_mode == LINEAR_HAS_BIAS)
+            {
                 const auto b = biases(params, weights.size());
                 const long output_plane_size = output.nr() * output.nc();
-                for (long n = 0; n < output.num_samples(); ++n) {
-                    for (long k = 0; k < output.k(); ++k) {
+                for (long n = 0; n < output.num_samples(); ++n)
+                {
+                    for (long k = 0; k < output.k(); ++k)
+                    {
                         auto output_slice = alias_tensor(output.nr(), output.nc())(output, (n * output.k() + k) * output_plane_size);
                         tt::add(1, output_slice, 1, b);
                     }
@@ -1728,19 +1742,19 @@ void batch_multiply(
         }
 
         template <typename SUBNET>
-        void backward(const tensor& gradient_input, SUBNET& sub, tensor& params_grad) {
-            const auto& prev_output = sub.get_output();
-
+        void backward(const tensor& gradient_input, SUBNET& sub, tensor& params_grad)
+        {
             if (learning_rate_multiplier != 0) {
                 auto pw = weights(params_grad, 0);
-                // Calculate weight gradients
-                tt::c_gemm(0, pw, 1, prev_output, true, gradient_input, false);
-                if (bias_mode == LINEAR_HAS_BIAS) {
+                tt::c_gemm(0, pw, learning_rate_multiplier, sub.get_output(), true, gradient_input, false);
+                if (bias_mode == LINEAR_HAS_BIAS)
+                {
                     auto pb = biases(params_grad, weights.size());
-                    // Sum gradients for bias
                     const long grad_plane_size = gradient_input.nr() * gradient_input.nc();
-                    for (long n = 0; n < gradient_input.num_samples(); ++n) {
-                        for (long k = 0; k < gradient_input.k(); ++k) {
+                    for (long n = 0; n < gradient_input.num_samples(); ++n)
+                    {
+                        for (long k = 0; k < gradient_input.k(); ++k)
+                        {
                             auto grad_slice = alias_tensor(gradient_input.nr(), gradient_input.nc())(gradient_input, (n * gradient_input.k() + k) * grad_plane_size);
                             tt::assign_bias_gradient(pb, grad_slice);
                         }
@@ -1748,20 +1762,20 @@ void batch_multiply(
                 }
             }
 
-            // Propagate gradients to previous layer
-            auto& prev_grad = sub.get_gradient_input();
             auto w = weights(params, 0);
-            tt::c_gemm(1, prev_grad, 1, gradient_input, false, w, true);
+            tt::c_gemm(1, sub.get_gradient_input(), 1, gradient_input, false, w, true);
         }
 
         alias_tensor_instance get_weights() { return weights(params, 0); }
         alias_tensor_const_instance get_weights() const { return weights(params, 0); }
-        alias_tensor_instance get_biases() {
+        alias_tensor_instance get_biases()
+        {
             static_assert(bias_mode == LINEAR_HAS_BIAS, "This linear_ layer doesn't have a bias vector "
                 "to be retrieved, as per template parameter 'bias_mode'.");
             return biases(params, weights.size());
         }
-        alias_tensor_const_instance get_biases() const {
+        alias_tensor_const_instance get_biases() const
+        {
             static_assert(bias_mode == LINEAR_HAS_BIAS, "This linear_ layer doesn't have a bias vector "
                 "to be retrieved, as per template parameter 'bias_mode'.");
             return biases(params, weights.size());
@@ -1770,7 +1784,8 @@ void batch_multiply(
         const tensor& get_layer_params() const { return params; }
         tensor& get_layer_params() { return params; }
 
-        friend void serialize(const linear_& item, std::ostream& out) {
+        friend void serialize(const linear_& item, std::ostream& out)
+        {
             serialize("linear_", out);
             serialize(item.num_outputs, out);
             serialize(item.num_inputs, out);
@@ -1781,10 +1796,12 @@ void batch_multiply(
             serialize(item.learning_rate_multiplier, out);
         }
 
-        friend void deserialize(linear_& item, std::istream& in) {
+        friend void deserialize(linear_& item, std::istream& in)
+        {
             std::string version;
             deserialize(version, in);
-            if (version == "linear_") {
+            if (version == "linear_")
+            {
                 deserialize(item.num_outputs, in);
                 deserialize(item.num_inputs, in);
                 deserialize(item.params, in);
@@ -1794,32 +1811,39 @@ void batch_multiply(
                 if (bias_mode_ != item.bias_mode) throw serialization_error("Wrong linear_bias_mode found while deserializing dlib::linear_");
                 deserialize(item.learning_rate_multiplier, in);
             }
-            else {
+            else
+            {
                 throw serialization_error("Unexpected version '" + version + "' found while deserializing dlib::linear_.");
             }
         }
 
-        friend std::ostream& operator<<(std::ostream& out, const linear_& item) {
-            if (item.bias_mode == LINEAR_HAS_BIAS) {
+        friend std::ostream& operator<<(std::ostream& out, const linear_& item)
+        {
+            if (item.bias_mode == LINEAR_HAS_BIAS)
+            {
                 out << "linear (num_outputs=" << item.num_outputs << ")";
                 out << " learning_rate_mult=" << item.learning_rate_multiplier;
             }
-            else {
+            else
+            {
                 out << "linear_no_bias (num_outputs=" << item.num_outputs << ")";
                 out << " learning_rate_mult=" << item.learning_rate_multiplier;
             }
             return out;
         }
 
-        friend void to_xml(const linear_& item, std::ostream& out) {
-            if (item.bias_mode == LINEAR_HAS_BIAS) {
+        friend void to_xml(const linear_& item, std::ostream& out)
+        {
+            if (item.bias_mode == LINEAR_HAS_BIAS)
+            {
                 out << "<linear"
                     << " num_outputs='" << item.num_outputs << "'"
                     << " learning_rate_mult='" << item.learning_rate_multiplier << "'>\n";
                 out << mat(item.params);
                 out << "</linear>\n";
             }
-            else {
+            else
+            {
                 out << "<linear_no_bias"
                     << " num_outputs='" << item.num_outputs << "'"
                     << " learning_rate_mult='" << item.learning_rate_multiplier << "'>\n";
@@ -1836,6 +1860,7 @@ void batch_multiply(
         resizable_tensor params;
         alias_tensor weights, biases;
     };
+
     template <unsigned long num_outputs, typename SUBNET>
     using linear = add_layer<linear_<num_outputs, LINEAR_HAS_BIAS>, SUBNET>;
     template <unsigned long num_outputs, typename SUBNET>
@@ -1862,6 +1887,7 @@ void batch_multiply(
         {
             const auto& prev = sub.get_output();
             output.set_size(prev.num_samples(), prev.k() * num_heads, prev.nr(), prev.nc() / num_heads);
+
             tt::reorg2(false, output, 1, num_heads, prev);
         }
 
@@ -1869,9 +1895,9 @@ void batch_multiply(
         void backward(const tensor& gradient_input, SUBNET& sub, tensor& /*params_grad*/)
         {
             auto& grad = sub.get_gradient_input();
+
             tt::reorg_gradient2(true, grad, 1, num_heads, gradient_input);
-            //tt::merge_columns(true, grad, gradient_input);
-       }
+        }
 
         const tensor& get_layer_params() const { return params; }
         tensor& get_layer_params() { return params; }
@@ -1921,14 +1947,14 @@ void batch_multiply(
         {
             const auto& prev = sub.get_output();
             output.set_size(prev.num_samples(), 1, prev.nr(), prev.nc() * prev.k());
+            
             tt::reorg_gradient2(false, output, 1, prev.k(), prev);
-            //tt::merge_columns(false, output, prev);
         }
         template <typename SUBNET>
         void backward(const tensor& gradient_input, SUBNET& sub, tensor& /*params_grad*/)
         {
             auto& grad = sub.get_gradient_input();
-            //tt::split_columns(true, grad, gradient_input, grad.k());
+
             tt::reorg2(true, grad, 1, grad.k(), gradient_input);
         }
 
@@ -2135,19 +2161,13 @@ void batch_multiply(
 
         template <typename SUBNET>
         void backward(const tensor& gradient_input, SUBNET& sub, tensor& /*params_grad*/) {
+            auto& t1 = sub.get_output();
+            auto& t2 = layer<tag>(sub).get_output();
             auto& prev = sub.get_gradient_input();
-            auto& prev_tag = layer<tag>(sub).get_gradient_input();
+            auto& prev_tag = layer<tag>(sub).get_gradient_input();            
 
-            /*tt::c_gemm(0, prev, 1, gradient_input, false, layer<tag>(sub).subnet().get_output(), true);
-            tt::c_gemm(0, prev_tag, 1, sub.get_output(), true, gradient_input, false);*/
-            
-            //auto& t1 = sub.get_output();
-            //auto& t2 = layer<tag>(sub).get_output();
-
-            //tt::c_gemm(1, sub.get_gradient_input(), 1, gradient_input, false, t2, true);
-            tt::c_gemm(1, prev, 1, gradient_input, false, layer<tag>(sub).get_output(), true);
-            //tt::c_gemm(1, layer<tag>(sub).get_gradient_input(), 1, t1, true, gradient_input, false);
-            tt::c_gemm(1, prev_tag, 1, sub.get_output(), true, gradient_input, false);
+            tt::c_gemm(1, prev, 1, gradient_input, false, t2, true);
+            tt::c_gemm(1, prev_tag, 1, t1, true, gradient_input, false);
         }
 
         const tensor& get_layer_params() const { return params; }
@@ -2298,48 +2318,67 @@ void batch_multiply(
     using softmaxm = add_layer<softmaxm_, SUBNET>;
 
     // Basic layers for Query, Key, and Value
-    template <int num_filters_out, typename SUBNET>
-    using query = linear_no_bias<num_filters_out, SUBNET>;
-    template <int num_filters_out, typename SUBNET>
-    using key = linear_no_bias<num_filters_out, SUBNET>;
-    template <int num_filters_out, typename SUBNET>
-    using value = linear_no_bias<num_filters_out, SUBNET>;
+    template <int nb_heads, int num_filters_out, typename SUBNET>
+    //using query = linear_no_bias<num_filters_out, SUBNET>;
+    using query = con<nb_heads, 1, 1, 1, nb_heads, SUBNET>;
+    template <int nb_heads, int num_filters_out, typename SUBNET>
+    //using key = linear_no_bias<num_filters_out, SUBNET>;
+    using key = con<nb_heads, 1, 1, 1, nb_heads, SUBNET>;
+    template <int nb_heads, int num_filters_out, typename SUBNET>
+    //using value = linear_no_bias<num_filters_out, SUBNET>;
+    using value = con<nb_heads, 1, 1, 1, nb_heads, SUBNET>;
 
     // Core masked multihead attention block
     template <int embedding_dim, int nb_heads, typename SUBNET>
     using multihead_attention_block =
         add_prev3<
-        linear<embedding_dim,
-        hstack<
+        //linear<embedding_dim,
+        cont<1, 1, nb_heads, 1, nb_heads,
+        //hstack<
         multm_prev1<
         dropout_10<softmaxm<
         tril_mask<
         scale_weights<nb_heads, embedding_dim,
         multm_prev2<
-        hsplit<nb_heads, query<embedding_dim, skip3<
-        tag2<transpose<hsplit<nb_heads, key<embedding_dim, skip3<
-        tag1<hsplit<nb_heads, value<embedding_dim,
-        tag3<SUBNET>>>>>>>>>>>>>>>>>>>>>;
+        //hsplit<nb_heads, query<embedding_dim, skip3<
+        query<nb_heads, embedding_dim, skip3<
+        //tag2<transpose<hsplit<nb_heads, key<embedding_dim, skip3<
+        tag2<transpose<key<nb_heads, embedding_dim, skip3<
+        //tag1<hsplit<nb_heads, value<embedding_dim,
+        tag1<value<nb_heads, embedding_dim,
+        tag3<SUBNET>>>>>>>>>>>>>>>>>;
+        //tag3<SUBNET>>>>>>>>>>>>>>>>>>>>>;
 
     // Feedforward blocks
-    template <int embedding_dim, typename SUBNET>
-    using feed_forward_fc =
+    template <int N, typename SUBNET>
+    using se = scale8<sig<fc<N, relu<bn_fc<fc<N / 16, avg_pool_everything<tag8<SUBNET>>>>>>>>;
+
+    template <int sequence_dim, int embedding_dim, typename SUBNET>
+
+    /*using feed_forward =
         add_prev5<
         scale5<con<1, 1, 1, 1, 1,
+        //cont<1, sequence_dim, embedding_dim, sequence_dim, embedding_dim,
+        sig<fc<embedding_size,
+        dropout_10<gelu<bn_fc<fc<embedding_size / 4,
+        avg_pool_everything<tag5<SUBNET>>>>>>>>>>>;*/
+    using feed_forward =
+        add_prev5<
+        cont<1, sequence_dim, embedding_dim, sequence_dim, embedding_dim,
         fc<embedding_size,
-        dropout_10<gelu<bn_fc<fc<embedding_size * 4,
-        tag5<SUBNET>>>>>>>>>;
-    template <int embedding_dim, typename SUBNET>
+        dropout_10<gelu<bn_fc<fc<embedding_size / 4,
+        tag5<SUBNET>>>>>>>>;
+    /*template <int embedding_dim, typename SUBNET>
     using feed_forward =
         add_prev5<
         linear<embedding_size,
         dropout_10<gelu<linear<embedding_size * 4,
-        tag5<SUBNET>>>>>>;
+        tag5<SUBNET>>>>>>;*/
 
     // Transformer block
     template <typename SUBNET>
     using transformer_block =
-        feed_forward<embedding_size,
+        feed_forward<sequence_size, embedding_size,
         multihead_attention_block<embedding_size, number_of_heads, 
         rms_norm<SUBNET>>>;
 
@@ -2839,7 +2878,7 @@ int main(int argc, char* argv[]) {
     bool do_benchmark = false, text_generation = false;
     bool voc_training = false, model_training = false, model_prompting = false, use_sync_file = false;
     double learning_rate = 1e-3, min_learning_rate = 1e-6, weight_decay = 0.001, beta1 = 0.9, beta2 = 0.999, temperature = 0.9;
-    long mini_batch_size = 32, iterations_without_progress_threshold = 10000, top_k = 3;
+    long mini_batch_size = 16, iterations_without_progress_threshold = 50000, top_k = 3;
     std::vector<int> gpus = { 0 };
     set_dnn_prefer_fastest_algorithms();
        
@@ -3012,9 +3051,19 @@ int main(int argc, char* argv[]) {
                 DLIB_TEST_MSG(max(abs(mat(net_ouput) - mat(expected_output))) < 1e-5, "linear layer");
             }
             {
-                //linear_<10, LINEAR_HAS_BIAS> l;
-                //auto res = test_layer(l);
-                //DLIB_TEST_MSG(res, " linear layer\n" + res);
+                linear_<1, LINEAR_NO_BIAS> l;
+                auto res = test_layer(l);
+                DLIB_TEST_MSG(res, res);
+            }
+            {
+                fc_<5, FC_HAS_BIAS> l;
+                auto res = test_layer(l);
+                DLIB_TEST_MSG(res, res);
+            }
+            {
+                fc_<4, FC_NO_BIAS> l;
+                auto res = test_layer(l);
+                DLIB_TEST_MSG(res, res);
             }
         }
 
@@ -3194,9 +3243,9 @@ int main(int argc, char* argv[]) {
 
                 // Model definition
                 using net_type = tag10<multm_prev1<softmaxm<scale_weights<1, 3, tag6<multm_prev4<
-                    tag3<linear_no_bias<3, // Q
-                    skip5<tag4<transpose<tag2<linear_no_bias<3, // K
-                    skip5<tag1<linear_no_bias<3, // V
+                    tag3<linear<3, // Q
+                    skip5<tag4<transpose<tag2<linear<3, // K
+                    skip5<tag1<linear<3, // V
                     tag5<input<matrix<float>>>>>>>>>>>>>>>>>>>;
                 net_type net;
 
@@ -3692,27 +3741,26 @@ Be all my sins remembered.)";
                     for (size_t i = 0; i < labels_txt.size(); ++i) if (predicted_labels_c[i] == labels_txt[i]) ++num_correct_c;
                     double accuracy_c = static_cast<double>(num_correct_c) / labels_txt.size();
                     DLIB_TEST_MSG(accuracy_c > 0.8, "shakespeare model (accuracy: " + to_string(accuracy_c) + ")");
-
-                    // Predict the next sequence of characters
-                    string input_sequence = "To be or not to be—that is the ques";
-                    std::vector<matrix<int, 0, 1>> input_tokens = tokenize_text(input_sequence, sequence_size);
-                    string start_seq = to_unsigned_char_string(input_tokens.back());
-                    size_t pos = input_sequence.find(start_seq);
-                    if (pos != std::string::npos) input_sequence = input_sequence.substr(0, pos + start_seq.length());
-                    cout << "input sequence for text generation: <" << start_seq << ">" << endl;
-                    matrix<int> next_input(sequence_size, 1);
-                    for (int i = 0; i < 400; ++i) {
-                        unsigned long next_char = net_b(input_tokens.back());
-                        input_sequence += static_cast<unsigned char>(next_char);
-                        for (int j = 0; j < (sequence_size - 1); ++j) next_input(j, 0) = input_tokens.back()(j + 1, 0);
-                        next_input(sequence_size - 1, 0) = static_cast<int>(next_char);
-                        input_tokens.clear();
-                        input_tokens.push_back(next_input);
-                    }
-                    cout << "generated text:\n\n" << input_sequence << " (...)\n\n";
                 }
+                // Predict the next sequence of characters
+                string input_sequence = "To be or not to be—that is the ques";
+                std::vector<matrix<int, 0, 1>> input_tokens = tokenize_text(input_sequence, sequence_size);
+                string start_seq = to_unsigned_char_string(input_tokens.back());
+                size_t pos = input_sequence.find(start_seq);
+                if (pos != std::string::npos) input_sequence = input_sequence.substr(0, pos + start_seq.length());
+                cout << "input sequence for text generation: <" << start_seq << ">" << endl;
+                matrix<int> next_input(sequence_size, 1);
+                for (int i = 0; i < 400; ++i) {
+                    unsigned long next_char = net_b(input_tokens.back());
+                    input_sequence += static_cast<unsigned char>(next_char);
+                    for (int j = 0; j < (sequence_size - 1); ++j) next_input(j, 0) = input_tokens.back()(j + 1, 0);
+                    next_input(sequence_size - 1, 0) = static_cast<int>(next_char);
+                    input_tokens.clear();
+                    input_tokens.push_back(next_input);
+                }
+                cout << "generated text:\n\n" << input_sequence << " (...)\n\n";
 
-                // Loading the complete Shakespeare file
+                // Loading now the complete Shakespeare file
                 string shakespeare_file = "shakespeare.txt";
                 if (fs::exists(shakespeare_file)) {
                     documents shakespeare_data(sequence_size, 0, true);
@@ -3739,7 +3787,7 @@ Be all my sins remembered.)";
                     trainer_d.set_mini_batch_size(mini_batch_size);
                     trainer_d.be_verbose();                    
                     trainer_d.set_synchronization_file("llm_shakespeare_model_b.ckp", std::chrono::minutes(5));
-                    trainer_d.set_iterations_without_progress_threshold(7500);
+                    trainer_d.set_iterations_without_progress_threshold(iterations_without_progress_threshold);
 
                     // New training loop
                     while (trainer_d.get_learning_rate() >= trainer_d.get_min_learning_rate() && !g_interrupt_signal_received) {
