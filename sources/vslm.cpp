@@ -50,6 +50,8 @@
 #include <sentencepiece_processor.h>
 #ifdef DLIB_USE_CUDA
 #include "cuda_dlib_ext.cuh"
+#include <cuda_runtime.h>
+#include "cublas_v2.h"
 #endif // DLIB_USE_CUDA
 #include "advanced_tokenizer.hpp"
 #include "data_fr.h"
@@ -61,16 +63,16 @@ using namespace std;
 using namespace dlib;
 
 // Global parameters for the Transformer network
-constexpr int vocab_size = 8000;                                            // Size of the vocabulary
+constexpr int vocab_size = 20000;                                           // Size of the vocabulary
 constexpr int sequence_size = 24;                                           // Length of the sequence
-constexpr int number_of_heads = 4;                                          // Number of attention heads
+constexpr int number_of_heads = 8;                                          // Number of attention heads
 constexpr int number_of_blocks = 4;                                         // Number of transformer blocks
-constexpr int embedding_size = (64 / number_of_heads) * number_of_heads;    // Size of the embedding
+constexpr int embedding_size = (128 / number_of_heads) * number_of_heads;   // Size of the embedding
 constexpr int bos_id = 0, eos_id = 1, unk_id = 2, pad_id = 3;
 
 // Other global parameters
 const float epsilon = 1e-5;
-string vocabulary_prefix = "ernie.en-fr.ung.8k", language_model = "ernie_vslm_v1.dat";
+string vocabulary_prefix = "ernie.en-fr.ung.20k", language_model = "ernie_vslm_v1.dat";
 std::unique_ptr<advanced_tokenizer> tokenizer_;
 
 #define DLIB_TEST_MSG(cond, msg) \
@@ -157,29 +159,29 @@ namespace utils {
         std::string output;
         output.reserve(input.size());
 
-size_t lastPos = 0;
-size_t findPos = 0;
+        size_t lastPos = 0;
+        size_t findPos = 0;
 
-while ((findPos = input.find('&', lastPos)) != std::string::npos) {
-    output.append(input, lastPos, findPos - lastPos);
-    auto endPos = input.find(';', findPos);
-    if (endPos != std::string::npos) {
-        std::string entity = input.substr(findPos, endPos - findPos + 1);
-        auto it = htmlEntities.find(entity);
-        if (it != htmlEntities.end()) {
-            output.append(it->second);
+        while ((findPos = input.find('&', lastPos)) != std::string::npos) {
+            output.append(input, lastPos, findPos - lastPos);
+            auto endPos = input.find(';', findPos);
+            if (endPos != std::string::npos) {
+                std::string entity = input.substr(findPos, endPos - findPos + 1);
+                auto it = htmlEntities.find(entity);
+                if (it != htmlEntities.end()) {
+                    output.append(it->second);
+                }
+                else {
+                    output.append(entity);
+                }
+                lastPos = endPos + 1;
+            }
+            else {
+                break;
+            }
         }
-        else {
-            output.append(entity);
-        }
-        lastPos = endPos + 1;
-    }
-    else {
-        break;
-    }
-}
-output.append(input, lastPos, std::string::npos);
-return output;
+        output.append(input, lastPos, std::string::npos);
+        return output;
     }
 
     bool is_unicode(char32_t c) {
@@ -252,7 +254,203 @@ using utils::concatenate_files;
 namespace dlib {
     namespace cpu {
         /* TO BE ADDED TO <cpu_dlib.cpp> */
-       
+
+        namespace ttimpl
+        {
+            void softmax2(
+                const long num_locations,
+                const long num_channels,
+                tensor& dest,
+                const tensor& src,
+                size_t mode = 0
+            )
+            {
+                DLIB_ASSERT(num_channels * num_locations == src.nr() * src.nc() * src.k());
+                DLIB_CASSERT(have_same_dimensions(dest, src));
+                const auto d = dest.host();
+                const auto s = src.host();
+
+                constexpr float epsilon = 1e-8f;
+
+                for (long n = 0; n < src.num_samples(); ++n)
+                {
+                    auto ss = s + num_locations * num_channels * n;
+                    auto dd = d + num_locations * num_channels * n;
+
+                    if (mode == 0) // softmax_mode::CHANNEL_WISE
+                    {
+                        // Original Dlib implementation
+                        for (long i = 0; i < num_locations; ++i)
+                        {
+                            float max_val = -std::numeric_limits<float>::infinity();
+                            for (long k = 0; k < num_channels; ++k)
+                                max_val = std::max(max_val, ss[k * num_locations]);
+
+                            float sum = 0;
+                            for (long k = 0; k < num_channels; ++k)
+                            {
+                                dd[k * num_locations] = std::exp(ss[k * num_locations] - max_val);
+                                sum += dd[k * num_locations];
+                            }
+                            sum += epsilon;
+                            for (long k = 0; k < num_channels; ++k)
+                                dd[k * num_locations] /= sum;
+
+                            ++ss;
+                            ++dd;
+                        }
+                    }
+                    else  // softmax_mode::PLANE_WISE
+                    {
+                        // Implementation for attention mechanism
+                        for (long k = 0; k < num_channels; ++k)
+                        {
+                            auto s_channel = ss + k * num_locations;
+                            auto d_channel = dd + k * num_locations;
+
+                            bool all_neg_inf = true;
+                            float max_val = -std::numeric_limits<float>::infinity();
+                            for (long i = 0; i < num_locations; ++i)
+                            {
+                                if (s_channel[i] != -std::numeric_limits<float>::infinity())
+                                {
+                                    all_neg_inf = false;
+                                    max_val = std::max(max_val, s_channel[i]);
+                                }
+                            }
+
+                            if (all_neg_inf)
+                            {
+                                float uniform_prob = 1.0f / static_cast<float>(num_locations);
+                                for (long i = 0; i < num_locations; ++i)
+                                    d_channel[i] = uniform_prob;
+                            }
+                            else
+                            {
+                                float sum = 0;
+                                for (long i = 0; i < num_locations; ++i)
+                                {
+                                    d_channel[i] = std::exp(s_channel[i] - max_val);
+                                    sum += d_channel[i];
+                                }
+                                sum += epsilon;
+                                for (long i = 0; i < num_locations; ++i)
+                                    d_channel[i] /= sum;
+                            }
+                        }
+                    }
+                }
+            }
+
+            void softmax_gradient2(
+                const long num_locations,
+                const long num_channels,
+                tensor& grad,
+                const tensor& dest,
+                const tensor& gradient_input,
+                size_t mode = 0
+            )
+            {
+                DLIB_ASSERT(num_channels * num_locations == grad.nr() * grad.nc() * grad.k());
+                DLIB_CASSERT(have_same_dimensions(grad, dest));
+                DLIB_CASSERT(have_same_dimensions(grad, gradient_input));
+                const auto d = dest.host();
+                const auto g = grad.host();
+                const auto in = gradient_input.host();
+
+                for (long n = 0; n < grad.num_samples(); ++n)
+                {
+                    const auto d2 = d + num_locations * num_channels * n;
+                    const auto g2 = g + num_locations * num_channels * n;
+                    const auto in2 = in + num_locations * num_channels * n;
+
+                    if (mode == 0) // softmax_mode::CHANNEL_WISE
+                    {
+                        // Original Dlib implementation
+                        for (long i = 0; i < num_locations; ++i)
+                        {
+                            const auto d3 = d2 + i;
+                            const auto g3 = g2 + i;
+                            const auto in3 = in2 + i;
+
+                            float temp = 0;
+                            for (long k = 0; k < num_channels; ++k)
+                                temp += -d3[k * num_locations] * in3[k * num_locations];
+                            if (is_same_object(gradient_input, grad))
+                            {
+                                for (long k = 0; k < num_channels; ++k)
+                                    g3[k * num_locations] = d3[k * num_locations] * (temp + in3[k * num_locations]);
+                            }
+                            else
+                            {
+                                for (long k = 0; k < num_channels; ++k)
+                                    g3[k * num_locations] += d3[k * num_locations] * (temp + in3[k * num_locations]);
+                            }
+                        }
+                    }
+                    else  // softmax_mode::PLANE_WISE
+                    {
+                        // Implementation for attention mechanism
+                        for (long k = 0; k < num_channels; ++k)
+                        {
+                            const auto d_channel = d2 + k * num_locations;
+                            const auto g_channel = g2 + k * num_locations;
+                            const auto in_channel = in2 + k * num_locations;
+
+                            float temp = 0;
+                            for (long i = 0; i < num_locations; ++i)
+                                temp += -d_channel[i] * in_channel[i];
+
+                            if (is_same_object(gradient_input, grad))
+                            {
+                                for (long i = 0; i < num_locations; ++i)
+                                    g_channel[i] = d_channel[i] * (temp + in_channel[i]);
+                            }
+                            else
+                            {
+                                for (long i = 0; i < num_locations; ++i)
+                                    g_channel[i] += d_channel[i] * (temp + in_channel[i]);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        void softmax2(
+            tensor& dest,
+            const tensor& src,
+            size_t mode = 0
+        )
+        {
+            DLIB_CASSERT(have_same_dimensions(dest, src));
+
+            if (mode == 0) {
+                ttimpl::softmax2(src.nr() * src.nc(), src.k(), dest, src, mode);
+            }
+            else {
+                ttimpl::softmax2(src.nc(), src.nr(), dest, src, mode);
+            }
+        }
+
+        void softmax_gradient2(
+            tensor& grad,
+            const tensor& dest,
+            const tensor& gradient_input,
+            size_t mode = 0
+        )
+        {
+            DLIB_CASSERT(have_same_dimensions(grad, dest));
+            DLIB_CASSERT(have_same_dimensions(grad, gradient_input));
+
+            if (mode == 0) {
+                ttimpl::softmax_gradient2(grad.nr() * grad.nc(), grad.k(), grad, dest, gradient_input, mode);
+            }
+            else {
+                ttimpl::softmax_gradient2(grad.nc(), grad.nr(), grad, dest, gradient_input, mode);
+            }
+        }
+
         // -----------------------------------------------------------------------------------
         void reorg2(
             bool add_to,
@@ -625,168 +823,120 @@ namespace dlib {
             }
         }
 
-
-// -----------------------------------------------------------------------------------
-        /*void batch_multiply(
-            tensor& out,
-            const tensor& a,
-            bool a_trans,
-            const tensor& b,
-            bool b_trans
-        )
-        {
-            const long num_samples_a = a.num_samples();
-            const long num_channels_a = a.k();
-            const long a_nr = a.nr();
-            const long a_nc = a.nc();
-            long b_nr = b.nr();
-            long b_nc = b.nc();
-
-            // Determine if this is a "broadcast" case (like in linear_ layer)
-            const bool broadcast_b = (b.num_samples() > 1 && b.k() > 1 && b_nr == 1 && b_nc == 1);
-
-            // Dimension checks
-            if (!broadcast_b) {
-                DLIB_CASSERT(b.num_samples() == num_samples_a, "Number of samples in both tensors must match");
-                DLIB_CASSERT(b.k() == num_channels_a, "Number of channels in both tensors must match");
-            }
-            else
-            {
-                b_nr = b.num_samples();
-                b_nc = b.k();
-            }
-            DLIB_CASSERT(out.num_samples() == num_samples_a);
-            DLIB_CASSERT(out.k() == num_channels_a);
-            DLIB_CASSERT(a_trans ? a_nr : a_nc == (b_trans ? b_nc : b_nr), "Incompatible dimensions for matrix multiplication");
-            DLIB_CASSERT(out.nr() == (a_trans ? a_nc : a_nr));
-            DLIB_CASSERT(out.nc() == (b_trans ? b_nr : b_nc));
-
-            const long K = a_trans ? a_nr : a_nc;
-            const long M = out.nr();
-            const long N = out.nc();
-
-            for (long n = 0; n < num_samples_a; ++n)
-            {
-                for (long k = 0; k < num_channels_a; ++k)
-                {
-                    const float* a_data = a.host() + ((n * num_channels_a + k) * a_nr * a_nc);
-                    const float* b_data = broadcast_b ? b.host() : b.host() + ((n * b.k() + k) * b_nr * b_nc);
-                    float* out_data = out.host() + ((n * num_channels_a + k) * M * N);
-
-                    for (long r = 0; r < M; ++r)
-                    {
-                        for (long c = 0; c < N; ++c)
-                        {
-                            float sum = 0;
-                            for (long i = 0; i < K; ++i)
-                            {
-                                long a_index = a_trans ? (i * a_nc + r) : (r * a_nc + i);
-                                long b_index = b_trans ? (c * b_nr + i) : (i * b_nc + c);
-                                sum += a_data[a_index] * b_data[b_index];
-                            }
-                            out_data[r * N + c] = sum;
-                        }
-                    }
-                }
-            }
-        }*/
-        void batch_multiply(
-            tensor& out,
-            const tensor& a,
-            bool a_trans,
-            const tensor& b,
-            bool b_trans
-        )
-        {
-            long num_samples_a = a.num_samples();
-            long num_channels_a = a.k();
-            long num_samples_b = b.num_samples();
-            long num_channels_b = b.k();
-            long a_nr = a.nr();
-            long a_nc = a.nc();
-            long b_nr = b.nr();
-            long b_nc = b.nc();
-
-            // Lambda function to update a tensor given a matrix, num_sample, and k
-            auto update_tensor = [](tensor& t, const matrix<float>& m, long num_sample, long k) {
-                if (t.nr() == 1 && t.nc() == 1) {
-                    // Case where tensor is effectively a 2D matrix in num_samples and k dimensions
-                    DLIB_CASSERT(m.nr() == t.num_samples() && m.nc() == t.k(), "Matrix dimensions mismatch");
-                    for (long r = 0; r < m.nr(); ++r) {
-                        for (long c = 0; c < m.nc(); ++c) {
-                            t.host()[r * t.k() + c] = m(r, c);
-                        }
-                    }
-                } else {
-                    // Case for 4D tensor
-                    DLIB_CASSERT(m.nr() == t.nr() && m.nc() == t.nc(), "Matrix dimensions mismatch");
-                    for (long r = 0; r < t.nr(); ++r) {
-                        for (long c = 0; c < t.nc(); ++c) {
-                            t.host()[((num_sample * t.k() + k) * t.nr() + r) * t.nc() + c] = m(r, c);
-                        }
-                    }
-                }
-            };
-
-            // Determine the case
-            const bool a_is_matrix = (num_samples_a > 1 && num_channels_a > 1 && a_nr == 1 && a_nc == 1);
-            const bool b_is_matrix = (num_samples_b > 1 && num_channels_b > 1 && b_nr == 1 && b_nc == 1);
-
-            // Ajust dimensions
-            num_samples_a = (a_is_matrix && a_trans) ? num_channels_a : num_samples_a;
-            num_channels_a = (a_is_matrix && a_trans) ? num_samples_a : num_channels_a;
-            num_samples_b = (b_is_matrix && b_trans) ? num_channels_b : num_samples_b;
-            num_channels_b = (b_is_matrix && b_trans) ? num_samples_b : num_channels_b;
-            a_nr = (!a_is_matrix && a_trans) ? a_nc : a_nr;
-            a_nc = (!a_is_matrix && a_trans) ? a_nr : a_nc;
-            b_nr = (!b_is_matrix && b_trans) ? b_nc : b_nr;
-            b_nc = (!b_is_matrix && b_trans) ? b_nr : b_nc;
-
-            if (a_is_matrix && b_is_matrix) {
-                tt::gemm(0, out, 1, a, a_trans, b, b_trans);
-            }
-            else if (b_is_matrix) {
-                matrix<float> a_mat, b_mat = mat(b);
-                if (b_trans) b_mat = trans(b_mat);
-                for (long n = 0; n < num_samples_a; ++n) {
-                    for (long k = 0; k < num_channels_a; ++k) {
-                        a_mat = image_plane(a, n, k);
-                        if (a_trans) a_mat = trans(a_mat);
-                        update_tensor(out, a_mat * b_mat, n, k);
-                    }
-                }
-            }
-            else if (a_is_matrix) {
-                matrix<float> a_mat = mat(a), b_mat, o_mat = zeros_matrix<float>(num_samples_a, b_nc);
-                if (a_trans) a_mat = trans(a_mat);
-                for (long n = 0; n < num_samples_b; ++n) {
-                    for (long k = 0; k < num_channels_b; ++k) {
-                        b_mat = image_plane(b, n, k);
-                        if (b_trans) b_mat = trans(b_mat);
-                        o_mat += (a_mat * b_mat);
-                        
-                    }
-                }
-                o_mat /= (num_samples_b * num_channels_b);
-                update_tensor(out, o_mat, 1, 1);
-            }
-            else {
-                matrix<float> a_mat, b_mat;
-                for (long n = 0; n < num_samples_a; ++n) {
-                    for (long k = 0; k < num_channels_a; ++k) {
-                        a_mat = image_plane(a, n, k);
-                        b_mat = image_plane(b, n, k);
-                        if (a_trans) a_mat = trans(a_mat);
-                        if (b_trans) b_mat = trans(b_mat);
-                        update_tensor(out, a_mat * b_mat, n, k);
-                    }
-                }
-            }
-        }
-
         // -----------------------------------------------------------------------------------
 
     }
+
+#ifdef DLIB_USE_CUDA
+    namespace cuda {
+        class cublas_context
+        {
+        public:
+            cublas_context(const cublas_context&) = delete;
+            cublas_context& operator=(const cublas_context&) = delete;
+
+            cublas_context()
+            {
+                handles.resize(16);
+            }
+            ~cublas_context()
+            {
+                for (auto h : handles)
+                {
+                    if (h)
+                        cublasDestroy(h);
+                }
+            }
+
+            cublasHandle_t get_handle()
+            {
+                int new_device_id;
+                CHECK_CUDA(cudaGetDevice(&new_device_id));
+                if (new_device_id >= (long)handles.size()) handles.resize(new_device_id + 16);
+                if (!handles[new_device_id]) cublasCreate(&handles[new_device_id]);
+                return handles[new_device_id];
+            }
+
+        private:
+            std::vector<cublasHandle_t> handles;
+        };
+
+        static cublasHandle_t context()
+        {
+            thread_local cublas_context c;
+            return c.get_handle();
+        }
+
+        void c_gemm(
+            float beta,
+            tensor& dest,
+            float alpha,
+            const tensor& lhs,
+            bool trans_lhs,
+            const tensor& rhs,
+            bool trans_rhs
+        )
+        {
+            const auto transa = trans_lhs ? CUBLAS_OP_T : CUBLAS_OP_N;
+            const auto transb = trans_rhs ? CUBLAS_OP_T : CUBLAS_OP_N;
+
+            long num_samples = std::max({ lhs.num_samples(), rhs.num_samples(), dest.num_samples() });
+            long num_channels = std::max({ lhs.k(), rhs.k(), dest.k() });
+
+            auto is_matrix = [](const auto& tensor) {
+                return (tensor.num_samples() == 1 && tensor.k() == 1) ||
+                    (tensor.nr() == 1 && tensor.nc() == 1);
+            };
+            const bool lhs_is_matrix = is_matrix(lhs), rhs_is_matrix = is_matrix(rhs), dest_is_matrix = is_matrix(dest);
+
+            if (lhs_is_matrix && rhs_is_matrix && dest_is_matrix) {
+                num_samples = num_channels = 1;
+            }
+            else {
+                auto adjust = [&](const auto& tensor) {
+                    if (!is_matrix(tensor)) {
+                        if (tensor.num_samples() < num_samples) num_samples = tensor.num_samples();
+                        if (tensor.k() < num_channels) num_channels = tensor.k();
+                    }
+                };
+                adjust(lhs);
+                adjust(rhs);
+                adjust(dest);
+            }
+
+            long lhs_rows = (lhs_is_matrix && lhs.num_samples() > 1) ? lhs.num_samples() : lhs.nr();
+            long lhs_cols = (lhs_is_matrix && lhs.k() > 1) ? lhs.k() : lhs.nc();
+            long rhs_rows = (rhs_is_matrix && rhs.num_samples() > 1) ? rhs.num_samples() : rhs.nr();
+            long rhs_cols = (rhs_is_matrix && rhs.k() > 1) ? rhs.k() : rhs.nc();
+            long dest_rows = (dest_is_matrix && dest.num_samples() > 1) ? dest.num_samples() : dest.nr();
+            long dest_cols = (dest_is_matrix && dest.k() > 1) ? dest.k() : dest.nc();
+
+            const size_t lhs_plane_size = lhs_rows * lhs_cols;
+            const size_t rhs_plane_size = rhs_rows * rhs_cols;
+            const size_t dest_plane_size = dest_rows * dest_cols;
+
+            for (long b = 0; b < num_samples; ++b)
+            {
+                for (long c = 0; c < num_channels; ++c)
+                {
+                    auto lhs_slice = lhs_is_matrix ? lhs.device() :
+                        lhs.device() + (b * num_channels + c) * lhs_plane_size;
+                    auto rhs_slice = rhs_is_matrix ? rhs.device() :
+                        rhs.device() + (b * num_channels + c) * rhs_plane_size;
+                    auto dest_slice = dest_is_matrix ? dest.device() :
+                        dest.device() + (b * num_channels + c) * dest_plane_size;
+                    const int k = trans_rhs ? rhs_cols : rhs_rows;
+
+                    cublasSgemm(
+                        context(), transb, transa, dest_cols, dest_rows, k,
+                        &alpha, rhs_slice, rhs_cols, lhs_slice, lhs_cols,
+                        &beta, dest_slice, dest_cols
+                    );
+                }
+            }
+        }
+    }
+#endif
 
     namespace tt {
 /* TO BE ADDED TO <tensor_tools.h> */
@@ -810,150 +960,165 @@ namespace dlib {
                     - #output(s,k,r,c) == pe(r,c)
         !*/
 
-void rms_normalize(
-    const double eps,
-    resizable_tensor& dest,
-    resizable_tensor& scale,
-    const tensor& src,
-    const tensor& gamma
-);
-/*!
-    requires
-        - eps > 0
-        - gamma.k() == src.k()
-        - gamma.nr() == 1
-        - gamma.nc() == 1
-    ensures
-        - have_same_dimensions(#dest, src) == true
-        - #scale.size() == src.num_samples()
-        - #dest == the RMS normalized version of src
-        - #scale contains the RMS (Root Mean Square) values used to normalize each sample of src.
-        - Each element of #dest is computed as:
-            - #dest[n, k, i, j] == src[n, k, i, j] * gamma[k] / scale[n]
-        where n is the sample index, k is the channel index, and i, j are the spatial indices.
-!*/
+        void rms_normalize(
+            const double eps,
+            resizable_tensor& dest,
+            resizable_tensor& scale,
+            const tensor& src,
+            const tensor& gamma
+        );
+        /*!
+            requires
+                - eps > 0
+                - gamma.k() == src.k()
+                - gamma.nr() == 1
+                - gamma.nc() == 1
+            ensures
+                - have_same_dimensions(#dest, src) == true
+                - #scale.size() == src.num_samples()
+                - #dest == the RMS normalized version of src
+                - #scale contains the RMS (Root Mean Square) values used to normalize each sample of src.
+                - Each element of #dest is computed as:
+                    - #dest[n, k, i, j] == src[n, k, i, j] * gamma[k] / scale[n]
+                where n is the sample index, k is the channel index, and i, j are the spatial indices.
+        !*/
 
-void rms_normalize_gradient(
-    const tensor& gradient_input,
-    const tensor& scale,
-    const tensor& src,
-    const tensor& gamma,
-    tensor& src_grad,
-    tensor& gamma_grad,
-    resizable_tensor& dscale
-);
-/*!
-    requires
-        - scale.size() == src.num_samples()
-        - have_same_dimensions(gamma, gamma_grad)
-        - gamma.k() == src.k()
-        - gamma.nr() == 1
-        - gamma.nc() == 1
-        - have_same_dimensions(gradient_input, src)
-        - have_same_dimensions(gradient_input, src_grad)
-    ensures
-        - Let f(src, gamma) == dot(gradient_input, dest output of
-          rms_normalize(eps, dest, scale, src, gamma))
-        - Adds the gradient of f() with respect to src to #src_grad
-        - Assigns the gradient of f() with respect to gamma to #gamma_grad
-        - #dscale contains the gradients of f() with respect to the RMS values.
-!*/
+        void rms_normalize_gradient(
+            const tensor& gradient_input,
+            const tensor& scale,
+            const tensor& src,
+            const tensor& gamma,
+            tensor& src_grad,
+            tensor& gamma_grad,
+            resizable_tensor& dscale
+        );
+        /*!
+            requires
+                - scale.size() == src.num_samples()
+                - have_same_dimensions(gamma, gamma_grad)
+                - gamma.k() == src.k()
+                - gamma.nr() == 1
+                - gamma.nc() == 1
+                - have_same_dimensions(gradient_input, src)
+                - have_same_dimensions(gradient_input, src_grad)
+            ensures
+                - Let f(src, gamma) == dot(gradient_input, dest output of
+                  rms_normalize(eps, dest, scale, src, gamma))
+                - Adds the gradient of f() with respect to src to #src_grad
+                - Assigns the gradient of f() with respect to gamma to #gamma_grad
+                - #dscale contains the gradients of f() with respect to the RMS values.
+        !*/
 
-void transpose(
-    bool add_to,
-    tensor& dest,
-    const tensor& src
-);
-/*!
-    requires
-        - dest.num_samples() == src.num_samples()
-        - dest.k() == src.k()
-        - dest.nr() == src.nc()
-        - dest.nc() == src.nr()
-        - is_same_object(dest, src) == false
-    ensures
-        - Performs a transpose operation on the nr() x nc() matrices within src.
-        - If (add_to) is false:
-            - The result is stored in dest, overwriting its previous contents.
-            - For all valid n, k, r, c:
-                - #dest(n,k,c,r) == src(n,k,r,c)
-        - If (add_to) is true:
-            - The result is added to the existing contents of dest.
-            - For all valid n, k, r, c:
-                - #dest(n,k,c,r) == dest(n,k,c,r) + src(n,k,r,c)
-!*/
+        void transpose(
+            bool add_to,
+            tensor& dest,
+            const tensor& src
+        );
+        /*!
+            requires
+                - dest.num_samples() == src.num_samples()
+                - dest.k() == src.k()
+                - dest.nr() == src.nc()
+                - dest.nc() == src.nr()
+                - is_same_object(dest, src) == false
+            ensures
+                - Performs a transpose operation on the nr() x nc() matrices within src.
+                - If (add_to) is false:
+                    - The result is stored in dest, overwriting its previous contents.
+                    - For all valid n, k, r, c:
+                        - #dest(n,k,c,r) == src(n,k,r,c)
+                - If (add_to) is true:
+                    - The result is added to the existing contents of dest.
+                    - For all valid n, k, r, c:
+                        - #dest(n,k,c,r) == dest(n,k,c,r) + src(n,k,r,c)
+        !*/
 
-void split_columns(
-    bool add_to,
-    tensor& dest,
-    const tensor& src,
-    const long num_heads
-);
-/*!
-    requires
-        - is_same_object(dest, src) == false
-        - dest.num_samples() == src.num_samples()
-        - dest.k() == num_heads
-        - src.k() == 1
-        - dest.nr() == src.nr()
-        - dest.nc() == (src.nc() / num_heads)
-        - src.nc() % num_heads == 0        
-    ensures
-        - Splits the columns of src into num_heads separate heads in dest.
-        - If (add_to) is false:
-            - The result is stored in dest, overwriting its previous contents.
-            - For all valid n, h, s, d:
-                - #dest(n,h,s,d) == src(n,0,s,h*head_dim + d)
-                  where head_dim = src.nc() / num_heads
-        - If (add_to) is true:
-            - The result is added to the existing contents of dest.
-            - For all valid n, h, s, d:
-                - #dest(n,h,s,d) == dest(n,h,s,d) + src(n,0,s,h*head_dim + d)
-                  where head_dim = src.nc() / num_heads
-!*/
+        void split_columns(
+            bool add_to,
+            tensor& dest,
+            const tensor& src,
+            const long num_heads
+        );
+        /*!
+            requires
+                - is_same_object(dest, src) == false
+                - dest.num_samples() == src.num_samples()
+                - dest.k() == num_heads
+                - src.k() == 1
+                - dest.nr() == src.nr()
+                - dest.nc() == (src.nc() / num_heads)
+                - src.nc() % num_heads == 0        
+            ensures
+                - Splits the columns of src into num_heads separate heads in dest.
+                - If (add_to) is false:
+                    - The result is stored in dest, overwriting its previous contents.
+                    - For all valid n, h, s, d:
+                        - #dest(n,h,s,d) == src(n,0,s,h*head_dim + d)
+                          where head_dim = src.nc() / num_heads
+                - If (add_to) is true:
+                    - The result is added to the existing contents of dest.
+                    - For all valid n, h, s, d:
+                        - #dest(n,h,s,d) == dest(n,h,s,d) + src(n,0,s,h*head_dim + d)
+                          where head_dim = src.nc() / num_heads
+        !*/
 
-void merge_columns(
-    bool add_to,
-    tensor& dest,
-    const tensor& src
-);
-/*!
-    requires
-        - is_same_object(dest, src) == false
-        - dest.num_samples() == src.num_samples()
-        - dest.k() == 1
-        - src.k() > 1
-        - dest.nr() == src.nr()
-        - dest.nc() == (src.nc() * src.k())        
-    ensures
-        - Merges the columns from separate heads in src back into a single tensor dest.
-        - If (add_to) is false:
-            - The result is stored in dest, overwriting its previous contents.
-            - For all valid n, r, c:
-                - #dest(n,0,r,c) == src(n,h,r,d)
-                  where h = c / src.nc() and d = c % src.nc()
-        - If (add_to) is true:
-            - The result is added to the existing contents of dest.
-            - For all valid n, r, c:
-                - #dest(n,0,r,c) == dest(n,0,r,c) + src(n,h,r,d)
-                  where h = c / src.nc() and d = c % src.nc()
-!*/
-
-void batch_multiply(
-    tensor& out,
-    const tensor& a,
-    bool a_trans,
-    const tensor& b,
-    bool b_trans
-);
+        void merge_columns(
+            bool add_to,
+            tensor& dest,
+            const tensor& src
+        );
+        /*!
+            requires
+                - is_same_object(dest, src) == false
+                - dest.num_samples() == src.num_samples()
+                - dest.k() == 1
+                - src.k() > 1
+                - dest.nr() == src.nr()
+                - dest.nc() == (src.nc() * src.k())        
+            ensures
+                - Merges the columns from separate heads in src back into a single tensor dest.
+                - If (add_to) is false:
+                    - The result is stored in dest, overwriting its previous contents.
+                    - For all valid n, r, c:
+                        - #dest(n,0,r,c) == src(n,h,r,d)
+                          where h = c / src.nc() and d = c % src.nc()
+                - If (add_to) is true:
+                    - The result is added to the existing contents of dest.
+                    - For all valid n, r, c:
+                        - #dest(n,0,r,c) == dest(n,0,r,c) + src(n,h,r,d)
+                          where h = c / src.nc() and d = c % src.nc()
+        !*/
 
 /* TO BE ADDED TO <tensor_tools.cpp> */
 // ----------------------------------------------------------------------------------------
 
-        template <typename T>
-        bool is_matrix(const T& tensor) {
-            return (tensor.num_samples() == 1 && tensor.k() == 1) || (tensor.nr() == 1 && tensor.nc() == 1);
+        void softmax2(
+            tensor& dest,
+            const tensor& src,
+            size_t s_mode = 0
+        )
+        {
+#ifdef DLIB_USE_CUDA
+            cpu::softmax2(dest, src, s_mode);
+#else
+            cpu::softmax2(dest, src, s_mode);
+#endif
         }
+
+        void softmax_gradient2(
+            tensor& grad,
+            const tensor& dest,
+            const tensor& gradient_input,
+            size_t s_mode = 0
+        )
+        {
+#ifdef DLIB_USE_CUDA
+            cpu::softmax_gradient2(grad, dest, gradient_input, s_mode);
+#else
+            cpu::softmax_gradient2(grad, dest, gradient_input, s_mode);
+#endif
+        }
+
         void c_gemm(
             float beta,
             tensor& dest,
@@ -967,6 +1132,11 @@ void batch_multiply(
 #ifdef DLIB_USE_CUDA
             cuda::c_gemm(beta, dest, alpha, lhs, trans_lhs, rhs, trans_rhs);
 #else
+            auto is_matrix = [](const auto& tensor) {
+                return (tensor.num_samples() == 1 && tensor.k() == 1) ||
+                    (tensor.nr() == 1 && tensor.nc() == 1);
+            };
+
             long num_samples = std::max({ lhs.num_samples(), rhs.num_samples(), dest.num_samples() });
             long num_channels = std::max({ lhs.k(), rhs.k(), dest.k() });
             const bool lhs_is_matrix = is_matrix(lhs), rhs_is_matrix = is_matrix(rhs), dest_is_matrix = is_matrix(dest);
@@ -1175,22 +1345,6 @@ void batch_multiply(
             cpu::merge_columns(add_to, dest, src);
 #endif
         }
-
-        // ----------------------------------------------------------------------------------------
-        void batch_multiply(
-            tensor& out,
-            const tensor& a,
-            bool a_trans,
-            const tensor& b,
-            bool b_trans
-        )
-        {
-#ifdef DLIB_USE_CUDA
-            cpu::batch_multiply(out, a, a_trans, b, b_trans);
-#else
-            cpu::batch_multiply(out, a, a_trans, b, b_trans);
-#endif
-        }
     }
 
 /* TO BE ADDED TO <layers.h> */
@@ -1354,28 +1508,6 @@ void batch_multiply(
         dlib::resizable_tensor params; // Unused
     };
     template <typename SUBNET> using display_tensor = add_layer<display_tensor_, SUBNET>;
-
-    void extract_matrix(const resizable_tensor& t, resizable_tensor& d, long s, long k) {
-        DLIB_CASSERT(s < t.num_samples() && k < t.k(), "Index out of bounds");       
-        d.set_size(t.nr(), t.nc(), 1, 1);        
-        const size_t size = t.nr() * t.nc() * sizeof(float);
-        std::memcpy(d.host(), t.host() + tensor_index(t, s, k, 0, 0), size);
-    }
-    void update_matrix(const resizable_tensor& t, tensor& d, long s, long k, bool add_op = false) {
-        DLIB_CASSERT(s < d.num_samples() && k < d.k(), "Index out of bounds");
-        DLIB_CASSERT(t.num_samples() == d.nr() && t.k() == d.nc(), "Incompatible tensors");
-
-        const size_t size = t.num_samples() * t.k();
-        float* dest = d.host() + tensor_index(d, s, k, 0, 0);
-        const float* src = t.host();
-
-        if (add_op) {
-            #pragma omp parallel for if(size > 1000)
-            for (long i = 0; i < size; ++i) dest[i] += src[i];
-        } else {
-            std::memcpy(dest, src, size * sizeof(float));
-        }
-    }
 
     // ----------------------------------------------------------------------------------------
     /* TO BE ADDED TO <layers_abstract.h> & <layers.h> */
@@ -2054,29 +2186,26 @@ void batch_multiply(
     public:
         tril_() {}
 
-        template <typename SUBNET> void setup(const SUBNET& /* sub */) {}
+        template <typename SUBNET>
+        void setup(const SUBNET& sub) {}
 
-        void forward_inplace(const tensor & input, tensor & output)
-        {            
-            if (output_mask.size() != input.size())
-            {
-                output_mask.copy_size(input);
-                initialize_mask();
-            }
+        template <typename SUBNET>
+        void forward(const SUBNET& sub, resizable_tensor& output)
+        {                
+            auto& prev = sub.get_output();
+            output.set_size(prev.num_samples(), prev.k(), prev.nr(), prev.nc());
 
-            tt::multiply(false, output, input, binary_mask);
-            if (ADD_TO_INPUT)
-            {                
-                tt::add(1, output, 1, output_mask);                
-            }
+            initialize_mask(output);
+            tt::multiply(false, output, prev, binary_mask);
+            if (ADD_TO_INPUT) tt::add(1, output, 1, output_mask);
         }
 
-        void backward_inplace(const tensor& gradient_input, tensor& data_grad, tensor& /*params_grad*/)
+        template <typename SUBNET>
+        void backward(const tensor& gradient_input, SUBNET & sub, tensor& /*params_grad*/)
         {
-            if (is_same_object(gradient_input, data_grad))
-                tt::multiply(false, data_grad, binary_mask, gradient_input);
-            else
-                tt::multiply(true, data_grad, binary_mask, gradient_input);
+            auto& prev_grad = sub.get_gradient_input();
+           
+            tt::multiply(true, prev_grad, gradient_input, binary_mask);
         }
 
         inline dpoint map_input_to_output(const dpoint& p) const { return p; }
@@ -2110,8 +2239,10 @@ void batch_multiply(
         }
 
     private:
-        void initialize_mask()
+        void initialize_mask(const tensor& t)
         {
+            if (have_same_dimensions(output_mask, t)) return;
+            output_mask.copy_size(t);
             binary_mask.copy_size(output_mask);
             output_mask = 0;
             binary_mask = 1;
@@ -2123,7 +2254,7 @@ void batch_multiply(
                     {
                         for (long c = r + 1; c < output_mask.nc(); ++c)
                         {
-                            output_mask.host()[tensor_index(output_mask, s, k, r, c)] = neg_inf;
+                            output_mask.host()[tensor_index(output_mask, s, k, r, c)] = -std::numeric_limits<float>::infinity();
                             binary_mask.host()[tensor_index(binary_mask, s, k, r, c)] = 0;
                         }
                     }
@@ -2133,14 +2264,13 @@ void batch_multiply(
 
         resizable_tensor params; // unused
         resizable_tensor output_mask;
-        resizable_tensor binary_mask;
-        static constexpr float neg_inf = -1e9f;
+        resizable_tensor binary_mask;        
     };
 
     template <typename SUBNET>
     using tril = add_layer<tril_<0>, SUBNET>;
     template <typename SUBNET>
-    using tril_mask = add_layer<tril_<1>, SUBNET>;
+    using tril_neginf_mask = add_layer<tril_<1>, SUBNET>;
 
     template <template<typename> class tag>
     class multm_prev_ {
@@ -2220,102 +2350,71 @@ void batch_multiply(
     template <unsigned long num_heads, unsigned long embedding_length, typename SUBNET>
     using scale_weights = add_layer<scale_weights_<num_heads, embedding_length>, SUBNET>;
 
-    class softmaxm_ : public softmax_ {
+    enum softmax_mode { CHANNEL_WISE = 0, PLANE_WISE = 1 };
+
+    template <softmax_mode s_mode_>
+    class softmax2_
+    {
     public:
-        softmaxm_() : softmax_() {}
-        template <typename SUBNET> void setup(const SUBNET& sub) { softmax_::setup(sub); }
-
-        void forward_inplace(const tensor& input, tensor& output) {
-            const float* in_data = input.host();
-            float* out_data = output.host();
-
-            for (long n = 0; n < input.num_samples(); ++n) {
-                for (long k = 0; k < input.k(); ++k) {
-                    for (long r = 0; r < input.nr(); ++r) {
-                        apply_softmax_to_row(in_data, out_data, input.nc());
-                        in_data += input.nc();
-                        out_data += input.nc();
-                    }
-                }
-            }
+        softmax2_()
+        {
         }
 
-        void backward_inplace(const tensor& computed_output, const tensor& gradient_input, tensor& data_grad, tensor& /*params_grad*/) {
-            const float* out_data = computed_output.host();
-            const float* grad_data = gradient_input.host();
-            float* grad_out_data = data_grad.host();
+        template <typename SUBNET>
+        void setup(const SUBNET& /*sub*/)
+        {
+        }
 
-            for (long n = 0; n < computed_output.num_samples(); ++n) {
-                for (long k = 0; k < computed_output.k(); ++k) {
-                    for (long r = 0; r < computed_output.nr(); ++r) {
-                        apply_softmax_gradient_to_row(out_data, grad_data, grad_out_data, computed_output.nc());
-                        out_data += computed_output.nc();
-                        grad_data += computed_output.nc();
-                        grad_out_data += computed_output.nc();
-                    }
-                }
-            }
+        void forward_inplace(const tensor& input, tensor& output)
+        {
+            tt::softmax2(output, input, s_mode_);
+        }
+
+        void backward_inplace(
+            const tensor& computed_output,
+            const tensor& gradient_input,
+            tensor& data_grad,
+            tensor&
+        )
+        {
+            tt::softmax_gradient2(data_grad, computed_output, gradient_input, s_mode_);
         }
 
         const tensor& get_layer_params() const { return params; }
         tensor& get_layer_params() { return params; }
 
-        friend void serialize(const softmaxm_& /*item*/, std::ostream& out) {
-            serialize("softmaxm_", out);
+        friend void serialize(const softmax2_& /*item*/, std::ostream& out)
+        {
+            serialize("softmax2_", out);
         }
-        friend void deserialize(softmaxm_& /*item*/, std::istream& in) {
+
+        friend void deserialize(softmax2_& /*item*/, std::istream& in)
+        {
             std::string version;
             deserialize(version, in);
-            if (version != "softmaxm_")
-                throw serialization_error("Unexpected version '" + version + "' found while deserializing dlib::softmaxm_.");
+            if (version != "softmax2_")
+                throw serialization_error("Unexpected version '" + version + "' found while deserializing dlib::softmax2_.");
         }
 
-        friend std::ostream& operator<<(std::ostream& out, const softmaxm_& /*item*/) {
-            out << "softmaxm";
+        friend std::ostream& operator<<(std::ostream& out, const softmax2_& /*item*/)
+        {
+            out << "softmax2";
             return out;
         }
-        friend void to_xml(const softmaxm_& /*item*/, std::ostream& out) {
-            out << "<softmaxm />\n";
-        }
 
-    protected:
-        void apply_softmax_to_row(const float* in, float* out, long nc) {
-            constexpr float neg_inf = -1e9f;
-            bool all_neg_inf = true;
-            for (long i = 0; i < nc; ++i) {
-                if (in[i] > neg_inf) {
-                    all_neg_inf = false;
-                    break;
-                }
-            }
-            if (all_neg_inf) {
-                for (long i = 0; i < nc; ++i) out[i] = (1.0f / nc);
-            } else {
-                float max_val = *std::max_element(in, in + nc);
-                float sum = 0;
-                for (long i = 0; i < nc; ++i) {
-                    out[i] = std::exp(in[i] - max_val);
-                    sum += out[i];
-                }
-                if (sum != 0.0f) for (long i = 0; i < nc; ++i) out[i] /= sum;
-            }
-        }
-        void apply_softmax_gradient_to_row(const float* out, const float* grad, float* grad_out, long nc) {
-            for (long i = 0; i < nc; ++i) {
-                float sum = 0;
-                for (long j = 0; j < nc; ++j) {
-                    float kronecker = (i == j) ? 1 : 0;
-                    sum += grad[j] * out[j] * (kronecker - out[i]);
-                }
-                grad_out[i] = sum;
-            }
+        friend void to_xml(const softmax2_& /*item*/, std::ostream& out)
+        {
+            out << "<softmax2/>\n";
         }
 
     private:
-        resizable_tensor params;
+        resizable_tensor params; // unused
     };
+
     template <typename SUBNET>
-    using softmaxm = add_layer<softmaxm_, SUBNET>;
+    using softmax2 = add_layer<softmax2_<CHANNEL_WISE>, SUBNET>;
+    template <typename SUBNET>
+    using softmaxm = add_layer<softmax2_<PLANE_WISE>, SUBNET>;
 
     // Basic layers for Query, Key, and Value
     template <int nb_heads, int num_filters_out, typename SUBNET>
@@ -2337,7 +2436,7 @@ void batch_multiply(
         //hstack<
         multm_prev1<
         dropout_10<softmaxm<
-        tril_mask<
+        tril_neginf_mask<
         scale_weights<nb_heads, embedding_dim,
         multm_prev2<
         //hsplit<nb_heads, query<embedding_dim, skip3<
@@ -2366,7 +2465,7 @@ void batch_multiply(
         add_prev5<
         cont<1, sequence_dim, embedding_dim, sequence_dim, embedding_dim,
         fc<embedding_size,
-        dropout_10<gelu<bn_fc<fc<embedding_size / 4,
+        dropout_10<gelu<bn_fc<fc<embedding_size * 4,
         tag5<SUBNET>>>>>>>>;
     /*template <int embedding_dim, typename SUBNET>
     using feed_forward =
@@ -2941,19 +3040,19 @@ int main(int argc, char* argv[]) {
     sentencepiece::SentencePieceProcessor sp;
     sentencepiece::util::Status status;
     if (do_benchmark) {
-        constexpr bool display_debug_info = false;
+        constexpr bool display_debug_info = true;
         constexpr bool skip_tests[] = {
-            false,      // 0: strings & tokenization
-            false,      // 1: extract_matrix() & update_matrix()
+            true,      // 0: strings & tokenization
+            false,      // 1: transpose layer
             false,     // 2: linear layer
             false,      // 3: tril layer
             false,      // 4: softmax layer
             false,      // 5: attention mechanism
-            true,      // 6: batch_multiply low level function
+            true,      // 6: empty test
             true,     // 7: transpose, positional_encoding & embedding layers
             true,     // 8: rms_norm layer
             true,      // 9: multihead attention model
-            false       // 10: "shakespeare" example
+            true       // 10: "shakespeare" example
         };
 
         // test: tokenization
@@ -2992,29 +3091,13 @@ int main(int argc, char* argv[]) {
 
         // test: extract_matrix()
         if (!skip_tests[1]) {
-            if (display_debug_info) cout << "test: extract_matrix() function\n";
-            const int nr = 10, nc = 10;
-            resizable_tensor src(4, 1, nr, nr), dest(4, 1, nr, nc), e;
-            tt::tensor_rand rnd;
-            rnd.fill_uniform(src);
-            rnd.fill_uniform(dest);
-            extract_matrix(src, e, 1, 0);
-            matrix<float> expected(nr, nc);
-            for (int r = 0; r < nr; ++r) {
-                for (int c = 0; c < nc; ++c) {
-                    expected(r, c) = src.host()[tensor_index(src, 1, 0, r, c)];
-                }
+            if (display_debug_info) cout << "test: transpose layer\n";
+            test_transpose();
+            {
+                transpose_ l;
+                auto res = test_layer(l);
+                DLIB_TEST_MSG(res, " transpose test_0 layer\n" + res);
             }
-            DLIB_TEST_MSG(max(abs(mat(e) - expected)) < 1e-5, "extract_matrix() function");
-
-            // test: update_matrix()
-            if (display_debug_info) cout << "\n<test: update_matrix() function\n";
-            extract_matrix(src, e, 1, 0);
-            update_matrix(e, dest, 2, 0);
-            for (int r = 0; r < nr; ++r) {
-                for (int c = 0; c < nc; ++c) expected(r, c) = dest.host()[tensor_index(dest, 2, 0, r, c)];
-            }
-            DLIB_TEST_MSG(max(abs(mat(e) - expected)) < 1e-5, "update_matrix() function");
         }        
 
         // test: linear layer
@@ -3053,17 +3136,17 @@ int main(int argc, char* argv[]) {
             {
                 linear_<1, LINEAR_NO_BIAS> l;
                 auto res = test_layer(l);
-                DLIB_TEST_MSG(res, res);
+                DLIB_TEST_MSG(res, " linear test_0 layer\n" + res);
             }
             {
-                fc_<5, FC_HAS_BIAS> l;
+                linear_<5, LINEAR_HAS_BIAS> l;
                 auto res = test_layer(l);
-                DLIB_TEST_MSG(res, res);
+                DLIB_TEST_MSG(res, " linear test_1 layer\n" + res);
             }
             {
-                fc_<4, FC_NO_BIAS> l;
+                linear_<4, LINEAR_NO_BIAS> l;
                 auto res = test_layer(l);
-                DLIB_TEST_MSG(res, res);
+                DLIB_TEST_MSG(res, " linear test_2 layer\n" + res);
             }
         }
 
@@ -3071,7 +3154,7 @@ int main(int argc, char* argv[]) {
         if (!skip_tests[3]) {
             if (display_debug_info) cout << "\ntest: tril layer\n";
             {
-                using net_type = tag1<tril_mask<tag2<input<matrix<float>>>>>;
+                using net_type = tag1<tril_neginf_mask<tag2<input<matrix<float>>>>>;
                 net_type net;
 
                 // Input tensor
@@ -3097,17 +3180,27 @@ int main(int argc, char* argv[]) {
                 resizable_tensor expected_output;
                 expected_output.copy_size(input_tensor);
                 tt::copy_tensor(false, expected_output, 0, input_tensor, 0, input_tensor.k());
-                constexpr float neg_inf = -1e9f;
+                constexpr float NEG_INF = -std::numeric_limits<float>::infinity();
                 for (int ii = 0; ii < n_samples; ++ii) {
-                    expected_output.host()[tensor_index(expected_output, ii, 0, 0, 1)] = neg_inf;
-                    expected_output.host()[tensor_index(expected_output, ii, 0, 0, 2)] = neg_inf;
-                    expected_output.host()[tensor_index(expected_output, ii, 0, 1, 2)] = neg_inf;
+                    expected_output.host()[tensor_index(expected_output, ii, 0, 0, 1)] = NEG_INF;
+                    expected_output.host()[tensor_index(expected_output, ii, 0, 0, 2)] = NEG_INF;
+                    expected_output.host()[tensor_index(expected_output, ii, 0, 1, 2)] = NEG_INF;
                 }
                 if (display_debug_info) DBG_INFO("expected_output: ", expected_output, true);
                 // Compare output tensor with expected output
                 auto& net_output = layer<tag1>(net).get_output();
                 if (display_debug_info) DBG_INFO("net_output: ", net_output, true);
                 DLIB_TEST_MSG(max(abs(mat(net_output) - mat(expected_output))) < 1e-5, "tril layer");
+            }
+            {
+                tril_<0> l;
+                auto res = test_layer(l);
+                DLIB_TEST_MSG(res, " tril test_0 layer\n" + res);
+            }
+            {
+                tril_<1> l;
+                auto res = test_layer(l);
+                DLIB_TEST_MSG(res, " tril with mask test_0 layer\n" + res);
             }
         }
 
@@ -3119,7 +3212,7 @@ int main(int argc, char* argv[]) {
                 net_type net;
 
                 // Input tensor
-                constexpr float neg_inf = -1e9f;
+                constexpr float NEG_INF = -std::numeric_limits<float>::infinity();
                 dlib::rand rnd;
                 const long nr = 2, nc = 3;
                 constexpr int n_samples = 3, k = 1;
@@ -3129,7 +3222,7 @@ int main(int argc, char* argv[]) {
                     for (int jj = 0; jj < nr; ++jj)
                         for (int kk = 0; kk < nc; ++kk) {
                             float r = rnd.get_random_gaussian();
-                            if (r > 1 || r < -1) r = neg_inf;
+                            if (r > 1 || r < -1) r = NEG_INF;
                             xtmp(jj, kk) = r;
                         }
                     x[ii] = xtmp;
@@ -3150,7 +3243,7 @@ int main(int argc, char* argv[]) {
                         bool all_neg_inf = true;
                         for (int kk = 0; kk < nc; ++kk) {
                             m(0, kk) = input_tensor.host()[tensor_index(input_tensor, ii, 0, jj, kk)];
-                            if (m(0, kk) > neg_inf) all_neg_inf = false;
+                            if (m(0, kk) > NEG_INF) all_neg_inf = false;
                         }
 
                         matrix<float> r(1, nc);
@@ -3170,7 +3263,7 @@ int main(int argc, char* argv[]) {
                 if (display_debug_info) DBG_INFO("expected_output: ", expected_output, true);
 
                 // Compare output tensor with expected output
-                auto& net_output = layer<tag1>(net).get_output();
+                auto& net_output = layer<tag1>(net).subnet().get_output();
                 if (display_debug_info) DBG_INFO("net_output: ", net_output, true);
                 DLIB_TEST_MSG(max(abs(mat(net_output) - mat(expected_output))) < 1e-5, "softmaxm layer");
             }
@@ -3180,7 +3273,7 @@ int main(int argc, char* argv[]) {
         if (!skip_tests[5]) {
             if (display_debug_info) cout << "\ntest: attention mechanism\n";
             {
-                constexpr float neg_inf = -1e9f;
+                constexpr float NEG_INF = -std::numeric_limits<float>::infinity();
                 matrix<float> X(4, 3), WQ(3, 3), WK(3, 3), WV(3, 3);
                 X = 1, 0, 0,
                     0, 1, 0,
@@ -3207,7 +3300,7 @@ int main(int argc, char* argv[]) {
                     for (long r = 0; r < m.nr(); ++r) {
                         bool all_neg_inf = true;
                         for (long c = 0; c < m.nc(); ++c) {
-                            if (m(r, c) > neg_inf) {
+                            if (m(r, c) == NEG_INF) {
                                 all_neg_inf = false;
                                 break;
                             }
@@ -3291,7 +3384,7 @@ int main(int argc, char* argv[]) {
 
         // test: add_prev1 layer
         if (!skip_tests[6]) {
-            if (display_debug_info) cout << "test: batch_multiply()\n";
+            if (display_debug_info) cout << "test: empty()\n";
 
             // Helper function to extract a single matrix from the 4D tensor
             auto extract_matrix = [](const tensor& t, long n, long k) {
@@ -3301,204 +3394,6 @@ int main(int argc, char* argv[]) {
                         m(r, c) = t.host()[((n * t.k() + k) * t.nr() + r) * t.nc() + c];
                 return m;
             };
-
-            bool all_test_passed = true;
-            long num_samples_a = 3;
-            long num_channels_a = 4;
-            long num_samples_b = num_channels_a;
-            long num_channels_b = 5;
-            tt::tensor_rand rnd;
-
-            resizable_tensor a_c1(num_samples_a, num_channels_a);
-            resizable_tensor b_c1(num_samples_b, num_channels_b);
-            resizable_tensor r_c1(num_samples_a, num_channels_b);            
-            rnd.fill_uniform(a_c1);
-            rnd.fill_uniform(b_c1);
-
-            // Test 1.1: A not transposed, B not transposed
-            matrix<float> er_c1 = mat(a_c1) * mat(b_c1);
-            cpu::batch_multiply(r_c1, a_c1, false, b_c1, false);
-            if (display_debug_info) DLIB_TEST_MSG(max(abs(mat(r_c1) - er_c1)) < 1e-5, "batch_multiply() Case 1.1");
-            if (max(abs(mat(r_c1) - er_c1)) >= 1e-5) all_test_passed = false;
-
-            // Test 1.2: A not transposed, B transposed
-            b_c1.set_size(num_samples_a, num_channels_a);
-            r_c1.set_size(num_samples_a, num_samples_a);
-            rnd.fill_uniform(b_c1);
-            er_c1 = mat(a_c1) * trans(mat(b_c1));
-            cpu::batch_multiply(r_c1, a_c1, false, b_c1, true);
-            if (display_debug_info) DLIB_TEST_MSG(max(abs(mat(r_c1) - er_c1)) < 1e-5, "batch_multiply() Case 1.2");
-            if (max(abs(mat(r_c1) - er_c1)) >= 1e-5) all_test_passed = false;
-
-            // Test 1.3: A transposed, B not transposed
-            a_c1.set_size(num_channels_a, num_samples_a);
-            b_c1.set_size(num_samples_b, num_channels_b);
-            r_c1.set_size(num_samples_a, num_channels_b);
-            rnd.fill_uniform(a_c1);
-            rnd.fill_uniform(b_c1);
-            er_c1 = trans(mat(a_c1)) * mat(b_c1);
-            cpu::batch_multiply(r_c1, a_c1, true, b_c1, false);
-            if (display_debug_info) DLIB_TEST_MSG(max(abs(mat(r_c1) - er_c1)) < 1e-5, "batch_multiply() Case 1.3");
-            if (max(abs(mat(r_c1) - er_c1)) >= 1e-5) all_test_passed = false;
-
-            // Test 1.4: A transposed, B transposed
-            b_c1.set_size(num_channels_b, num_samples_b);
-            rnd.fill_uniform(b_c1);
-            er_c1 = trans(mat(a_c1)) * trans(mat(b_c1));
-            cpu::batch_multiply(r_c1, a_c1, true, b_c1, true);
-            if (display_debug_info) DLIB_TEST_MSG(max(abs(mat(r_c1) - er_c1)) < 1e-5, "batch_multiply() Case 1.4");
-            if (max(abs(mat(r_c1) - er_c1)) >= 1e-5) all_test_passed = false;
-
-            // Case 2: A is a 4D tensor, B is a matrix
-            num_samples_a = 3;
-            num_channels_a = 4;
-            long nr_a = 5;
-            long nc_a = 6;
-            num_samples_b = nc_a;
-            num_channels_b = 7;
-
-            resizable_tensor a_c2(num_samples_a, num_channels_a, nr_a, nc_a);
-            resizable_tensor b_c2(num_samples_b, num_channels_b);
-            resizable_tensor r_c2(num_samples_a, num_channels_a, nr_a, num_channels_b);
-            rnd.fill_uniform(a_c2);
-            rnd.fill_uniform(b_c2);
-
-            // Test 2.1: A not transposed, B not transposed
-            cpu::batch_multiply(r_c2, a_c2, false, b_c2, false);
-            matrix<float> er_c2(nr_a, num_channels_b);
-            for (long n = 0; n < num_samples_a; ++n) {
-                for (long k = 0; k < num_channels_a; ++k) {
-                    er_c2 = extract_matrix(a_c2, n, k) * mat(b_c2);
-                    matrix<float> r_slice = extract_matrix(r_c2, n, k);
-                    if (display_debug_info) DLIB_TEST_MSG(max(abs(r_slice - er_c2)) < 1e-5,
-                        "batch_multiply() Case 2.1 - sample " << n << ", channel " << k);
-                    if (max(abs(r_slice - er_c2)) >= 1e-5) all_test_passed = false;
-                }
-            }
-
-            // Test 2.2: A not transposed, B transposed
-            b_c2.set_size(num_channels_b, num_samples_b);
-            r_c2.set_size(num_samples_a, num_channels_a, nr_a, num_channels_b);
-            rnd.fill_uniform(b_c2);
-            cpu::batch_multiply(r_c2, a_c2, false, b_c2, true);
-            for (long n = 0; n < num_samples_a; ++n) {
-                for (long k = 0; k < num_channels_a; ++k) {
-                    er_c2 = extract_matrix(a_c2, n, k) * trans(mat(b_c2));
-                    matrix<float> r_slice = extract_matrix(r_c2, n, k);
-                    if (display_debug_info) DLIB_TEST_MSG(max(abs(r_slice - er_c2)) < 1e-5,
-                        "batch_multiply() Case 2.2 - sample " << n << ", channel " << k);
-                    if (max(abs(r_slice - er_c2)) >= 1e-5) all_test_passed = false;
-                }
-            }
-
-            // Test 2.3: A transposed, B not transposed
-            a_c2.set_size(num_samples_a, num_channels_a, nc_a, nr_a);
-            b_c2.set_size(nc_a, num_channels_b);  // Changed from nr_a to nc_a
-            r_c2.set_size(num_samples_a, num_channels_a, nr_a, num_channels_b);
-            rnd.fill_uniform(a_c2);
-            rnd.fill_uniform(b_c2);
-            cpu::batch_multiply(r_c2, a_c2, true, b_c2, false);
-            for (long n = 0; n < num_samples_a; ++n) {
-                for (long k = 0; k < num_channels_a; ++k) {
-                    er_c2 = trans(extract_matrix(a_c2, n, k)) * mat(b_c2);
-                    matrix<float> r_slice = extract_matrix(r_c2, n, k);
-                    if (display_debug_info) DLIB_TEST_MSG(max(abs(r_slice - er_c2)) < 1e-5,
-                        "batch_multiply() Case 2.3 - sample " << n << ", channel " << k);
-                    if (max(abs(r_slice - er_c2)) >= 1e-5) all_test_passed = false;
-                }
-            }
-
-            // Test 2.4: A transposed, B transposed
-            b_c2.set_size(num_channels_b, nc_a);  // Changed from nr_a to nc_a
-            rnd.fill_uniform(b_c2);
-            cpu::batch_multiply(r_c2, a_c2, true, b_c2, true);
-            for (long n = 0; n < num_samples_a; ++n) {
-                for (long k = 0; k < num_channels_a; ++k) {
-                    er_c2 = trans(extract_matrix(a_c2, n, k)) * trans(mat(b_c2));
-                    matrix<float> r_slice = extract_matrix(r_c2, n, k);
-                    if (display_debug_info) DLIB_TEST_MSG(max(abs(r_slice - er_c2)) < 1e-5,
-                        "batch_multiply() Case 2.4 - sample " << n << ", channel " << k);
-                    if (max(abs(r_slice - er_c2)) >= 1e-5) all_test_passed = false;
-                }
-            }
-
-            // Case 3: A is a matrix, B is a 4D tensor
-            num_samples_a = 5;
-            num_channels_a = 6;
-            num_samples_b = 3;
-            num_channels_b = 4;
-            long nr_b = num_channels_a;  // Must match num_channels_a for multiplication
-            long nc_b = 7;  // Can be any value
-
-            resizable_tensor a_c3(num_samples_a, num_channels_a);
-            resizable_tensor b_c3(num_samples_b, num_channels_b, nr_b, nc_b);
-            resizable_tensor r_c3(num_samples_a, nc_b);            
-            rnd.fill_uniform(a_c3);
-            rnd.fill_uniform(b_c3);
-
-            // Test 3.1: A not transposed, B not transposed
-            r_c3 = 0;
-            cpu::batch_multiply(r_c3, a_c3, false, b_c3, false);
-            matrix<float> er_c3 = zeros_matrix<float>(num_samples_a, nc_b);
-            for (long n = 0; n < num_samples_b; ++n) {
-                for (long k = 0; k < num_channels_b; ++k) {
-                    er_c3 += mat(a_c3) * extract_matrix(b_c3, n, k);
-                }
-            }
-            er_c3 /= (num_samples_b * num_channels_b);
-            if (display_debug_info) DLIB_TEST_MSG(max(abs(mat(r_c3) - er_c3)) < 1e-5, "batch_multiply() Case 3.1");
-            if (max(abs(mat(r_c3) - er_c3)) >= 1e-5) all_test_passed = false;
-
-            // Test 3.2: A not transposed, B transposed
-            b_c3.set_size(num_samples_b, num_channels_b, nc_b, nr_b);
-            r_c3.set_size(num_samples_a, nc_b);
-            r_c3 = 0;
-            rnd.fill_uniform(b_c3);
-            cpu::batch_multiply(r_c3, a_c3, false, b_c3, true);
-            er_c3 = zeros_matrix<float>(num_samples_a, nc_b);
-            for (long n = 0; n < num_samples_b; ++n) {
-                for (long k = 0; k < num_channels_b; ++k) {
-                    er_c3 += mat(a_c3) * trans(extract_matrix(b_c3, n, k));
-                }
-            }
-            er_c3 /= (num_samples_b * num_channels_b);
-            if (display_debug_info) DLIB_TEST_MSG(max(abs(mat(r_c3) - er_c3)) < 1e-5, "batch_multiply() Case 3.2");
-            if (max(abs(mat(r_c3) - er_c3)) >= 1e-5) all_test_passed = false;
-
-            // Test 3.3: A transposed, B not transposed
-            a_c3.set_size(num_channels_a, num_samples_a);
-            b_c3.set_size(num_samples_b, num_channels_b, num_channels_a, nc_b);
-            r_c3.set_size(num_samples_a, nc_b);
-            r_c3 = 0;
-            rnd.fill_uniform(a_c3);
-            rnd.fill_uniform(b_c3);
-            cpu::batch_multiply(r_c3, a_c3, true, b_c3, false);
-            er_c3 = zeros_matrix<float>(num_channels_a, nc_b);
-            for (long n = 0; n < num_samples_b; ++n) {
-                for (long k = 0; k < num_channels_b; ++k) {
-                    er_c3 += trans(mat(a_c3)) * extract_matrix(b_c3, n, k);
-                }
-            }
-            er_c3 /= (num_samples_b * num_channels_b);
-            if (display_debug_info) DLIB_TEST_MSG(max(abs(mat(r_c3) - er_c3)) < 1e-5, "batch_multiply() Case 3.3");
-            if (max(abs(mat(r_c3) - er_c3)) >= 1e-5) all_test_passed = false;
-
-            // Test 3.4: A transposed, B transposed
-            b_c3.set_size(num_samples_b, num_channels_b, nc_b, num_channels_a);
-            rnd.fill_uniform(b_c3);
-            r_c3 = 0;
-            cpu::batch_multiply(r_c3, a_c3, true, b_c3, true);
-            er_c3 = zeros_matrix<float>(num_channels_a, nc_b);
-            for (long n = 0; n < num_samples_b; ++n) {
-                for (long k = 0; k < num_channels_b; ++k) {
-                    er_c3 += trans(mat(a_c3)) * trans(extract_matrix(b_c3, n, k));
-                }
-            }
-            er_c3 /= (num_samples_b * num_channels_b);
-            if (display_debug_info) DLIB_TEST_MSG(max(abs(mat(r_c3) - er_c3)) < 1e-5, "batch_multiply() Case 3.4");
-            if (max(abs(mat(r_c3) - er_c3)) >= 1e-5) all_test_passed = false;
-
-            DLIB_TEST_MSG(all_test_passed, "batch_multiply()");
         }
         /*
         if (!skip_tests[6]) {
@@ -3546,19 +3441,13 @@ int main(int argc, char* argv[]) {
 
         // test: transpose, hsplit/hstack, positional_encoding & embedding layers
         if (!skip_tests[7]) {
-            if (display_debug_info) cout << "\ntest: transpose, hsplit/hstack, positional_encoding & embedding layers\n";
-              test_transpose();
-              {
-                  transpose_ l;
-                  auto res = test_layer(l);
-                  DLIB_TEST_MSG(res, " transpose layer\n" + res);
-              }
-              test_hsplit_hstack();              
-              {
-                  hstack_ l;
-                  auto res = test_layer(l);
-                  DLIB_TEST_MSG(res, " hsplit&hstack layer\n" + res);
-              }
+            if (display_debug_info) cout << "\ntest: hsplit/hstack, positional_encoding & embedding layers\n";                            
+            test_hsplit_hstack();
+            {
+                hstack_ l;
+                auto res = test_layer(l);
+                DLIB_TEST_MSG(res, " hsplit and hstack layers\n" + res);
+            }
               //test_apply_positional_encodings();
               {
                   //positional_encodings_ l;
@@ -3720,7 +3609,7 @@ Be all my sins remembered.)";
                 trainer_c.set_mini_batch_size(mini_batch_size);
                 trainer_c.be_verbose();
                 trainer_c.set_synchronization_file("llm_shakespeare_model_a.ckp", std::chrono::minutes(5));
-                trainer_c.set_iterations_without_progress_threshold(400);
+                trainer_c.set_iterations_without_progress_threshold(500);
                 std::vector<matrix<int, 0, 1>> samples;
                 std::vector<unsigned long> labels;
                 if (trainer_c.get_learning_rate() >= trainer_c.get_min_learning_rate()) {
