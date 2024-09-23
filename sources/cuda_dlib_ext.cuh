@@ -4,6 +4,7 @@
 #include <dlib/cuda/cuda_utils.h>
 #include <dlib/cuda/cuda_dlib.h>
 #include <dlib/cuda/cudnn_dlibapi.h>
+#include <dlib/cuda/cublas_dlibapi.h>
 #include <math_constants.h>
 
 namespace dlib

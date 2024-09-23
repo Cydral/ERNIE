@@ -424,7 +424,7 @@ namespace dlib
             // Launch the corrected CUDA kernel
             launch_kernel(_cuda_reorg_gradient2, gradient_input.size(), grad.k(), grad.nr(), grad.nc(), grad.device(),
                 gradient_input.k(), gradient_input.nr(), gradient_input.nc(), gradient_input.device(),
-                row_stride, col_stride);
+                row_stride, col_stride, add_to);
         }
 
         __global__ void batch_multiply_kernel(
