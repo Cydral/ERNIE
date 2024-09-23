@@ -71,7 +71,6 @@ constexpr int embedding_size = (128 / number_of_heads) * number_of_heads;   // S
 constexpr int bos_id = 0, eos_id = 1, unk_id = 2, pad_id = 3;
 
 // Other global parameters
-const float epsilon = 1e-5;
 string vocabulary_prefix = "ernie.en-fr.ung.20k", language_model = "ernie_vslm_v1.dat";
 std::unique_ptr<advanced_tokenizer> tokenizer_;
 
@@ -94,7 +93,8 @@ void signalHandler(int signal) {
 
 void configure_console() {
     SetConsoleOutputCP(CP_UTF8);
-    _setmode(_fileno(stdout), _O_TEXT);
+    int res = _setmode(_fileno(stdout), _O_TEXT);
+    if (res == -1) cerr << "Cannot set mode" << endl;
     cout.imbue(std::locale("en_US.UTF-8"));    
 }
 
@@ -262,24 +262,22 @@ namespace dlib {
                 const long num_channels,
                 tensor& dest,
                 const tensor& src,
-                size_t mode = 0
+                size_t mode
             )
-            {
+            {                
                 DLIB_ASSERT(num_channels * num_locations == src.nr() * src.nc() * src.k());
                 DLIB_CASSERT(have_same_dimensions(dest, src));
                 const auto d = dest.host();
                 const auto s = src.host();
-
-                constexpr float epsilon = 1e-8f;
 
                 for (long n = 0; n < src.num_samples(); ++n)
                 {
                     auto ss = s + num_locations * num_channels * n;
                     auto dd = d + num_locations * num_channels * n;
 
-                    if (mode == 0) // softmax_mode::CHANNEL_WISE
+                    if (mode == 0)
                     {
-                        // Original Dlib implementation
+                        // Mode 0: softmax along the channel axis (k)
                         for (long i = 0; i < num_locations; ++i)
                         {
                             float max_val = -std::numeric_limits<float>::infinity();
@@ -292,7 +290,7 @@ namespace dlib {
                                 dd[k * num_locations] = std::exp(ss[k * num_locations] - max_val);
                                 sum += dd[k * num_locations];
                             }
-                            sum += epsilon;
+                            sum += std::numeric_limits<float>::epsilon();
                             for (long k = 0; k < num_channels; ++k)
                                 dd[k * num_locations] /= sum;
 
@@ -300,43 +298,37 @@ namespace dlib {
                             ++dd;
                         }
                     }
-                    else  // softmax_mode::PLANE_WISE
+                    else
                     {
-                        // Implementation for attention mechanism
+                        // Mode 1: softmax along the spatial locations (nr x nc)
                         for (long k = 0; k < num_channels; ++k)
                         {
                             auto s_channel = ss + k * num_locations;
                             auto d_channel = dd + k * num_locations;
-
-                            bool all_neg_inf = true;
-                            float max_val = -std::numeric_limits<float>::infinity();
-                            for (long i = 0; i < num_locations; ++i)
+                            for (long r = 0; r < src.nr(); ++r)
                             {
-                                if (s_channel[i] != -std::numeric_limits<float>::infinity())
+                                float max_val = -std::numeric_limits<float>::infinity();
+                                for (long c = 0, idx = r * src.nc(); c < src.nc(); ++c, ++idx)
+                                    max_val = std::max(max_val, s_channel[idx]);
+                                
+                                if (max_val == -std::numeric_limits<float>::infinity())
                                 {
-                                    all_neg_inf = false;
-                                    max_val = std::max(max_val, s_channel[i]);
+                                    for (long c = 0, idx = r * src.nc(); c < src.nc(); ++c, ++idx)
+                                        d_channel[idx] = (1.0f / src.nc());
                                 }
-                            }
-
-                            if (all_neg_inf)
-                            {
-                                float uniform_prob = 1.0f / static_cast<float>(num_locations);
-                                for (long i = 0; i < num_locations; ++i)
-                                    d_channel[i] = uniform_prob;
-                            }
-                            else
-                            {
-                                float sum = 0;
-                                for (long i = 0; i < num_locations; ++i)
+                                else
                                 {
-                                    d_channel[i] = std::exp(s_channel[i] - max_val);
-                                    sum += d_channel[i];
+                                    float sum = 0;
+                                    for (long c = 0, idx = r * src.nc(); c < src.nc(); ++c, ++idx)
+                                    {
+                                        d_channel[idx] = std::exp(s_channel[idx] - max_val);
+                                        sum += d_channel[idx];
+                                    }
+                                    sum += std::numeric_limits<float>::epsilon();
+                                    for (long c = 0, idx = r * src.nc(); c < src.nc(); ++c, ++idx)
+                                        d_channel[idx] /= sum;
                                 }
-                                sum += epsilon;
-                                for (long i = 0; i < num_locations; ++i)
-                                    d_channel[i] /= sum;
-                            }
+                            }                           
                         }
                     }
                 }
@@ -348,7 +340,7 @@ namespace dlib {
                 tensor& grad,
                 const tensor& dest,
                 const tensor& gradient_input,
-                size_t mode = 0
+                size_t mode
             )
             {
                 DLIB_ASSERT(num_channels * num_locations == grad.nr() * grad.nc() * grad.k());
@@ -357,13 +349,11 @@ namespace dlib {
                 const auto d = dest.host();
                 const auto g = grad.host();
                 const auto in = gradient_input.host();
-
                 for (long n = 0; n < grad.num_samples(); ++n)
                 {
                     const auto d2 = d + num_locations * num_channels * n;
                     const auto g2 = g + num_locations * num_channels * n;
                     const auto in2 = in + num_locations * num_channels * n;
-
                     if (mode == 0) // softmax_mode::CHANNEL_WISE
                     {
                         // Original Dlib implementation
@@ -372,7 +362,6 @@ namespace dlib {
                             const auto d3 = d2 + i;
                             const auto g3 = g2 + i;
                             const auto in3 = in2 + i;
-
                             float temp = 0;
                             for (long k = 0; k < num_channels; ++k)
                                 temp += -d3[k * num_locations] * in3[k * num_locations];
@@ -396,20 +385,21 @@ namespace dlib {
                             const auto d_channel = d2 + k * num_locations;
                             const auto g_channel = g2 + k * num_locations;
                             const auto in_channel = in2 + k * num_locations;
-
-                            float temp = 0;
-                            for (long i = 0; i < num_locations; ++i)
-                                temp += -d_channel[i] * in_channel[i];
-
-                            if (is_same_object(gradient_input, grad))
+                            for (long r = 0; r < grad.nr(); ++r)
                             {
-                                for (long i = 0; i < num_locations; ++i)
-                                    g_channel[i] = d_channel[i] * (temp + in_channel[i]);
-                            }
-                            else
-                            {
-                                for (long i = 0; i < num_locations; ++i)
-                                    g_channel[i] += d_channel[i] * (temp + in_channel[i]);
+                                float temp = 0;
+                                for (long c = 0, idx = r * grad.nc(); c < grad.nc(); ++c, ++idx)
+                                    temp += -d_channel[idx] * in_channel[idx];
+                                if (is_same_object(gradient_input, grad))
+                                {
+                                    for (long c = 0, idx = r * grad.nc(); c < grad.nc(); ++c, ++idx)
+                                        g_channel[idx] = d_channel[idx] * (temp + in_channel[idx]);
+                                }
+                                else
+                                {
+                                    for (long c = 0, idx = r * grad.nc(); c < grad.nc(); ++c, ++idx)
+                                        g_channel[idx] += d_channel[idx] * (temp + in_channel[idx]);
+                                }
                             }
                         }
                     }
@@ -420,35 +410,23 @@ namespace dlib {
         void softmax2(
             tensor& dest,
             const tensor& src,
-            size_t mode = 0
+            size_t mode
         )
         {
             DLIB_CASSERT(have_same_dimensions(dest, src));
-
-            if (mode == 0) {
-                ttimpl::softmax2(src.nr() * src.nc(), src.k(), dest, src, mode);
-            }
-            else {
-                ttimpl::softmax2(src.nc(), src.nr(), dest, src, mode);
-            }
+            ttimpl::softmax2(src.nr() * src.nc(), src.k(), dest, src, mode);
         }
 
         void softmax_gradient2(
             tensor& grad,
             const tensor& dest,
             const tensor& gradient_input,
-            size_t mode = 0
+            size_t mode
         )
         {
             DLIB_CASSERT(have_same_dimensions(grad, dest));
             DLIB_CASSERT(have_same_dimensions(grad, gradient_input));
-
-            if (mode == 0) {
-                ttimpl::softmax_gradient2(grad.nr() * grad.nc(), grad.k(), grad, dest, gradient_input, mode);
-            }
-            else {
-                ttimpl::softmax_gradient2(grad.nc(), grad.nr(), grad, dest, gradient_input, mode);
-            }
+            ttimpl::softmax_gradient2(grad.nr() * grad.nc(), grad.k(), grad, dest, gradient_input, mode);
         }
 
         // -----------------------------------------------------------------------------------
@@ -1099,7 +1077,7 @@ namespace dlib {
         )
         {
 #ifdef DLIB_USE_CUDA
-            cpu::softmax2(dest, src, s_mode);
+            cuda::softmax2(dest, src, s_mode);
 #else
             cpu::softmax2(dest, src, s_mode);
 #endif
@@ -1113,7 +1091,7 @@ namespace dlib {
         )
         {
 #ifdef DLIB_USE_CUDA
-            cpu::softmax_gradient2(grad, dest, gradient_input, s_mode);
+            cuda::softmax_gradient2(grad, dest, gradient_input, s_mode);
 #else
             cpu::softmax_gradient2(grad, dest, gradient_input, s_mode);
 #endif
@@ -2180,31 +2158,34 @@ namespace dlib {
 
     template <typename SUBNET> using transpose = add_layer<transpose_, SUBNET>;
 
-    template <int ADD_TO_INPUT>
+    template <typename T, T val>
+    struct float_constant {
+        static constexpr T value = val;
+    };
+
+    template <long diag_, typename diag_value_>
     class tril_
     {
     public:
-        tril_() {}
-
+        tril_(): diag(diag_), diag_value(diag_value_::value) {}
+        
         template <typename SUBNET>
-        void setup(const SUBNET& sub) {}
-
+        void setup(const SUBNET& sub) {
+            initialize_mask(sub.get_output());
+        }
+        
         template <typename SUBNET>
         void forward(const SUBNET& sub, resizable_tensor& output)
-        {                
+        {
             auto& prev = sub.get_output();
             output.set_size(prev.num_samples(), prev.k(), prev.nr(), prev.nc());
-
-            initialize_mask(output);
             tt::multiply(false, output, prev, binary_mask);
-            if (ADD_TO_INPUT) tt::add(1, output, 1, output_mask);
+            if (diag_value != 0.0f) tt::add(1, output, 1, output_mask);
         }
-
         template <typename SUBNET>
-        void backward(const tensor& gradient_input, SUBNET & sub, tensor& /*params_grad*/)
+        void backward(const tensor& gradient_input, SUBNET& sub, tensor& /*params_grad*/)
         {
             auto& prev_grad = sub.get_gradient_input();
-           
             tt::multiply(true, prev_grad, gradient_input, binary_mask);
         }
 
@@ -2213,49 +2194,52 @@ namespace dlib {
 
         const tensor& get_layer_params() const { return params; }
         tensor& get_layer_params() { return params; }
-
-        friend void serialize(const tril_& /* item */, std::ostream& out)
+        
+        friend void serialize(const tril_& item, std::ostream& out)
         {
             serialize("tril_", out);
+            serialize(item.diag, out);
+            serialize(item.diag_value, out);
         }
-
-        friend void deserialize(tril_& /* item */, std::istream& in)
+        friend void deserialize(tril_& item, std::istream& in)
         {
             std::string version;
             deserialize(version, in);
             if (version != "tril_")
                 throw serialization_error("Unexpected version '" + version + "' found while deserializing dlib::tril_.");
+            deserialize(item.diag, in);
+            deserialize(item.diag_value, in);
         }
 
-        friend std::ostream& operator<<(std::ostream& out, const tril_& /* item */)
+        friend std::ostream& operator<<(std::ostream& out, const tril_& item)
         {
-            out << "tril" << (ADD_TO_INPUT == 1 ? " (add)" : "");
+            out << "tril (diag=" << item.diag << ", diag_value=" << item.diag_value << ")";
             return out;
         }
-
-        friend void to_xml(const tril_& /* item */, std::ostream& out)
+        friend void to_xml(const tril_& item, std::ostream& out)
         {
-            out << "<tril" << (ADD_TO_INPUT == 1 ? " add='true'" : "") << "/>\n";
+            out << "<tril diag='" << item.diag << "' diag_value='" << item.diag_value << "'/>\n";
         }
 
     private:
         void initialize_mask(const tensor& t)
         {
-            if (have_same_dimensions(output_mask, t)) return;
-            output_mask.copy_size(t);
-            binary_mask.copy_size(output_mask);
-            output_mask = 0;
-            binary_mask = 1;
-            for (long s = 0; s < output_mask.num_samples(); ++s)
-            {
-                for (long k = 0; k < output_mask.k(); ++k)
+            if (!have_same_dimensions(output_mask, t)) {
+                output_mask.copy_size(t);
+                binary_mask.copy_size(output_mask);
+                output_mask = 0;
+                binary_mask = 1;
+                for (long s = 0; s < output_mask.num_samples(); ++s)
                 {
-                    for (long r = 0; r < output_mask.nr(); ++r)
+                    for (long k = 0; k < output_mask.k(); ++k)
                     {
-                        for (long c = r + 1; c < output_mask.nc(); ++c)
+                        for (long r = 0; r < output_mask.nr(); ++r)
                         {
-                            output_mask.host()[tensor_index(output_mask, s, k, r, c)] = -std::numeric_limits<float>::infinity();
-                            binary_mask.host()[tensor_index(binary_mask, s, k, r, c)] = 0;
+                            for (long c = std::max(r + diag + 1, 0L); c < output_mask.nc(); ++c)
+                            {
+                                output_mask.host()[tensor_index(output_mask, s, k, r, c)] = diag_value;
+                                binary_mask.host()[tensor_index(binary_mask, s, k, r, c)] = 0;
+                            }
                         }
                     }
                 }
@@ -2264,13 +2248,19 @@ namespace dlib {
 
         resizable_tensor params; // unused
         resizable_tensor output_mask;
-        resizable_tensor binary_mask;        
+        resizable_tensor binary_mask;
+        long diag;
+        float diag_value;
     };
 
     template <typename SUBNET>
-    using tril = add_layer<tril_<0>, SUBNET>;
+    using tril = add_layer<tril_<0, float_constant<float, 0.0f>>, SUBNET>;
+
     template <typename SUBNET>
-    using tril_neginf_mask = add_layer<tril_<1>, SUBNET>;
+    using tril_mask = add_layer<tril_<0, float_constant<float, -std::numeric_limits<float>::infinity()>>, SUBNET>;
+
+    template <long diag, typename diag_value_type, typename SUBNET>
+    using tril_diag = add_layer<tril_<diag, diag_value_type>, SUBNET>;
 
     template <template<typename> class tag>
     class multm_prev_ {
@@ -2356,14 +2346,10 @@ namespace dlib {
     class softmax2_
     {
     public:
-        softmax2_()
-        {
-        }
+        softmax2_() {}
 
         template <typename SUBNET>
-        void setup(const SUBNET& /*sub*/)
-        {
-        }
+        void setup(const SUBNET& /*sub*/) {}
 
         void forward_inplace(const tensor& input, tensor& output)
         {
@@ -2374,7 +2360,7 @@ namespace dlib {
             const tensor& computed_output,
             const tensor& gradient_input,
             tensor& data_grad,
-            tensor&
+            tensor& /*params_grad*/
         )
         {
             tt::softmax_gradient2(data_grad, computed_output, gradient_input, s_mode_);
@@ -2383,12 +2369,12 @@ namespace dlib {
         const tensor& get_layer_params() const { return params; }
         tensor& get_layer_params() { return params; }
 
-        friend void serialize(const softmax2_& /*item*/, std::ostream& out)
+        friend void serialize(const softmax2_& item, std::ostream& out)
         {
             serialize("softmax2_", out);
         }
 
-        friend void deserialize(softmax2_& /*item*/, std::istream& in)
+        friend void deserialize(softmax2_& item, std::istream& in)
         {
             std::string version;
             deserialize(version, in);
@@ -2396,15 +2382,15 @@ namespace dlib {
                 throw serialization_error("Unexpected version '" + version + "' found while deserializing dlib::softmax2_.");
         }
 
-        friend std::ostream& operator<<(std::ostream& out, const softmax2_& /*item*/)
+        friend std::ostream& operator<<(std::ostream& out, const softmax2_& item)
         {
-            out << "softmax2";
+            out << "softmax2 (mode=" << (s_mode_ == CHANNEL_WISE ? "channel_wise" : "plane_wise") << ")";
             return out;
         }
 
-        friend void to_xml(const softmax2_& /*item*/, std::ostream& out)
+        friend void to_xml(const softmax2_& item, std::ostream& out)
         {
-            out << "<softmax2/>\n";
+            out << "<softmax2 mode='" << (s_mode_ == CHANNEL_WISE ? "channel_wise" : "plane_wise") << "'/>\n";
         }
 
     private:
@@ -2413,6 +2399,7 @@ namespace dlib {
 
     template <typename SUBNET>
     using softmax2 = add_layer<softmax2_<CHANNEL_WISE>, SUBNET>;
+
     template <typename SUBNET>
     using softmaxm = add_layer<softmax2_<PLANE_WISE>, SUBNET>;
 
@@ -2436,7 +2423,7 @@ namespace dlib {
         //hstack<
         multm_prev1<
         dropout_10<softmaxm<
-        tril_neginf_mask<
+        tril_mask<
         scale_weights<nb_heads, embedding_dim,
         multm_prev2<
         //hsplit<nb_heads, query<embedding_dim, skip3<
@@ -2749,6 +2736,7 @@ void test_transpose()
         "transpose_cuda: max(abs(mat(output_cpu_b) - mat(output_cuda_b))) < 1e-5");
 #endif
 }
+
 void test_hsplit_hstack() {
     const long num_heads = 4;
     const long num_samples = 1;
@@ -2972,6 +2960,45 @@ void test_rms_normalize()
 #endif
 }
 
+void test_tril()
+{
+    using NEG_INF = float_constant<float, -std::numeric_limits<float>::infinity()>;
+    using net_type = tag1<tril_diag<0, NEG_INF, tag2<input<matrix<float>>>>>;
+    net_type net;
+
+    // Input tensor
+    dlib::rand rnd;
+    const int nr = 2, nc = 3;
+    constexpr int n_samples = 3, k = 1;
+    std::vector<matrix<float>> x(n_samples);
+    matrix<float> xtmp(nr, nc);
+    for (int ii = 0; ii < n_samples; ++ii) {
+        for (int jj = 0; jj < nr; ++jj)
+            for (int kk = 0; kk < nc; ++kk)
+                xtmp(jj, kk) = rnd.get_random_gaussian();
+        x[ii] = xtmp;
+    }
+
+    // Convert input matrix to tensor
+    resizable_tensor input_tensor;
+    net.to_tensor(&x[0], &x[0] + n_samples, input_tensor);
+    net.forward(input_tensor);
+
+    // Expected output tensor (manually set for comparison)
+    resizable_tensor expected_output;
+    expected_output.copy_size(input_tensor);
+    tt::copy_tensor(false, expected_output, 0, input_tensor, 0, input_tensor.k());
+    for (int ii = 0; ii < n_samples; ++ii) {
+        expected_output.host()[tensor_index(expected_output, ii, 0, 0, 1)] = -std::numeric_limits<float>::infinity();
+        expected_output.host()[tensor_index(expected_output, ii, 0, 0, 2)] = -std::numeric_limits<float>::infinity();
+        expected_output.host()[tensor_index(expected_output, ii, 0, 1, 2)] = -std::numeric_limits<float>::infinity();
+    }
+
+    // Compare output tensor with expected output
+    auto& net_output = layer<tag1>(net).get_output();
+    DLIB_TEST_MSG(max(abs(mat(net_output) - mat(expected_output))) < 1e-5, "tril layer");
+}
+
 int main(int argc, char* argv[]) {
     string corpus_dir;
     bool do_benchmark = false, text_generation = false;
@@ -3043,11 +3070,11 @@ int main(int argc, char* argv[]) {
         constexpr bool display_debug_info = true;
         constexpr bool skip_tests[] = {
             true,      // 0: strings & tokenization
-            false,      // 1: transpose layer
-            false,     // 2: linear layer
-            false,      // 3: tril layer
-            false,      // 4: softmax layer
-            false,      // 5: attention mechanism
+            true,      // 1: transpose layer
+            true,      // 2: tril layer
+            false,      // 3: softmax layer
+            false,      // 4: attention mechanism
+            true,     // 5: linear layer
             true,      // 6: empty test
             true,     // 7: transpose, positional_encoding & embedding layers
             true,     // 8: rms_norm layer
@@ -3057,6 +3084,7 @@ int main(int argc, char* argv[]) {
 
         // test: tokenization
         if (!skip_tests[0]) {
+            if (display_debug_info) cout << "test: strings & tokenization\n";
             std::string sentence = "  &nbsp;&lt;p&gt;Hellooooooo     frieeeends !!!!!! This is sooooooo coooool &amp; awesoooooome !&lt;/p&gt;  ";
             std::string cleaned_sentence = dlib::trim(replace_html_entities(std::regex_replace(sentence, std::regex("(.)\\1{4,}"), "$1$1$1$1")));
             cout << "string normalisation: [" << sentence << "] => [" << cleaned_sentence << "]" << endl;
@@ -3100,8 +3128,215 @@ int main(int argc, char* argv[]) {
             }
         }        
 
-        // test: linear layer
+        // test: tril layer
         if (!skip_tests[2]) {
+            if (display_debug_info) cout << "\ntest: tril layer\n";
+            test_tril();
+            {
+                using specific_float = float_constant<float, 1.0f>;
+                tril_<0, specific_float> l;
+                auto res = test_layer(l);
+                DLIB_TEST_MSG(res, " tril test_0 layer\n" + res);
+            }
+            {
+                using specific_float = float_constant<float, 0.0f>;
+                tril_<3, specific_float> l;
+                auto res = test_layer(l);
+                DLIB_TEST_MSG(res, " tril test_1 layer\n" + res);
+            }
+            {
+                using specific_float = float_constant<float, -std::numeric_limits<float>::infinity()>;
+                tril_<-5, specific_float> l;
+                auto res = test_layer(l);
+                DLIB_TEST_MSG(res, " tril test_2 layer\n" + res);
+            }
+        }
+
+        // test: softmax layer
+        if (!skip_tests[3]) {
+            if (display_debug_info) cout << "\ntest: softmax layer\n";
+            {
+                using net_type = tag1<softmaxm<tag2<input<matrix<float>>>>>;
+                net_type net;
+
+                // Input tensor
+                constexpr float NEG_INF = -std::numeric_limits<float>::infinity();
+                dlib::rand rnd;
+                const long nr = 2, nc = 3;
+                constexpr int n_samples = 3, k = 1;
+                std::vector<matrix<float>> x(n_samples);
+                matrix<float> xtmp(nr, nc);
+                for (int ii = 0; ii < n_samples; ++ii) {
+                    for (int jj = 0; jj < nr; ++jj)
+                        for (int kk = 0; kk < nc; ++kk) {
+                            float r = rnd.get_random_gaussian();
+                            if (r > 1 || r < -1) r = NEG_INF;
+                            xtmp(jj, kk) = r;
+                        }
+                    x[ii] = xtmp;
+                }
+
+                // Convert input matrix to tensor
+                resizable_tensor input_tensor;
+                net.to_tensor(&x[0], &x[0] + n_samples, input_tensor);
+                net.forward(input_tensor);
+                if (display_debug_info) DBG_INFO("input_tensor: ", input_tensor, true);
+
+                // Expected output tensor
+                resizable_tensor expected_output;
+                expected_output.copy_size(input_tensor);
+                for (int ii = 0; ii < n_samples; ++ii) {
+                    for (int jj = 0; jj < nr; ++jj) {
+                        matrix<float> m(1, nc);
+                        bool all_neg_inf = true;
+                        for (int kk = 0; kk < nc; ++kk) {
+                            m(0, kk) = input_tensor.host()[tensor_index(input_tensor, ii, 0, jj, kk)];
+                            if (m(0, kk) > NEG_INF) all_neg_inf = false;
+                        }
+
+                        matrix<float> r(1, nc);
+                        if (all_neg_inf) {
+                            for (int kk = 0; kk < nc; ++kk) r(0, kk) = (1.0f / nc);
+                        }
+                        else {
+                            // Stabilize the computation by subtracting the max value
+                            float max_val = max(m);
+                            matrix<float> exp_m = exp(m - max_val);
+                            float sum_exp = sum(exp_m) + std::numeric_limits<float>::epsilon();
+                            r = exp_m / sum_exp;
+                        }
+                        for (int kk = 0; kk < nc; ++kk) {
+                            expected_output.host()[tensor_index(expected_output, ii, 0, jj, kk)] = r(0, kk);
+                        }
+                    }
+                }
+                if (display_debug_info) DBG_INFO("expected_output: ", expected_output, true);
+
+                // Compare output tensor with expected output
+                auto& net_output = layer<tag1>(net).get_output();
+                if (display_debug_info) DBG_INFO("net_output: ", net_output, true);
+                DLIB_TEST_MSG(max(abs(mat(net_output) - mat(expected_output))) < 1e-5, "softmaxm layer");
+            }
+        }
+
+        // test: attention mechanism
+        if (!skip_tests[4]) {
+            if (display_debug_info) cout << "\ntest: attention mechanism\n";
+            {
+                constexpr float NEG_INF = -std::numeric_limits<float>::infinity();
+                matrix<float> X(4, 3), WQ(3, 3), WK(3, 3), WV(3, 3);
+                X = 1, 0, 0,
+                    0, 1, 0,
+                    1, 1, 0,
+                    0, 0, 1;
+                WQ = 2, 0, 2,
+                    2, 0, 0,
+                    2, 1, 2;
+                WK = 2, 2, 2,
+                    0, 2, 1,
+                    0, 1, 1;
+                WV = 1, 1, 0,
+                    0, 1, 1,
+                    0, 0, 0;
+
+                // Calculate the matrices Q, K, V
+                matrix<float> Q = X * WQ;
+                matrix<float> K = X * WK;
+                matrix<float> V = X * WV;
+
+                // Calculate the attention scores
+                auto local_softmax = [](const matrix<float>& m) {
+                    matrix<float> result(m.nr(), m.nc());
+                    for (long r = 0; r < m.nr(); ++r) {
+                        bool all_neg_inf = true;
+                        for (long c = 0; c < m.nc(); ++c) {
+                            if (m(r, c) > NEG_INF) {
+                                all_neg_inf = false;
+                                break;
+                            }
+                        }
+                        if (all_neg_inf) {
+                            for (long c = 0; c < m.nc(); ++c) result(r, c) = (1.0f / m.nc());
+                        }
+                        else {
+                            float max_val = max(rowm(m, r));
+                            matrix<float> exp_row = exp(rowm(m, r) - max_val);
+                            float sum_exp = sum(exp_row) + std::numeric_limits<float>::epsilon();
+                            for (long c = 0; c < m.nc(); ++c) {
+                                result(r, c) = exp_row(0, c) / sum_exp;
+                            }
+                        }
+                    }
+                    return result;
+                    };
+                matrix<float> scores = Q * trans(K);
+                matrix<float> attention_weights = local_softmax(scores / sqrt(static_cast<float>(K.nc())));
+
+                // Calculate the output Z
+                matrix<float> Z = attention_weights * V;
+
+                // Display theoretical results
+                if (display_debug_info) {
+                    std::cout << "Q:\n" << Q << std::endl;
+                    std::cout << "K:\n" << K << std::endl;
+                    std::cout << "V:\n" << V << std::endl;
+                    std::cout << "scores:\n" << scores << std::endl;
+                    std::cout << "attention weights (softmax):\n" << attention_weights << std::endl;
+                    std::cout << "Z:\n" << Z << std::endl;
+                }
+
+                // Model definition
+                using net_type = tag10<multm_prev1<tag7<softmaxm<scale_weights<1, 3, tag6<multm_prev4<
+                    tag3<linear<3, // Q
+                    skip5<tag4<transpose<tag2<linear<3, // K
+                    skip5<tag1<linear<3, // V
+                    tag5<input<matrix<float>>>>>>>>>>>>>>>>>>>>;
+                net_type net;
+
+                // Convert X into a tensor
+                const long nr = X.nr(), nc = X.nc();
+                constexpr int n_samples = 1, k = 1;
+                std::vector<matrix<float>> xx(n_samples);
+                matrix<float> xtmp(nr, nc);
+                for (int ii = 0; ii < n_samples; ++ii) xx[ii] = X;
+                resizable_tensor input_tensor;
+                net.to_tensor(&xx[0], &xx[0] + n_samples, input_tensor);
+                net.forward(input_tensor);
+
+                // Initialise network weights
+                for (long r = 0; r < WV.nr(); ++r) {
+                    for (long c = 0; c < WV.nc(); ++c) {
+                        layer<tag1>(net).subnet().layer_details().get_layer_params().host()[tensor_index(layer<tag1>(net).subnet().layer_details().get_layer_params(), r, c, 0, 0)] = WV(r, c);
+                        layer<tag2>(net).subnet().layer_details().get_layer_params().host()[tensor_index(layer<tag2>(net).subnet().layer_details().get_layer_params(), r, c, 0, 0)] = WK(r, c);
+                        layer<tag3>(net).subnet().layer_details().get_layer_params().host()[tensor_index(layer<tag3>(net).subnet().layer_details().get_layer_params(), r, c, 0, 0)] = WQ(r, c);
+                    }
+                }
+                // Forward X again through the network
+                net.forward(input_tensor);
+
+                // Display network outputs
+                auto& net_Q = layer<tag3>(net).get_output();
+                auto& net_K = layer<tag2>(net).get_output();
+                auto& net_V = layer<tag1>(net).get_output();
+                auto& net_S = layer<tag6>(net).get_output();
+                auto& net_AW = layer<tag7>(net).get_output();
+                if (display_debug_info) {
+                    DBG_INFO("net_Q (Q): ", net_Q, true);
+                    DBG_INFO("net_K (K): ", net_K, true);
+                    DBG_INFO("net_V (V): ", net_V, true);
+                    DBG_INFO("net_S (scores): ", net_S, true);
+                    DBG_INFO("net_AW (softmax): ", net_AW, true);
+                }
+
+                // Compare output tensor with expected output
+                auto& net_output = layer<tag10>(net).get_output();
+                if (display_debug_info) DBG_INFO("net_output (Z): ", net_output, true);
+                DLIB_TEST_MSG(max(abs(mat(net_output) - Z)) < 1e-5, "attention mechanism");
+            }
+        }
+
+        // test: linear layer
+        if (!skip_tests[5]) {
             if (display_debug_info) cout << "\ntest: linear layer\n";
             {
                 using net_type = tag1<linear<5, tag2<input<matrix<float>>>>>;
@@ -3147,238 +3382,6 @@ int main(int argc, char* argv[]) {
                 linear_<4, LINEAR_NO_BIAS> l;
                 auto res = test_layer(l);
                 DLIB_TEST_MSG(res, " linear test_2 layer\n" + res);
-            }
-        }
-
-        // test: tril layer
-        if (!skip_tests[3]) {
-            if (display_debug_info) cout << "\ntest: tril layer\n";
-            {
-                using net_type = tag1<tril_neginf_mask<tag2<input<matrix<float>>>>>;
-                net_type net;
-
-                // Input tensor
-                dlib::rand rnd;
-                const int nr = 2, nc = 3;
-                constexpr int n_samples = 3, k = 1;
-                std::vector<matrix<float>> x(n_samples);
-                matrix<float> xtmp(nr, nc);
-                for (int ii = 0; ii < n_samples; ++ii) {
-                    for (int jj = 0; jj < nr; ++jj)
-                        for (int kk = 0; kk < nc; ++kk)
-                            xtmp(jj, kk) = rnd.get_random_gaussian();
-                    x[ii] = xtmp;
-                }
-
-                // Convert input matrix to tensor
-                resizable_tensor input_tensor;
-                net.to_tensor(&x[0], &x[0] + n_samples, input_tensor);
-                net.forward(input_tensor);
-                if (display_debug_info) DBG_INFO("input_output: ", input_tensor, true);
-
-                // Expected output tensor (manually set for comparison)
-                resizable_tensor expected_output;
-                expected_output.copy_size(input_tensor);
-                tt::copy_tensor(false, expected_output, 0, input_tensor, 0, input_tensor.k());
-                constexpr float NEG_INF = -std::numeric_limits<float>::infinity();
-                for (int ii = 0; ii < n_samples; ++ii) {
-                    expected_output.host()[tensor_index(expected_output, ii, 0, 0, 1)] = NEG_INF;
-                    expected_output.host()[tensor_index(expected_output, ii, 0, 0, 2)] = NEG_INF;
-                    expected_output.host()[tensor_index(expected_output, ii, 0, 1, 2)] = NEG_INF;
-                }
-                if (display_debug_info) DBG_INFO("expected_output: ", expected_output, true);
-                // Compare output tensor with expected output
-                auto& net_output = layer<tag1>(net).get_output();
-                if (display_debug_info) DBG_INFO("net_output: ", net_output, true);
-                DLIB_TEST_MSG(max(abs(mat(net_output) - mat(expected_output))) < 1e-5, "tril layer");
-            }
-            {
-                tril_<0> l;
-                auto res = test_layer(l);
-                DLIB_TEST_MSG(res, " tril test_0 layer\n" + res);
-            }
-            {
-                tril_<1> l;
-                auto res = test_layer(l);
-                DLIB_TEST_MSG(res, " tril with mask test_0 layer\n" + res);
-            }
-        }
-
-        // test: softmax layer
-        if (!skip_tests[4]) {
-            if (display_debug_info) cout << "\ntest: softmax layer\n";
-            {
-                using net_type = tag1<softmaxm<tag2<input<matrix<float>>>>>;
-                net_type net;
-
-                // Input tensor
-                constexpr float NEG_INF = -std::numeric_limits<float>::infinity();
-                dlib::rand rnd;
-                const long nr = 2, nc = 3;
-                constexpr int n_samples = 3, k = 1;
-                std::vector<matrix<float>> x(n_samples);
-                matrix<float> xtmp(nr, nc);
-                for (int ii = 0; ii < n_samples; ++ii) {
-                    for (int jj = 0; jj < nr; ++jj)
-                        for (int kk = 0; kk < nc; ++kk) {
-                            float r = rnd.get_random_gaussian();
-                            if (r > 1 || r < -1) r = NEG_INF;
-                            xtmp(jj, kk) = r;
-                        }
-                    x[ii] = xtmp;
-                }
-
-                // Convert input matrix to tensor
-                resizable_tensor input_tensor;
-                net.to_tensor(&x[0], &x[0] + n_samples, input_tensor);
-                net.forward(input_tensor);
-                if (display_debug_info) DBG_INFO("input_tensor: ", input_tensor, true);
-
-                // Expected output tensor
-                resizable_tensor expected_output;
-                expected_output.copy_size(input_tensor);
-                for (int ii = 0; ii < n_samples; ++ii) {
-                    for (int jj = 0; jj < nr; ++jj) {
-                        matrix<float> m(1, nc);
-                        bool all_neg_inf = true;
-                        for (int kk = 0; kk < nc; ++kk) {
-                            m(0, kk) = input_tensor.host()[tensor_index(input_tensor, ii, 0, jj, kk)];
-                            if (m(0, kk) > NEG_INF) all_neg_inf = false;
-                        }
-
-                        matrix<float> r(1, nc);
-                        if (all_neg_inf) {
-                            for (int kk = 0; kk < nc; ++kk) r(0, kk) = (1.0f / nc);
-                        } else {
-                            // Stabilize the computation by subtracting the max value
-                            matrix<float> exp_m = exp(m);
-                            float sum_exp = sum(exp_m) + epsilon;
-                            r = exp_m / sum_exp;
-                        }
-                        for (int kk = 0; kk < nc; ++kk) {
-                            expected_output.host()[tensor_index(expected_output, ii, 0, jj, kk)] = r(0, kk);
-                        }
-                    }
-                }
-                if (display_debug_info) DBG_INFO("expected_output: ", expected_output, true);
-
-                // Compare output tensor with expected output
-                auto& net_output = layer<tag1>(net).subnet().get_output();
-                if (display_debug_info) DBG_INFO("net_output: ", net_output, true);
-                DLIB_TEST_MSG(max(abs(mat(net_output) - mat(expected_output))) < 1e-5, "softmaxm layer");
-            }
-        }
-
-        // test: attention mechanism
-        if (!skip_tests[5]) {
-            if (display_debug_info) cout << "\ntest: attention mechanism\n";
-            {
-                constexpr float NEG_INF = -std::numeric_limits<float>::infinity();
-                matrix<float> X(4, 3), WQ(3, 3), WK(3, 3), WV(3, 3);
-                X = 1, 0, 0,
-                    0, 1, 0,
-                    1, 1, 0,
-                    0, 0, 1;
-                WQ = 2, 0, 2,
-                    2, 0, 0,
-                    2, 1, 2;
-                WK = 2, 2, 2,
-                    0, 2, 1,
-                    0, 1, 1;
-                WV = 1, 1, 0,
-                    0, 1, 1,
-                    0, 0, 0;
-
-                // Calculate the matrices Q, K, V
-                matrix<float> Q = X * WQ;
-                matrix<float> K = X * WK;
-                matrix<float> V = X * WV;
-
-                // Calculate the attention scores
-                auto local_softmax = [](const matrix<float>& m) {
-                    matrix<float> result(m.nr(), m.nc());
-                    for (long r = 0; r < m.nr(); ++r) {
-                        bool all_neg_inf = true;
-                        for (long c = 0; c < m.nc(); ++c) {
-                            if (m(r, c) == NEG_INF) {
-                                all_neg_inf = false;
-                                break;
-                            }
-                        }
-                        if (all_neg_inf) {
-                            for (long c = 0; c < m.nc(); ++c) result(r, c) = (1.0f / m.nc());
-                        }
-                        else {
-                            matrix<float> exp_row = exp(rowm(m, r));
-                            float sum_exp = sum(exp_row) + epsilon;
-                            for (long c = 0; c < m.nc(); ++c) {
-                                result(r, c) = exp_row(0, c) / sum_exp;
-                            }
-                        }
-                    }
-                    return result;
-                };
-                matrix<float> scores = Q * trans(K);
-                matrix<float> attention_weights = local_softmax(scores / sqrt(static_cast<float>(K.nc())));
-
-                // Calculate the output Z
-                matrix<float> Z = attention_weights * V;
-
-                // Display theoretical results
-                if (display_debug_info) {
-                    std::cout << "Q:\n" << Q << std::endl;
-                    std::cout << "K:\n" << K << std::endl;
-                    std::cout << "V:\n" << V << std::endl;
-                    std::cout << "scores:\n" << scores << std::endl;
-                    std::cout << "attention weights (softmax):\n" << attention_weights << std::endl;
-                    std::cout << "Z:\n" << Z << std::endl;
-                }
-
-                // Model definition
-                using net_type = tag10<multm_prev1<softmaxm<scale_weights<1, 3, tag6<multm_prev4<
-                    tag3<linear<3, // Q
-                    skip5<tag4<transpose<tag2<linear<3, // K
-                    skip5<tag1<linear<3, // V
-                    tag5<input<matrix<float>>>>>>>>>>>>>>>>>>>;
-                net_type net;
-
-                // Convert X into a tensor
-                const long nr = X.nr(), nc = X.nc();
-                constexpr int n_samples = 1, k = 1;
-                std::vector<matrix<float>> xx(n_samples);
-                matrix<float> xtmp(nr, nc);
-                for (int ii = 0; ii < n_samples; ++ii) xx[ii] = X;
-                resizable_tensor input_tensor;
-                net.to_tensor(&xx[0], &xx[0] + n_samples, input_tensor);
-                net.forward(input_tensor);
-
-                // Initialise network weights
-                for (long r = 0; r < WV.nr(); ++r) {
-                    for (long c = 0; c < WV.nc(); ++c) {
-                        layer<tag1>(net).subnet().layer_details().get_layer_params().host()[tensor_index(layer<tag1>(net).subnet().layer_details().get_layer_params(), r, c, 0, 0)] = WV(r, c);
-                        layer<tag2>(net).subnet().layer_details().get_layer_params().host()[tensor_index(layer<tag2>(net).subnet().layer_details().get_layer_params(), r, c, 0, 0)] = WK(r, c);
-                        layer<tag3>(net).subnet().layer_details().get_layer_params().host()[tensor_index(layer<tag3>(net).subnet().layer_details().get_layer_params(), r, c, 0, 0)] = WQ(r, c);
-                    }
-                }
-                // Forward X again through the network
-                net.forward(input_tensor);
-
-                // Display network outputs
-                auto& net_Q = layer<tag3>(net).get_output();
-                auto& net_K = layer<tag2>(net).get_output();
-                auto& net_V = layer<tag1>(net).get_output();
-                auto& net_S = layer<tag6>(net).get_output();
-                if (display_debug_info) {
-                    DBG_INFO("net_Q (Q): ", net_Q, true);
-                    DBG_INFO("net_K (K): ", net_K, true);
-                    DBG_INFO("net_V (V): ", net_V, true);
-                    DBG_INFO("net_S (scores): ", net_S, true);
-                }
-
-                // Compare output tensor with expected output
-                auto& net_output = layer<tag10>(net).get_output();
-                if (display_debug_info) DBG_INFO("net_output (Z): ", net_output, true);
-                DLIB_TEST_MSG(max(abs(mat(net_output) - Z)) < 1e-5, "attention mechanism");
             }
         }
 
