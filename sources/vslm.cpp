@@ -1077,7 +1077,7 @@ namespace dlib {
         )
         {
 #ifdef DLIB_USE_CUDA
-            cuda::softmax2(dest, src, s_mode);
+            cpu::softmax2(dest, src, s_mode);
 #else
             cpu::softmax2(dest, src, s_mode);
 #endif
@@ -1091,7 +1091,7 @@ namespace dlib {
         )
         {
 #ifdef DLIB_USE_CUDA
-            cuda::softmax_gradient2(grad, dest, gradient_input, s_mode);
+            cpu::softmax_gradient2(grad, dest, gradient_input, s_mode);
 #else
             cpu::softmax_gradient2(grad, dest, gradient_input, s_mode);
 #endif
@@ -2163,6 +2163,11 @@ namespace dlib {
         static constexpr T value = val;
     };
 
+    template <typename T, T v>
+    struct constant_wrapper {
+        static constexpr T value = v;
+    };
+
     template <long diag_, typename diag_value_>
     class tril_
     {
@@ -2170,15 +2175,15 @@ namespace dlib {
         tril_(): diag(diag_), diag_value(diag_value_::value) {}
         
         template <typename SUBNET>
-        void setup(const SUBNET& sub) {
-            initialize_mask(sub.get_output());
-        }
+        void setup(const SUBNET& sub) {}
         
         template <typename SUBNET>
         void forward(const SUBNET& sub, resizable_tensor& output)
         {
             auto& prev = sub.get_output();
             output.set_size(prev.num_samples(), prev.k(), prev.nr(), prev.nc());
+
+            check_mask(prev);
             tt::multiply(false, output, prev, binary_mask);
             if (diag_value != 0.0f) tt::add(1, output, 1, output_mask);
         }
@@ -2222,13 +2227,15 @@ namespace dlib {
         }
 
     private:
-        void initialize_mask(const tensor& t)
+        void check_mask(const tensor& t)
         {
-            if (!have_same_dimensions(output_mask, t)) {
-                output_mask.copy_size(t);
-                binary_mask.copy_size(output_mask);
-                output_mask = 0;
+            if (!have_same_dimensions(binary_mask, t)) {
+                binary_mask.copy_size(t);
                 binary_mask = 1;
+                if (diag_value != 0.0f) {
+                    output_mask.copy_size(t);
+                    output_mask = 0;
+                }                                
                 for (long s = 0; s < output_mask.num_samples(); ++s)
                 {
                     for (long k = 0; k < output_mask.k(); ++k)
@@ -2237,7 +2244,7 @@ namespace dlib {
                         {
                             for (long c = std::max(r + diag + 1, 0L); c < output_mask.nc(); ++c)
                             {
-                                output_mask.host()[tensor_index(output_mask, s, k, r, c)] = diag_value;
+                                if (diag_value != 0.0f) output_mask.host()[tensor_index(output_mask, s, k, r, c)] = diag_value;
                                 binary_mask.host()[tensor_index(binary_mask, s, k, r, c)] = 0;
                             }
                         }
@@ -2247,20 +2254,19 @@ namespace dlib {
         }
 
         resizable_tensor params; // unused
-        resizable_tensor output_mask;
-        resizable_tensor binary_mask;
+        resizable_tensor binary_mask, output_mask;
         long diag;
         float diag_value;
     };
 
     template <typename SUBNET>
-    using tril = add_layer<tril_<0, float_constant<float, 0.0f>>, SUBNET>;
+    using tril = add_layer<tril_<0, constant_wrapper<float, 0.0f>>, SUBNET>;
 
     template <typename SUBNET>
-    using tril_mask = add_layer<tril_<0, float_constant<float, -std::numeric_limits<float>::infinity()>>, SUBNET>;
+    using tril_mask = add_layer<tril_<0, constant_wrapper<float, -std::numeric_limits<float>::infinity()>>, SUBNET>;
 
-    template <long diag, typename diag_value_type, typename SUBNET>
-    using tril_diag = add_layer<tril_<diag, diag_value_type>, SUBNET>;
+    template <long diag, typename diag_value, typename SUBNET>
+    using tril_diag = add_layer<tril_<diag, diag_value>, SUBNET>;
 
     template <template<typename> class tag>
     class multm_prev_ {
@@ -2962,7 +2968,7 @@ void test_rms_normalize()
 
 void test_tril()
 {
-    using NEG_INF = float_constant<float, -std::numeric_limits<float>::infinity()>;
+    using NEG_INF = constant_wrapper<float, -std::numeric_limits<float>::infinity()>;
     using net_type = tag1<tril_diag<0, NEG_INF, tag2<input<matrix<float>>>>>;
     net_type net;
 
@@ -3071,7 +3077,7 @@ int main(int argc, char* argv[]) {
         constexpr bool skip_tests[] = {
             true,      // 0: strings & tokenization
             true,      // 1: transpose layer
-            true,      // 2: tril layer
+            false,      // 2: tril layer
             false,      // 3: softmax layer
             false,      // 4: attention mechanism
             true,     // 5: linear layer
@@ -3133,19 +3139,19 @@ int main(int argc, char* argv[]) {
             if (display_debug_info) cout << "\ntest: tril layer\n";
             test_tril();
             {
-                using specific_float = float_constant<float, 1.0f>;
+                using specific_float = constant_wrapper<float, 1.0f>;
                 tril_<0, specific_float> l;
                 auto res = test_layer(l);
                 DLIB_TEST_MSG(res, " tril test_0 layer\n" + res);
             }
             {
-                using specific_float = float_constant<float, 0.0f>;
+                using specific_float = constant_wrapper<float, 0.0f>;
                 tril_<3, specific_float> l;
                 auto res = test_layer(l);
                 DLIB_TEST_MSG(res, " tril test_1 layer\n" + res);
             }
             {
-                using specific_float = float_constant<float, -std::numeric_limits<float>::infinity()>;
+                using specific_float = constant_wrapper<float, -std::numeric_limits<float>::infinity()>;
                 tril_<-5, specific_float> l;
                 auto res = test_layer(l);
                 DLIB_TEST_MSG(res, " tril test_2 layer\n" + res);
