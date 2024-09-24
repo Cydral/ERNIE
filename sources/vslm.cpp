@@ -522,29 +522,29 @@ namespace dlib {
         void embeddings(
             resizable_tensor& dest,
             const tensor& src,
-            const tensor& emb
+            const tensor& embs
         )
         {
             DLIB_CASSERT(
                 src.nr() > 0 &&
-                emb.num_samples() > 0 &&
-                emb.k() > 0 &&
-                emb.nr() == 1 &&
-                emb.nc() == 1,
+                embs.num_samples() > 0 &&
+                embs.k() > 0 &&
+                embs.nr() == 1 &&
+                embs.nc() == 1,
                 "\nsrc.num_samples(): " << src.num_samples() <<
                 "\nsrc.k(): " << src.k() <<
                 "\nsrc.nr(): " << src.nr() <<
                 "\nsrc.nc(): " << src.nc() <<
-                "\nemb.num_samples(): " << emb.num_samples() <<
-                "\nemb.k(): " << emb.k() <<
-                "\nemb.nr(): " << emb.nr() <<
-                "\nemb.nc(): " << emb.nc()
+                "\nembs.num_samples(): " << embs.num_samples() <<
+                "\nembs.k(): " << embs.k() <<
+                "\nembs.nr(): " << embs.nr() <<
+                "\nembs.nc(): " << embs.nc()
             );
 
             long ns = dest.num_samples(), nk = dest.k(), nr = dest.nr(), nc = dest.nc();
             const float* src_data = src.host();
             float* dest_data = dest.host();
-            const float* emb_data = emb.host();
+            const float* embs_data = embs.host();
             for (long s = 0; s < ns; ++s)
             {
                 for (long k = 0; k < nk; ++k)
@@ -552,10 +552,10 @@ namespace dlib {
                     for (long r = 0; r < nr; ++r)
                     {
                         const unsigned long token_idx = static_cast<unsigned long>(src_data[tensor_index(src, s, k, r, 0)]);
-                        if (token_idx < emb.num_samples())
+                        if (token_idx < embs.num_samples())
                         {
                             for (long c = 0; c < nc; ++c)
-                                dest_data[tensor_index(dest, s, k, r, c)] = emb_data[tensor_index(emb, token_idx, c, 0, 0)];
+                                dest_data[tensor_index(dest, s, k, r, c)] = embs_data[tensor_index(embs, token_idx, c, 0, 0)];
                         }
                         else
                         {
@@ -570,7 +570,8 @@ namespace dlib {
         void embeddings_gradient(
             const tensor& prev,
             const tensor& gradient_input,
-            tensor& emb,
+            tensor& embs,
+            const tensor& freqs,
             double rate,
             bool scale
         )
@@ -580,11 +581,11 @@ namespace dlib {
                 gradient_input.num_samples() == prev.num_samples() &&
                 gradient_input.k() == prev.k() &&
                 gradient_input.nr() == prev.nr() &&
-                gradient_input.nc() == emb.k() &&
-                emb.num_samples() > 0 &&
-                emb.k() > 0 &&
-                emb.nr() == 1 &&
-                emb.nc() == 1,
+                gradient_input.nc() == embs.k() &&
+                embs.num_samples() > 0 &&
+                embs.k() > 0 &&
+                embs.nr() == 1 &&
+                embs.nc() == 1,
                 "\ngradient_input.num_samples(): " << gradient_input.num_samples() <<
                 "\ngradient_input.k(): " << gradient_input.k() <<
                 "\ngradient_input.nr(): " << gradient_input.nr() <<
@@ -593,60 +594,41 @@ namespace dlib {
                 "\nprev.k(): " << prev.k() <<
                 "\nprev.nr(): " << prev.nr() <<
                 "\nprev.nc(): " << prev.nc() <<
-                "\nemb.num_samples(): " << emb.num_samples() <<
-                "\nemb.k(): " << emb.k() <<
-                "\nemb.nr(): " << emb.nr() <<
-                "\nemb.nc(): " << emb.nc()
+                "\nembs.num_samples(): " << embs.num_samples() <<
+                "\nembs.k(): " << embs.k() <<
+                "\nembs.nr(): " << embs.nr() <<
+                "\nembs.nc(): " << embs.nc()
             );
 
             const float* prev_data = prev.host();
             const float* gradient_input_data = gradient_input.host();
-            float* emb_data = emb.host();
+            float* embs_data = embs.host();
+            const float* freqs_data = freqs.host();
             long ns = gradient_input.num_samples(), nk = gradient_input.k();
             long nr = gradient_input.nr(), nc = gradient_input.nc();
 
-            std::vector<std::mutex> embedding_mutexes(emb.num_samples());
-            std::unordered_map<unsigned long, unsigned long> token_freq;
-            if (scale)
+            std::vector<std::mutex> embedding_mutexes(embs.num_samples());
+            parallel_for(0, ns * nk, [&](long i)
             {
-                for (long k = 0; k < nk; ++k)
+                long s = i / nk;
+                long k = i % nk;
+                
+                for (long r = 0; r < nr; ++r)
                 {
-                    for (long s = 0; s < ns; ++s)
+                    const unsigned long token_idx = static_cast<unsigned long>(prev_data[tensor_index(prev, s, k, r, 0)]);
+                    if (token_idx < embs.num_samples())
                     {
-                        for (long r = 0; r < nr; ++r)
+                        float freq_scale = 1.0f;
+                        if (scale)
                         {
-                            const unsigned long token_idx = static_cast<unsigned long>(prev_data[tensor_index(prev, s, k, r, 0)]);
-                            if (token_idx < emb.num_samples())
-                            {
-                                auto it = token_freq.find(token_idx);
-                                if (it != token_freq.end()) token_freq[token_idx] += 1;
-                                else token_freq[token_idx] = 1;
-                            }
+                            float ft = 1.0f + freqs_data[tensor_index(freqs, token_idx, 0, 0, 0)];
+                            freq_scale = std::min(0.15f, std::max(2.0f * (1.0f / ft), 1.0f));
                         }
-                    }
-                }
-            }
-            parallel_for(0, ns, [&](long s)
-            {
-                for (long k = 0; k < nk; ++k)
-                {
-                    for (long r = 0; r < nr; ++r)
-                    {
-                        const unsigned long token_idx = static_cast<unsigned long>(prev_data[tensor_index(prev, s, k, r, 0)]);
-                        if (token_idx < emb.num_samples())
+                        std::lock_guard<std::mutex> lock(embedding_mutexes[token_idx]);
+                        for (long c = 0; c < nc; ++c)
                         {
-                            float freq_scale = 1.0f;
-                            if (scale)
-                            {
-                                auto it = token_freq.find(token_idx);
-                                if (it != token_freq.end()) freq_scale = std::min(0.1f, std::max(2.0f * (1.0f / it->second), 1.0f));
-                            }
-                            std::lock_guard<std::mutex> lock(embedding_mutexes[token_idx]);
-                            for (long c = 0; c < nc; ++c)
-                            {
-                                const float gradient = gradient_input_data[tensor_index(gradient_input, s, k, r, c)];
-                                emb_data[tensor_index(emb, token_idx, c, 0, 0)] -= (gradient * rate * freq_scale);
-                            }
+                            const float gradient = gradient_input_data[tensor_index(gradient_input, s, k, r, c)];
+                            embs_data[tensor_index(embs, token_idx, c, 0, 0)] -= (gradient * rate * freq_scale);
                         }
                     }
                 }
@@ -1017,21 +999,21 @@ namespace dlib {
         void embeddings(
             resizable_tensor& dest,
             const tensor& src,
-            const tensor& emb
+            const tensor& embs
         );
         /*!
             requires
                 - src.nr() > 0
-                - emb.num_samples() > 0
-                - emb.k() > 0
-                - emb.nr() == 1
-                - emb.nc() == 1
+                - embs.num_samples() > 0
+                - embs.k() > 0
+                - embs.nr() == 1
+                - embs.nc() == 1
             ensures
                 - Projects tokens from the input tensor `src` into embeddings stored in `emb`.
                 - The resulting embeddings are stored in the `dest` tensor.
                 - For all valid s, k, r, c:
-                    - If src(s,k,r,0) < emb.num_samples():
-                        - #dest(s,k,r,c) == emb(src(s,k,r,0), c, 0, 0)
+                    - If src(s,k,r,0) < embs.num_samples():
+                        - #dest(s,k,r,c) == embs(src(s,k,r,0), c, 0, 0)
                     - Else:
                         - #dest(s,k,r,c) == 0
         */
@@ -1039,7 +1021,8 @@ namespace dlib {
         void embeddings_gradient(
             const tensor& prev,
             const tensor& gradient_input,
-            tensor& emb,
+            tensor& embs,
+            const tensor& freqs,
             double rate,
             bool scale
         );
@@ -1049,13 +1032,13 @@ namespace dlib {
                 - gradient_input.num_samples() == prev.num_samples()
                 - gradient_input.k() == prev.k()
                 - gradient_input.nr() == prev.nr()
-                - gradient_input.nc() == emb.k()
-                - emb.num_samples() > 0
-                - emb.k() > 0
-                - emb.nr() == 1
-                - emb.nc() == 1
+                - gradient_input.nc() == embs.k()
+                - embs.num_samples() > 0
+                - embs.k() > 0
+                - embs.nr() == 1
+                - embs.nc() == 1
             ensures
-                - Updates the `emb` tensor based on the gradients.
+                - Updates the `embs` tensor based on the gradients.
                 - If scale is true, scales the gradient by the frequency of the tokens.
         */
         
@@ -1213,28 +1196,29 @@ namespace dlib {
         void embeddings(
             resizable_tensor& dest,
             const tensor& src,
-            const tensor& emb
+            const tensor& embs
         )
         {
 #ifdef DLIB_USE_CUDA
-            cuda::embeddings(dest, src, emb);
+            cuda::embeddings(dest, src, embs);
 #else
-            cpu::embeddings(dest, src, emb);
+            cpu::embeddings(dest, src, embs);
 #endif
         }
 
         void embeddings_gradient(
             const tensor& prev,
             const tensor& gradient_input,
-            tensor& emb,
+            tensor& embs,
+            const tensor& freqs,
             double rate,
             bool scale
         )
         {
 #ifdef DLIB_USE_CUDA
-            cpu::embeddings_gradient(prev, gradient_input, emb, rate, scale);
+            cpu::embeddings_gradient(prev, gradient_input, embs, freqs, rate, scale);
 #else
-            cpu::embeddings_gradient(prev, gradient_input, emb, rate, scale);
+            cpu::embeddings_gradient(prev, gradient_input, embs, freqs, rate, scale);
 #endif
         }
 
@@ -1716,7 +1700,8 @@ namespace dlib {
         {            
             if (learning_rate_multiplier != 0) {
                 auto& prev_src = sub.get_output();
-                tt::embeddings_gradient(prev_src, gradient_input, embs, learning_rate_multiplier, scale_by_freq);
+                if (scale_by_freq) calculate_token_frequencies(prev_src, gradient_input);
+                tt::embeddings_gradient(prev_src, gradient_input, embs, freqs, learning_rate_multiplier, scale_by_freq);
             }
             // As the embeddings_ layer is positioned just after the input, 
             // there is no need to forward the gradient received
@@ -1767,8 +1752,26 @@ namespace dlib {
         }
 
     private:
+        void calculate_token_frequencies(const tensor& prev, const tensor& input) {
+            if (freqs.size() == 0) freqs.set_size(num_embeddings, 1, 1, 1);
+            freqs = 0;
+
+            const float* prev_data = prev.host();
+            float* freqs_data = freqs.host();
+            for (long s = 0; s < input.num_samples(); ++s) {
+                for (long k = 0; k < input.k(); ++k) {
+                    for (long r = 0; r < input.nr(); ++r) {
+                        const unsigned long token_idx = static_cast<unsigned long>(prev_data[tensor_index(prev, s, k, r, 0)]);
+                        if (token_idx < num_embeddings) {
+                            freqs_data[tensor_index(freqs, token_idx, 0, 0, 0)]++;
+                        }
+                    }
+                }
+            }
+        }
+
         resizable_tensor params; // unused
-        resizable_tensor embs;
+        resizable_tensor embs, freqs;
         unsigned long num_embeddings, embedding_dim;
         double learning_rate_multiplier;
         bool scale_by_freq;

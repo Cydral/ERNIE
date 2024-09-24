@@ -426,7 +426,7 @@ namespace dlib
                 row_stride, col_stride, add_to);
         }
 
-        __global__ void cuda_embeddings(
+        __global__ void _cuda_embeddings(
             size_t ssize, size_t ns, size_t nk, size_t nr, size_t nc,
             float* d, const float* s, const float* e, size_t es
         )
@@ -456,23 +456,23 @@ namespace dlib
         void embeddings(
             resizable_tensor& dest,
             const tensor& src,
-            const tensor& emb
+            const tensor& embs
         )
         {
             DLIB_CASSERT(
                 src.nr() > 0 &&
-                emb.num_samples() > 0 &&
-                emb.k() > 0 &&
-                emb.nr() == 1 &&
-                emb.nc() == 1,
+                embs.num_samples() > 0 &&
+                embs.k() > 0 &&
+                embs.nr() == 1 &&
+                embs.nc() == 1,
                 "\nsrc.num_samples(): " << src.num_samples() <<
                 "\nsrc.k(): " << src.k() <<
                 "\nsrc.nr(): " << src.nr() <<
                 "\nsrc.nc(): " << src.nc() <<
-                "\nemb.num_samples(): " << emb.num_samples() <<
-                "\nemb.k(): " << emb.k() <<
-                "\nemb.nr(): " << emb.nr() <<
-                "\nemb.nc(): " << emb.nc()
+                "\nembs.num_samples(): " << embs.num_samples() <<
+                "\nembs.k(): " << embs.k() <<
+                "\nembs.nr(): " << embs.nr() <<
+                "\nembs.nc(): " << embs.nc()
             );
 
             const long ns = dest.num_samples();
@@ -481,7 +481,41 @@ namespace dlib
             const long nc = dest.nc();
 
             launch_kernel(_cuda_embeddings, ns * nk * nr, ns, nk, nr, nc,
-                dest.device(), src.device(), emb.device(), emb.num_samples());
+                dest.device(), src.device(), embs.device(), embs.num_samples());
+        }
+
+        void embeddings_gradient(
+            const tensor& prev,
+            const tensor& gradient_input,
+            tensor& embs,
+            const tensor& freqs,
+            double rate,
+            bool scale
+        )
+        {
+            DLIB_CASSERT(
+                prev.nr() > 0 &&
+                gradient_input.num_samples() == prev.num_samples() &&
+                gradient_input.k() == prev.k() &&
+                gradient_input.nr() == prev.nr() &&
+                gradient_input.nc() == embs.k() &&
+                embs.num_samples() > 0 &&
+                embs.k() > 0 &&
+                embs.nr() == 1 &&
+                embs.nc() == 1,
+                "\ngradient_input.num_samples(): " << gradient_input.num_samples() <<
+                "\ngradient_input.k(): " << gradient_input.k() <<
+                "\ngradient_input.nr(): " << gradient_input.nr() <<
+                "\ngradient_input.nc(): " << gradient_input.nc() <<
+                "\nprev.num_samples(): " << prev.num_samples() <<
+                "\nprev.k(): " << prev.k() <<
+                "\nprev.nr(): " << prev.nr() <<
+                "\nprev.nc(): " << prev.nc() <<
+                "\nembs.num_samples(): " << embs.num_samples() <<
+                "\nembs.k(): " << embs.k() <<
+                "\nembs.nr(): " << embs.nr() <<
+                "\nembs.nc(): " << embs.nc()
+            );
         }
 
         __global__ void batch_multiply_kernel(

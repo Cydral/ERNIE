@@ -74,13 +74,14 @@ namespace dlib
         void embeddings(
             resizable_tensor& dest,
             const tensor& src,
-            const tensor& emb
+            const tensor& embs
         );
 
         void embeddings_gradient(
             const tensor& prev,
             const tensor& gradient_input,
-            tensor& emb,
+            tensor& embs,
+            const tensor& freqs,
             double rate,
             bool scale
         );
