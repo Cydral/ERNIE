@@ -2987,7 +2987,7 @@ void test_embeddings()
 {
     const size_t num_sequences = 200, sequence_length = 7, num_classes = 10, num_tokens = 100, embedding_length = 5;
     using net_type = loss_multiclass_log<fc<num_classes,
-        relu<fc<16,relu<fc<32,
+        relu<fc<32,relu<fc<64,
         embeddings<num_tokens, embedding_length,
         input<matrix<unsigned long, 0, 1>>>>>>>>>;
     net_type net;
@@ -2995,7 +2995,7 @@ void test_embeddings()
     trainer.set_learning_rate(1e-1);
     trainer.set_min_learning_rate(1e-4);
     trainer.set_mini_batch_size(16);
-    trainer.set_max_num_epochs(200);
+    trainer.set_max_num_epochs(300);
 
     dlib::rand rnd;
     auto generate_sequences = [&](size_t num_sequences, size_t sequence_length, size_t num_tokens) {
