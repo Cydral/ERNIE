@@ -421,10 +421,67 @@ namespace dlib
             DLIB_CASSERT(grad.nr() == gradient_input.nr() * row_stride, "The number of rows in grad must be gradient_input.nr() multiplied by row_stride.");
             DLIB_CASSERT(grad.nc() == gradient_input.nc() * col_stride, "The number of columns in grad must be gradient_input.nc() multiplied by col_stride.");
 
-            // Launch the corrected CUDA kernel
             launch_kernel(_cuda_reorg_gradient2, gradient_input.size(), grad.k(), grad.nr(), grad.nc(), grad.device(),
                 gradient_input.k(), gradient_input.nr(), gradient_input.nc(), gradient_input.device(),
                 row_stride, col_stride, add_to);
+        }
+
+        __global__ void cuda_embeddings(
+            size_t ssize, size_t ns, size_t nk, size_t nr, size_t nc,
+            float* d, const float* s, const float* e, size_t es
+        )
+        {
+            for (auto i : grid_stride_range(0, ssize))
+            {
+                const size_t nk_nr = nk * nr;
+                const auto s_idx = i / nk_nr;
+                const auto k = (i % nk_nr) / nr;
+                const auto r = i % nr;
+
+                const unsigned long t_idx = static_cast<unsigned long>(s[s_idx * nk_nr + k * nr + r]);
+                const size_t base_idx = s_idx * nk_nr * nc + k * nr * nc + r * nc;
+
+                if (t_idx < es)
+                {
+                    const size_t emb_base_idx = t_idx * nc;
+                    for (long c = 0; c < nc; ++c) d[base_idx + c] = e[emb_base_idx + c];
+                }
+                else
+                {
+                    for (long c = 0; c < nc; ++c) d[base_idx + c] = 1;
+                }
+            }
+        }
+
+        void embeddings(
+            resizable_tensor& dest,
+            const tensor& src,
+            const tensor& emb
+        )
+        {
+            DLIB_CASSERT(
+                src.nr() > 0 &&
+                emb.num_samples() > 0 &&
+                emb.k() > 0 &&
+                emb.nr() == 1 &&
+                emb.nc() == 1,
+                "\nsrc.num_samples(): " << src.num_samples() <<
+                "\nsrc.k(): " << src.k() <<
+                "\nsrc.nr(): " << src.nr() <<
+                "\nsrc.nc(): " << src.nc() <<
+                "\nemb.num_samples(): " << emb.num_samples() <<
+                "\nemb.k(): " << emb.k() <<
+                "\nemb.nr(): " << emb.nr() <<
+                "\nemb.nc(): " << emb.nc()
+            );
+
+            const long ns = dest.num_samples();
+            const long nk = dest.k();
+            const long nr = dest.nr();
+            const long nc = dest.nc();
+
+            launch_kernel(_cuda_embeddings, ns * nk * nr, ns, nk, nr, nc,
+                dest.device(), src.device(), emb.device(), emb.num_samples());
         }
 
         __global__ void batch_multiply_kernel(

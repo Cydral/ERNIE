@@ -1217,7 +1217,7 @@ namespace dlib {
         )
         {
 #ifdef DLIB_USE_CUDA
-            cpu::embeddings(dest, src, emb);
+            cuda::embeddings(dest, src, emb);
 #else
             cpu::embeddings(dest, src, emb);
 #endif
@@ -1714,14 +1714,12 @@ namespace dlib {
         template <typename SUBNET>
         void backward(const tensor& gradient_input, SUBNET& sub, tensor& /*params_grad*/)
         {            
-            auto& prev = sub.get_gradient_input();
-
             if (learning_rate_multiplier != 0) {
                 auto& prev_src = sub.get_output();
                 tt::embeddings_gradient(prev_src, gradient_input, embs, learning_rate_multiplier, scale_by_freq);
             }
-
-            tt::resize_bilinear_gradient(prev, gradient_input);
+            // As the embeddings_ layer is positioned just after the input, 
+            // there is no need to forward the gradient received
         }
 
         const tensor& get_layer_params() const { return params; }
@@ -2997,7 +2995,7 @@ void test_embeddings()
     trainer.set_learning_rate(1e-1);
     trainer.set_min_learning_rate(1e-4);
     trainer.set_mini_batch_size(16);
-    trainer.set_max_num_epochs(150);
+    trainer.set_max_num_epochs(200);
 
     dlib::rand rnd;
     auto generate_sequences = [&](size_t num_sequences, size_t sequence_length, size_t num_tokens) {
@@ -3181,7 +3179,7 @@ int main(int argc, char* argv[]) {
         "██╔══╝  ██╔══██╗██║╚██╗██║██║██╔══╝  \n"
         "███████╗██║  ██║██║ ╚████║██║███████╗\n"
         "╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝╚══════╝\n"
-        "Welcome to the ERNIE generative AI program! (version 1.1.2)\n\n";
+        "Welcome to the ERNIE generative AI program! (version 1.1.4)\n\n";
     try {
         string msg_learning_rate = string("Initial learning rate for training (") + std::format("{:g}", learning_rate) + string(")"),
             msg_min_learning_rate = string("Minimum learning rate (") + std::format("{:g}", min_learning_rate) + string(")"),
@@ -3244,7 +3242,7 @@ int main(int argc, char* argv[]) {
             true,      // 7: linear layer            
             true,      // 8: hsplit/hstack layers
             true,      // 9: rms_norm layer
-            false,      // 10: multihead attention model
+            true,      // 10: multihead attention model
             false       // 11: "shakespeare" example
         };
 
@@ -3333,8 +3331,7 @@ int main(int argc, char* argv[]) {
             {
                 embeddings_<7, 12> l;
                 auto res = test_layer(l);
-                //DLIB_TEST_MSG(res, " embeddings test layer\n" + res);
-                DLIB_TEST_MSG(res, res);
+                DLIB_TEST_MSG(res, " embeddings test layer\n" + res);
             }
         }
 
@@ -3854,7 +3851,7 @@ Be all my sins remembered.)";
 
                     // Attempting to generate a new sonnet
                     string sonnet_start = "Shall I compare thee to a winter's night?";
-                    std::vector<matrix<int, 0, 1>> input_tokens = tokenize_text(sonnet_start, sequence_size);
+                    std::vector<matrix<int, 0, 1>> input_tokens = tokenize_text(sonnet_start+"\n", sequence_size);
                     if (!input_tokens.empty()) {
                         string generated_sonnet = sonnet_start;
                         matrix<int> next_input(sequence_size, 1);

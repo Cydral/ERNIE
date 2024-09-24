@@ -71,6 +71,20 @@ namespace dlib
             const tensor& gradient_input
         );
 
+        void embeddings(
+            resizable_tensor& dest,
+            const tensor& src,
+            const tensor& emb
+        );
+
+        void embeddings_gradient(
+            const tensor& prev,
+            const tensor& gradient_input,
+            tensor& emb,
+            double rate,
+            bool scale
+        );
+
         void batch_multiply(
             tensor& out,
             const tensor& a,
