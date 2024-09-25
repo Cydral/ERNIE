@@ -52,6 +52,7 @@
 #include "cuda_dlib_ext.cuh"
 #include <cuda_runtime.h>
 #include "cublas_v2.h"
+#include <cudnn.h>
 #endif // DLIB_USE_CUDA
 #include "advanced_tokenizer.hpp"
 #include "data_fr.h"
@@ -90,6 +91,64 @@ void signalHandler(int signal) {
         cout << "\ninterrupt detected (CTRL+C), cleaning up and closing the program" << endl;
     }
 }
+
+static const char* cudnn_get_error_string(cudnnStatus_t s)
+{
+    switch (s)
+    {
+    case CUDNN_STATUS_NOT_INITIALIZED:
+        return "CUDA Runtime API initialization failed.";
+    case CUDNN_STATUS_ALLOC_FAILED:
+        return "CUDA Resources could not be allocated.";
+    case CUDNN_STATUS_BAD_PARAM:
+        return "CUDNN_STATUS_BAD_PARAM";
+    case CUDNN_STATUS_EXECUTION_FAILED:
+        return "CUDNN_STATUS_EXECUTION_FAILED";
+    case CUDNN_STATUS_NOT_SUPPORTED:
+        return "CUDNN_STATUS_NOT_SUPPORTED";
+    case CUDNN_STATUS_ARCH_MISMATCH:
+        return "CUDNN_STATUS_ARCH_MISMATCH: Your GPU is too old and not supported by cuDNN";
+    default:
+        return "A call to cuDNN failed";
+    }
+}
+
+#define CHECK_CUDNN(call) \
+do{ \
+    const cudnnStatus_t error = call; \
+    if (error != CUDNN_STATUS_SUCCESS) \
+    { \
+        std::ostringstream sout; \
+        sout << "Error while calling " << #call << " in file " << __FILE__ << ":" << __LINE__ << ". "; \
+        sout << "code: " << error << ", reason: " << cudnn_get_error_string(error); \
+        throw dlib::cudnn_error(sout.str()); \
+    } \
+}while(false)
+
+static const char* cublas_get_error_string(cublasStatus_t s)
+{
+    switch (s)
+    {
+    case CUBLAS_STATUS_NOT_INITIALIZED:
+        return "CUDA Runtime API initialization failed.";
+    case CUBLAS_STATUS_ALLOC_FAILED:
+        return "CUDA Resources could not be allocated.";
+    default:
+        return "A call to cuBLAS failed";
+    }
+}
+
+#define CHECK_CUBLAS(call) \
+do{ \
+    const cublasStatus_t error = call; \
+    if (error != CUBLAS_STATUS_SUCCESS) \
+    { \
+        std::ostringstream sout; \
+        sout << "Error while calling " << #call << " in file " << __FILE__ << ":" << __LINE__ << ". "; \
+        sout << "code: " << error << ", reason: " << cublas_get_error_string(error); \
+        throw dlib::cublas_error(sout.str()); \
+    } \
+}while(false)
 
 void configure_console() {
     SetConsoleOutputCP(CP_UTF8);
@@ -312,7 +371,7 @@ namespace dlib {
                                 if (max_val == -std::numeric_limits<float>::infinity())
                                 {
                                     for (long c = 0, idx = r * src.nc(); c < src.nc(); ++c, ++idx)
-                                        d_channel[idx] = (1.0f / src.nc());
+                                        d_channel[idx] = 0.0f;
                                 }
                                 else
                                 {
@@ -620,8 +679,8 @@ namespace dlib {
                         float freq_scale = 1.0f;
                         if (scale)
                         {
-                            float ft = 1.0f + freqs_data[tensor_index(freqs, token_idx, 0, 0, 0)];
-                            freq_scale = std::min(0.15f, std::max(2.0f * (1.0f / ft), 1.0f));
+                            float ft = freqs_data[tensor_index(freqs, token_idx, 0, 0, 0)];
+                            if (ft != 0.0f) freq_scale = std::min(0.1f, std::max(1.0f / ft, 1.0f));
                         }
                         std::lock_guard<std::mutex> lock(embedding_mutexes[token_idx]);
                         for (long c = 0; c < nc; ++c)
@@ -921,6 +980,63 @@ namespace dlib {
             return c.get_handle();
         }
 
+        static cudnnTensorDescriptor_t descriptor(const tensor& t)
+        {
+            return (const cudnnTensorDescriptor_t)t.get_cudnn_tensor_descriptor().get_handle();
+        }
+        static cudnnTensorDescriptor_t descriptor(const tensor_descriptor& t)
+        {
+            return (const cudnnTensorDescriptor_t)t.get_handle();
+        }
+
+        class cudnn_context
+        {
+        public:
+            // not copyable
+            cudnn_context(const cudnn_context&) = delete;
+            cudnn_context& operator=(const cudnn_context&) = delete;
+
+            cudnn_context()
+            {
+                handles.resize(16);
+            }
+            ~cudnn_context()
+            {
+                for (auto h : handles)
+                {
+                    if (h)
+                        cudnnDestroy(h);
+                }
+            }
+
+            cudnnHandle_t get_handle(
+            )
+            {
+                int new_device_id;
+                CHECK_CUDA(cudaGetDevice(&new_device_id));
+                // make room for more devices if needed
+                if (new_device_id >= (long)handles.size())
+                    handles.resize(new_device_id + 16);
+
+                // If we don't have a handle already for this device then make one
+                if (!handles[new_device_id])
+                    CHECK_CUDNN(cudnnCreate(&handles[new_device_id]));
+
+                // Finally, return the handle for the current device
+                return handles[new_device_id];
+            }
+
+        private:
+
+            std::vector<cudnnHandle_t> handles;
+        };
+
+        static cudnnHandle_t ccontext()
+        {
+            thread_local cudnn_context c;
+            return c.get_handle();
+        }
+
         void gemm(
             float beta,
             tensor& dest,
@@ -929,10 +1045,10 @@ namespace dlib {
             bool trans_lhs,
             const tensor& rhs,
             bool trans_rhs,
-            tt::gemm_mode g_mode = tt::gemm_mode::CHANNEL_WISE
+            size_t g_mode = 0
         )
         {
-            if (g_mode == tt::gemm_mode::CHANNEL_WISE)
+            if (g_mode == 0) // gemm_mode::CHANNEL_WISE
             {
                 // Recall that BLAS uses column major order so to deal with that we flip the
                 // order of the lhs and rhs arguments.
@@ -981,7 +1097,7 @@ namespace dlib {
                     &beta,
                     dest.device(), dest_nc));
             }
-            else if (g_mode == tt::gemm_mode::PLANE_WISE)
+            else if (g_mode == 1) // gemm_mode::PLANE_WISE
             {
                 const auto transa = trans_lhs ? CUBLAS_OP_T : CUBLAS_OP_N;
                 const auto transb = trans_rhs ? CUBLAS_OP_T : CUBLAS_OP_N;
@@ -1033,11 +1149,11 @@ namespace dlib {
                             dest.device() + (b * num_channels + c) * dest_plane_size;
                         const int k = trans_rhs ? rhs_cols : rhs_rows;
 
-                        cublasSgemm(
+                        CHECK_CUBLAS(cublasSgemm(
                             context(), transb, transa, dest_cols, dest_rows, k,
                             &alpha, rhs_slice, rhs_cols, lhs_slice, lhs_cols,
                             &beta, dest_slice, dest_cols
-                        );
+                        ));
                     }
                 }
             }
@@ -1055,17 +1171,46 @@ namespace dlib {
 
             const float alpha = 1;
             const float beta = 0;
-            const int mode = (s_mode == 0) ? CUDNN_SOFTMAX_MODE_CHANNEL : CUDNN_SOFTMAX_MODE_INSTANCE;
 
-            CHECK_CUDNN(cudnnSoftmaxForward(context(),
-                CUDNN_SOFTMAX_ACCURATE,
-                mode,
-                &alpha,
-                descriptor(src),
-                src.device(),
-                &beta,
-                descriptor(dest),
-                dest.device()));
+            if (s_mode == 0)
+            {
+                CHECK_CUDNN(cudnnSoftmaxForward(ccontext(),
+                    CUDNN_SOFTMAX_ACCURATE,
+                    CUDNN_SOFTMAX_MODE_CHANNEL,
+                    &alpha,
+                    descriptor(src),
+                    src.device(),
+                    &beta,
+                    descriptor(dest),
+                    dest.device()));
+            }
+            else if (s_mode == 1)
+            {
+                const long num_samples = src.num_samples();
+                const long num_channels = src.k();
+                const size_t plane_size = src.nr() * src.nc();
+
+                for (long s = 0; s < num_samples; ++s)
+                {
+                    for (long k = 0; k < num_channels; ++k)
+                    {
+                        auto src_slice = src.device() + (s * num_channels + k) * plane_size;
+                        auto dest_slice = dest.device() + (s * num_channels + k) * plane_size;
+                        auto a_src_slice = alias_tensor(src.nr(), src.nc())(src, (s * num_channels + k) * plane_size);
+                        auto a_dest_slice = alias_tensor(dest.nr(), dest.nc())(dest, (s * num_channels + k) * plane_size);
+
+                        CHECK_CUDNN(cudnnSoftmaxForward(ccontext(),
+                            CUDNN_SOFTMAX_ACCURATE,
+                            CUDNN_SOFTMAX_MODE_CHANNEL,
+                            &alpha,
+                            descriptor(a_src_slice),
+                            src_slice,
+                            &beta,
+                            descriptor(a_dest_slice),
+                            dest_slice));
+                    }
+                }
+            }
         }
 
 
@@ -1084,9 +1229,9 @@ namespace dlib {
 
             const float alpha = 1;
             const float beta = is_same_object(grad, gradient_input) ? 0 : 1;
-            const int mode = (s_mode == 0) ? CUDNN_SOFTMAX_MODE_CHANNEL : CUDNN_SOFTMAX_MODE_INSTANCE;
+            const cudnnSoftmaxMode_t mode = (s_mode == 0) ? CUDNN_SOFTMAX_MODE_CHANNEL : CUDNN_SOFTMAX_MODE_INSTANCE;
 
-            CHECK_CUDNN(cudnnSoftmaxBackward(context(),
+            CHECK_CUDNN(cudnnSoftmaxBackward(ccontext(),
                 CUDNN_SOFTMAX_ACCURATE,
                 mode,
                 &alpha,
@@ -3119,8 +3264,6 @@ void test_positional_encodings()
     }    
 
     auto& net_output = layer<tag1>(net).get_output();
-    DBG_INFO("net_output: ", net_output, true);
-    cout << "expected_output: " << expected_output << endl;
     DLIB_TEST_MSG(max(abs(mat(net_output) - expected_output)) < 1e-5, "positional_encodings layer");
 }
 
@@ -3373,18 +3516,18 @@ int main(int argc, char* argv[]) {
     if (do_benchmark) {
         const bool display_debug_info = false;
         const bool skip_tests[] = {
-            false,      // 0: strings & tokenization
-            false,      // 1: transpose layer
-            false,      // 2: tril layer
-            false,      // 3: positional_encodings layer
-            false,      // 4: embeddings layer
+            true,      // 0: strings & tokenization
+            true,      // 1: transpose layer
+            true,      // 2: tril layer
+            true,      // 3: positional_encodings layer
+            true,      // 4: embeddings layer
             false,      // 5: softmax layer
             false,      // 6: attention mechanism
-            false,      // 7: linear layer         
+            true,      // 7: linear layer         
             true,      // 8: hsplit/hstack layers
-            false,      // 9: rms_norm layer
+            true,      // 9: rms_norm layer
             true,      // 10: multihead attention model
-            false       // 11: "shakespeare" example
+            true       // 11: "shakespeare" example
         };
 
         // test: tokenization
@@ -3519,7 +3662,7 @@ int main(int argc, char* argv[]) {
 
                         matrix<float> r(1, nc);
                         if (all_neg_inf) {
-                            for (int kk = 0; kk < nc; ++kk) r(0, kk) = (1.0f / nc);
+                            for (int kk = 0; kk < nc; ++kk) r(0, kk) = 0.0f;
                         }
                         else {
                             // Stabilize the computation by subtracting the max value
@@ -3539,6 +3682,14 @@ int main(int argc, char* argv[]) {
                 auto& net_output = layer<tag1>(net).get_output();
                 if (display_debug_info) DBG_INFO("net_output: ", net_output, true);
                 DLIB_TEST_MSG(max(abs(mat(net_output) - mat(expected_output))) < 1e-5, "softmaxm layer");
+
+                // Compare CPU and CUDA direct functions
+                resizable_tensor output_tensor;
+                output_tensor.copy_size(input_tensor);
+                cpu::softmax(output_tensor, input_tensor, 1);
+                if (display_debug_info) DBG_INFO("output_tensor (cpu): ", output_tensor, true);
+                cuda::softmax(output_tensor, input_tensor, 1);
+                if (display_debug_info) DBG_INFO("output_tensor (cuda): ", output_tensor, true);
             }
         }
 
@@ -3578,7 +3729,7 @@ int main(int argc, char* argv[]) {
                             }
                         }
                         if (all_neg_inf) {
-                            for (long c = 0; c < m.nc(); ++c) result(r, c) = (1.0f / m.nc());
+                            for (long c = 0; c < m.nc(); ++c) result(r, c) = 0.0f;
                         }
                         else {
                             float max_val = max(rowm(m, r));
