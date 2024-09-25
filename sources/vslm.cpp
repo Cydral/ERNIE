@@ -257,7 +257,7 @@ namespace dlib {
 
         namespace ttimpl
         {
-            void softmax2(
+            void softmax(
                 const long num_locations,
                 const long num_channels,
                 tensor& dest,
@@ -275,9 +275,8 @@ namespace dlib {
                     auto ss = s + num_locations * num_channels * n;
                     auto dd = d + num_locations * num_channels * n;
 
-                    if (mode == 0)
+                    if (mode == 0) // softmax_mode::CHANNEL_WISE
                     {
-                        // Mode 0: softmax along the channel axis (k)
                         for (long i = 0; i < num_locations; ++i)
                         {
                             float max_val = -std::numeric_limits<float>::infinity();
@@ -298,9 +297,8 @@ namespace dlib {
                             ++dd;
                         }
                     }
-                    else
+                    else if (mode == 1) // softmax_mode::PLANE_WISE
                     {
-                        // Mode 1: softmax along the spatial locations (nr x nc)
                         for (long k = 0; k < num_channels; ++k)
                         {
                             auto s_channel = ss + k * num_locations;
@@ -334,7 +332,7 @@ namespace dlib {
                 }
             }
 
-            void softmax_gradient2(
+            void softmax_gradient(
                 const long num_locations,
                 const long num_channels,
                 tensor& grad,
@@ -355,6 +353,7 @@ namespace dlib {
                     const auto d2 = d + num_locations * num_channels * n;
                     const auto g2 = g + num_locations * num_channels * n;
                     const auto in2 = in + num_locations * num_channels * n;
+
                     if (mode == 0) // softmax_mode::CHANNEL_WISE
                     {
                         for (long i = 0; i < num_locations; ++i)
@@ -377,7 +376,7 @@ namespace dlib {
                             }
                         }
                     }
-                    else  // softmax_mode::PLANE_WISE
+                    else if (mode == 1) // softmax_mode::PLANE_WISE
                     {
                         for (long k = 0; k < num_channels; ++k)
                         {
@@ -406,17 +405,17 @@ namespace dlib {
             }
         }
 
-        void softmax2(
+        void softmax(
             tensor& dest,
             const tensor& src,
             size_t mode
         )
         {
             DLIB_CASSERT(have_same_dimensions(dest, src));
-            ttimpl::softmax2(src.nr() * src.nc(), src.k(), dest, src, mode);
+            ttimpl::softmax(src.nr() * src.nc(), src.k(), dest, src, mode);
         }
 
-        void softmax_gradient2(
+        void softmax_gradient(
             tensor& grad,
             const tensor& dest,
             const tensor& gradient_input,
@@ -425,7 +424,7 @@ namespace dlib {
         {
             DLIB_CASSERT(have_same_dimensions(grad, dest));
             DLIB_CASSERT(have_same_dimensions(grad, gradient_input));
-            ttimpl::softmax_gradient2(grad.nr() * grad.nc(), grad.k(), grad, dest, gradient_input, mode);
+            ttimpl::softmax_gradient(grad.nr() * grad.nc(), grad.k(), grad, dest, gradient_input, mode);
         }
 
 // -----------------------------------------------------------------------------------
@@ -560,7 +559,7 @@ namespace dlib {
                         else
                         {
                             for (long c = 0; c < nc; ++c)
-                                dest_data[tensor_index(dest, s, k, r, c)] = 1;
+                                dest_data[tensor_index(dest, s, k, r, c)] = 0;
                         }
                     }
                 }
@@ -922,73 +921,182 @@ namespace dlib {
             return c.get_handle();
         }
 
-        void c_gemm(
+        void gemm(
             float beta,
             tensor& dest,
             float alpha,
             const tensor& lhs,
             bool trans_lhs,
             const tensor& rhs,
-            bool trans_rhs
+            bool trans_rhs,
+            tt::gemm_mode g_mode = tt::gemm_mode::CHANNEL_WISE
         )
         {
-            const auto transa = trans_lhs ? CUBLAS_OP_T : CUBLAS_OP_N;
-            const auto transb = trans_rhs ? CUBLAS_OP_T : CUBLAS_OP_N;
-
-            long num_samples = std::max({ lhs.num_samples(), rhs.num_samples(), dest.num_samples() });
-            long num_channels = std::max({ lhs.k(), rhs.k(), dest.k() });
-
-            auto is_matrix = [](const auto& tensor) {
-                return (tensor.num_samples() == 1 && tensor.k() == 1) ||
-                    (tensor.nr() == 1 && tensor.nc() == 1);
-            };
-            const bool lhs_is_matrix = is_matrix(lhs), rhs_is_matrix = is_matrix(rhs), dest_is_matrix = is_matrix(dest);
-
-            if (lhs_is_matrix && rhs_is_matrix && dest_is_matrix) {
-                num_samples = num_channels = 1;
-            }
-            else {
-                auto adjust = [&](const auto& tensor) {
-                    if (!is_matrix(tensor)) {
-                        if (tensor.num_samples() < num_samples) num_samples = tensor.num_samples();
-                        if (tensor.k() < num_channels) num_channels = tensor.k();
-                    }
-                };
-                adjust(lhs);
-                adjust(rhs);
-                adjust(dest);
-            }
-
-            long lhs_rows = (lhs_is_matrix && lhs.num_samples() > 1) ? lhs.num_samples() : lhs.nr();
-            long lhs_cols = (lhs_is_matrix && lhs.k() > 1) ? lhs.k() : lhs.nc();
-            long rhs_rows = (rhs_is_matrix && rhs.num_samples() > 1) ? rhs.num_samples() : rhs.nr();
-            long rhs_cols = (rhs_is_matrix && rhs.k() > 1) ? rhs.k() : rhs.nc();
-            long dest_rows = (dest_is_matrix && dest.num_samples() > 1) ? dest.num_samples() : dest.nr();
-            long dest_cols = (dest_is_matrix && dest.k() > 1) ? dest.k() : dest.nc();
-
-            const size_t lhs_plane_size = lhs_rows * lhs_cols;
-            const size_t rhs_plane_size = rhs_rows * rhs_cols;
-            const size_t dest_plane_size = dest_rows * dest_cols;
-
-            for (long b = 0; b < num_samples; ++b)
+            if (g_mode == tt::gemm_mode::CHANNEL_WISE)
             {
-                for (long c = 0; c < num_channels; ++c)
-                {
-                    auto lhs_slice = lhs_is_matrix ? lhs.device() :
-                        lhs.device() + (b * num_channels + c) * lhs_plane_size;
-                    auto rhs_slice = rhs_is_matrix ? rhs.device() :
-                        rhs.device() + (b * num_channels + c) * rhs_plane_size;
-                    auto dest_slice = dest_is_matrix ? dest.device() :
-                        dest.device() + (b * num_channels + c) * dest_plane_size;
-                    const int k = trans_rhs ? rhs_cols : rhs_rows;
+                // Recall that BLAS uses column major order so to deal with that we flip the
+                // order of the lhs and rhs arguments.
+                const auto transa = trans_lhs ? CUBLAS_OP_T : CUBLAS_OP_N;
+                const auto transb = trans_rhs ? CUBLAS_OP_T : CUBLAS_OP_N;
 
-                    cublasSgemm(
-                        context(), transb, transa, dest_cols, dest_rows, k,
-                        &alpha, rhs_slice, rhs_cols, lhs_slice, lhs_cols,
-                        &beta, dest_slice, dest_cols
-                    );
+                const int dest_nr = dest.num_samples();
+                const int dest_nc = dest.size() / dest_nr;
+                const int lhs_nr = lhs.num_samples();
+                const int lhs_nc = lhs.size() / lhs_nr;
+                const int rhs_nr = rhs.num_samples();
+                const int rhs_nc = rhs.size() / rhs_nr;
+                if (trans_lhs && trans_rhs)
+                {
+                    DLIB_ASSERT(dest_nr == lhs_nc &&
+                        dest_nc == rhs_nr &&
+                        lhs_nr == rhs_nc)
+                }
+                else if (!trans_lhs && trans_rhs)
+                {
+                    DLIB_ASSERT(dest_nr == lhs_nr &&
+                        dest_nc == rhs_nr &&
+                        lhs_nc == rhs_nc)
+                }
+                else if (trans_lhs && !trans_rhs)
+                {
+                    DLIB_ASSERT(dest_nr == lhs_nc &&
+                        dest_nc == rhs_nc &&
+                        lhs_nr == rhs_nr)
+                }
+                else
+                {
+                    DLIB_ASSERT(dest_nr == lhs_nr &&
+                        dest_nc == rhs_nc &&
+                        lhs_nc == rhs_nr)
+                }
+
+                const int k = trans_rhs ? rhs_nc : rhs_nr;
+                CHECK_CUBLAS(cublasSgemm(context(),
+                    transb,
+                    transa,
+                    dest_nc, dest_nr, k,
+                    &alpha,
+                    rhs.device(), rhs_nc,
+                    lhs.device(), lhs_nc,
+                    &beta,
+                    dest.device(), dest_nc));
+            }
+            else if (g_mode == tt::gemm_mode::PLANE_WISE)
+            {
+                const auto transa = trans_lhs ? CUBLAS_OP_T : CUBLAS_OP_N;
+                const auto transb = trans_rhs ? CUBLAS_OP_T : CUBLAS_OP_N;
+
+                long num_samples = std::max({ lhs.num_samples(), rhs.num_samples(), dest.num_samples() });
+                long num_channels = std::max({ lhs.k(), rhs.k(), dest.k() });
+
+                auto is_matrix = [](const auto& tensor) {
+                    return (tensor.num_samples() == 1 && tensor.k() == 1) ||
+                        (tensor.nr() == 1 && tensor.nc() == 1);
+                    };
+                const bool lhs_is_matrix = is_matrix(lhs), rhs_is_matrix = is_matrix(rhs), dest_is_matrix = is_matrix(dest);
+
+                if (lhs_is_matrix && rhs_is_matrix && dest_is_matrix) {
+                    num_samples = num_channels = 1;
+                }
+                else {
+                    auto adjust = [&](const auto& tensor) {
+                        if (!is_matrix(tensor)) {
+                            if (tensor.num_samples() < num_samples) num_samples = tensor.num_samples();
+                            if (tensor.k() < num_channels) num_channels = tensor.k();
+                        }
+                        };
+                    adjust(lhs);
+                    adjust(rhs);
+                    adjust(dest);
+                }
+
+                long lhs_rows = (lhs_is_matrix && lhs.num_samples() > 1) ? lhs.num_samples() : lhs.nr();
+                long lhs_cols = (lhs_is_matrix && lhs.k() > 1) ? lhs.k() : lhs.nc();
+                long rhs_rows = (rhs_is_matrix && rhs.num_samples() > 1) ? rhs.num_samples() : rhs.nr();
+                long rhs_cols = (rhs_is_matrix && rhs.k() > 1) ? rhs.k() : rhs.nc();
+                long dest_rows = (dest_is_matrix && dest.num_samples() > 1) ? dest.num_samples() : dest.nr();
+                long dest_cols = (dest_is_matrix && dest.k() > 1) ? dest.k() : dest.nc();
+
+                const size_t lhs_plane_size = lhs_rows * lhs_cols;
+                const size_t rhs_plane_size = rhs_rows * rhs_cols;
+                const size_t dest_plane_size = dest_rows * dest_cols;
+
+                for (long b = 0; b < num_samples; ++b)
+                {
+                    for (long c = 0; c < num_channels; ++c)
+                    {
+                        auto lhs_slice = lhs_is_matrix ? lhs.device() :
+                            lhs.device() + (b * num_channels + c) * lhs_plane_size;
+                        auto rhs_slice = rhs_is_matrix ? rhs.device() :
+                            rhs.device() + (b * num_channels + c) * rhs_plane_size;
+                        auto dest_slice = dest_is_matrix ? dest.device() :
+                            dest.device() + (b * num_channels + c) * dest_plane_size;
+                        const int k = trans_rhs ? rhs_cols : rhs_rows;
+
+                        cublasSgemm(
+                            context(), transb, transa, dest_cols, dest_rows, k,
+                            &alpha, rhs_slice, rhs_cols, lhs_slice, lhs_cols,
+                            &beta, dest_slice, dest_cols
+                        );
+                    }
                 }
             }
+        }
+
+        void softmax(
+            tensor& dest,
+            const tensor& src,
+            size_t s_mode
+        )
+        {
+            DLIB_CASSERT(have_same_dimensions(dest, src));
+            if (src.size() == 0)
+                return;
+
+            const float alpha = 1;
+            const float beta = 0;
+            const int mode = (s_mode == 0) ? CUDNN_SOFTMAX_MODE_CHANNEL : CUDNN_SOFTMAX_MODE_INSTANCE;
+
+            CHECK_CUDNN(cudnnSoftmaxForward(context(),
+                CUDNN_SOFTMAX_ACCURATE,
+                mode,
+                &alpha,
+                descriptor(src),
+                src.device(),
+                &beta,
+                descriptor(dest),
+                dest.device()));
+        }
+
+
+        void softmax_gradient(
+            tensor& grad,
+            const tensor& dest,
+            const tensor& gradient_input,
+            size_t s_mode
+        )
+        {
+            DLIB_CASSERT(
+                have_same_dimensions(dest, gradient_input) == true &&
+                have_same_dimensions(dest, grad) == true);
+            if (dest.size() == 0)
+                return;
+
+            const float alpha = 1;
+            const float beta = is_same_object(grad, gradient_input) ? 0 : 1;
+            const int mode = (s_mode == 0) ? CUDNN_SOFTMAX_MODE_CHANNEL : CUDNN_SOFTMAX_MODE_INSTANCE;
+
+            CHECK_CUDNN(cudnnSoftmaxBackward(context(),
+                CUDNN_SOFTMAX_ACCURATE,
+                mode,
+                &alpha,
+                descriptor(dest),
+                dest.device(),
+                descriptor(gradient_input),
+                gradient_input.device(),
+                &beta,
+                descriptor(grad),
+                grad.device()));
         }
     }
 #endif
@@ -1008,14 +1116,25 @@ namespace dlib {
                 - embs.k() > 0
                 - embs.nr() == 1
                 - embs.nc() == 1
+                - dest.num_samples() == src.num_samples()
+                - dest.k() == src.k()
+                - dest.nr() == src.nr()
+                - dest.nc() == embs.k()
             ensures
-                - Projects tokens from the input tensor `src` into embeddings stored in `emb`.
+                - Projects tokens from the input tensor `src` into embeddings stored in `embs`.
                 - The resulting embeddings are stored in the `dest` tensor.
-                - For all valid s, k, r, c:
-                    - If src(s,k,r,0) < embs.num_samples():
-                        - #dest(s,k,r,c) == embs(src(s,k,r,0), c, 0, 0)
+                - For all valid s (0 <= s < dest.num_samples()),
+                               k (0 <= k < dest.k()),
+                               r (0 <= r < dest.nr()),
+                               c (0 <= c < dest.nc()):
+                    - Let token_idx = static_cast<unsigned long>(src(s,k,r,0))
+                    - If token_idx < embs.num_samples():
+                        - #dest(s,k,r,c) == embs(token_idx, c, 0, 0)
                     - Else:
-                        - #dest(s,k,r,c) == 0
+                        - #dest(s,k,r,c) == 1
+                - The function iterates over all elements of src and populates dest accordingly.
+                - If a token index in src is out of range (>= embs.num_samples()),
+                  the corresponding embedding in dest is filled with 1's instead of 0's.
         */
 
         void embeddings_gradient(
@@ -1038,8 +1157,17 @@ namespace dlib {
                 - embs.nr() == 1
                 - embs.nc() == 1
             ensures
-                - Updates the `embs` tensor based on the gradients.
-                - If scale is true, scales the gradient by the frequency of the tokens.
+                - Updates the `embs` tensor based on the gradients in `gradient_input`.
+                - For each sample s, channel k, and row r in prev:
+                    - Retrieves the token index from prev[s,k,r]
+                    - If the token index is valid (< embs.num_samples()):
+                        - If scale is true:
+                            - Computes a frequency scale factor based on freqs[token_idx]
+                            - The scale factor is min(0.15, max(2.0 * (1.0 / (1.0 + freqs[token_idx])), 1.0))
+                        - For each column c in gradient_input:
+                            - Updates embs[token_idx, c] -= gradient_input[s,k,r,c] * rate * freq_scale
+                - The updates to embs are performed atomically to handle concurrent updates to the same embedding.
+                - The function is thread-safe and processes samples in parallel.
         */
         
         void apply_positional_encoding(
@@ -1216,26 +1344,26 @@ namespace dlib {
         )
         {
 #ifdef DLIB_USE_CUDA
-            cpu::embeddings_gradient(prev, gradient_input, embs, freqs, rate, scale);
+            cuda::embeddings_gradient(prev, gradient_input, embs, freqs, rate, scale);
 #else
             cpu::embeddings_gradient(prev, gradient_input, embs, freqs, rate, scale);
 #endif
         }
 
-        void softmax2(
+        void softmax(
             tensor& dest,
             const tensor& src,
             size_t s_mode = 0
         )
         {
 #ifdef DLIB_USE_CUDA
-            cpu::softmax2(dest, src, s_mode);
+            cuda::softmax(dest, src, s_mode);
 #else
-            cpu::softmax2(dest, src, s_mode);
+            cpu::softmax(dest, src, s_mode);
 #endif
         }
 
-        void softmax_gradient2(
+        void softmax_gradient(
             tensor& grad,
             const tensor& dest,
             const tensor& gradient_input,
@@ -1243,110 +1371,124 @@ namespace dlib {
         )
         {
 #ifdef DLIB_USE_CUDA
-            cpu::softmax_gradient2(grad, dest, gradient_input, s_mode);
+            cuda::softmax_gradient(grad, dest, gradient_input, s_mode);
 #else
-            cpu::softmax_gradient2(grad, dest, gradient_input, s_mode);
+            cpu::softmax_gradient(grad, dest, gradient_input, s_mode);
 #endif
         }
 
-        void c_gemm(
+        enum gemm_mode { CHANNEL_WISE = 0, PLANE_WISE = 1 };
+
+        void gemm(
             float beta,
             tensor& dest,
             float alpha,
             const tensor& lhs,
             bool trans_lhs,
             const tensor& rhs,
-            bool trans_rhs
+            bool trans_rhs,
+            gemm_mode g_mode = CHANNEL_WISE
         )
         {
 #ifdef DLIB_USE_CUDA
-            cuda::c_gemm(beta, dest, alpha, lhs, trans_lhs, rhs, trans_rhs);
+            cuda::gemm(beta, dest, alpha, lhs, trans_lhs, rhs, trans_rhs, g_mode);
 #else
-            auto is_matrix = [](const auto& tensor) {
-                return (tensor.num_samples() == 1 && tensor.k() == 1) ||
-                    (tensor.nr() == 1 && tensor.nc() == 1);
-            };
-
-            long num_samples = std::max({ lhs.num_samples(), rhs.num_samples(), dest.num_samples() });
-            long num_channels = std::max({ lhs.k(), rhs.k(), dest.k() });
-            const bool lhs_is_matrix = is_matrix(lhs), rhs_is_matrix = is_matrix(rhs), dest_is_matrix = is_matrix(dest);
-
-            if (lhs_is_matrix && rhs_is_matrix && dest_is_matrix) {
-                num_samples = num_channels = 1;
-            }
-            else
+            if (g_mode == CHANNEL_WISE)
             {
-                auto adjust = [&](const auto& tensor) {
-                    if (!is_matrix(tensor)) {
-                        if (tensor.num_samples() < num_samples) num_samples = tensor.num_samples();
-                        if (tensor.k() < num_channels) num_channels = tensor.k();
-                    }
-                };
-                adjust(lhs);
-                adjust(rhs);
-                adjust(dest);                
-            }
-
-            long lhs_rows = (lhs_is_matrix && lhs.num_samples() > 1) ? lhs.num_samples() : lhs.nr();
-            long lhs_cols = (lhs_is_matrix && lhs.k() > 1) ? lhs.k() : lhs.nc();
-            long rhs_rows = (rhs_is_matrix && rhs.num_samples() > 1) ? rhs.num_samples() : rhs.nr();
-            long rhs_cols = (rhs_is_matrix && rhs.k() > 1) ? rhs.k() : rhs.nc();
-            long dest_rows = (dest_is_matrix && dest.num_samples() > 1) ? dest.num_samples() : dest.nr();
-            long dest_cols = (dest_is_matrix && dest.k() > 1) ? dest.k() : dest.nc();
-
-            /*if (trans_lhs) std::swap(lhs_rows, lhs_cols);
-            if (trans_rhs) std::swap(rhs_rows, rhs_cols);
-
-            DLIB_CASSERT((!rhs_is_matrix && num_samples == rhs.num_samples()) || rhs_is_matrix, "Batch dimensions must match");
-            DLIB_CASSERT((!rhs_is_matrix && num_channels == rhs.k()) || rhs_is_matrix, "Channel dimensions must match");
-            DLIB_CASSERT(lhs_cols == rhs_rows, "Inner dimensions must match for matrix multiplication");
-            DLIB_CASSERT((!dest_is_matrix && 
-                num_samples == dest.num_samples() &&
-                num_channels == dest.k() &&
-                lhs_rows == dest.nr() &&
-                rhs_cols == dest.nc()) || (dest_is_matrix &&
-                ((dest.num_samples() == lhs_rows && dest.k() == rhs_cols) ||
-                 (dest.nr() == lhs_rows && dest.nc() == rhs_cols))), "Incompatible destination tensor");
-
-            if (trans_lhs) std::swap(lhs_rows, lhs_cols);
-            if (trans_rhs) std::swap(rhs_rows, rhs_cols);*/
-
-            const size_t lhs_plane_size = lhs_rows * lhs_cols;
-            const size_t rhs_plane_size = rhs_rows * rhs_cols;
-            const size_t dest_plane_size = dest_rows * dest_cols;
-
-            for (long b = 0; b < num_samples; ++b)
-            {
-                for (long c = 0; c < num_channels; ++c)
+                if (beta != 0)
                 {
-                    auto lhs_slice = lhs_is_matrix ? alias_tensor(lhs_rows, lhs_cols)(lhs, 0) :
-                        alias_tensor(lhs_rows, lhs_cols)(lhs, (b * num_channels + c) * lhs_plane_size);
-                    auto rhs_slice = rhs_is_matrix ? alias_tensor(rhs_rows, rhs_cols)(rhs, 0) :
-                        alias_tensor(rhs_rows, rhs_cols)(rhs, (b * num_channels + c) * rhs_plane_size);
-                    auto dest_slice = dest_is_matrix ? alias_tensor(dest_rows, dest_cols)(dest, 0) :
-                        alias_tensor(dest_rows, dest_cols)(dest, (b * num_channels + c) * dest_plane_size);
-
-                    if (beta != 0)
-                    {
-                        if (trans_lhs && trans_rhs)
-                            dest_slice = alpha * trans(mat(lhs_slice)) * trans(mat(rhs_slice)) + beta * mat(dest_slice);
-                        else if (!trans_lhs && trans_rhs)
-                            dest_slice = alpha * mat(lhs_slice) * trans(mat(rhs_slice)) + beta * mat(dest_slice);
-                        else if (trans_lhs && !trans_rhs)
-                            dest_slice = alpha * trans(mat(lhs_slice)) * mat(rhs_slice) + beta * mat(dest_slice);
-                        else
-                            dest_slice = alpha * mat(lhs_slice) * mat(rhs_slice) + beta * mat(dest_slice);
-                    }
+                    if (trans_lhs && trans_rhs)
+                        dest = alpha * trans(mat(lhs)) * trans(mat(rhs)) + beta * mat(dest);
+                    else if (!trans_lhs && trans_rhs)
+                        dest = alpha * mat(lhs) * trans(mat(rhs)) + beta * mat(dest);
+                    else if (trans_lhs && !trans_rhs)
+                        dest = alpha * trans(mat(lhs)) * mat(rhs) + beta * mat(dest);
                     else
+                        dest = alpha * mat(lhs) * mat(rhs) + beta * mat(dest);
+                }
+                else
+                {
+                    if (trans_lhs && trans_rhs)
+                        dest = alpha * trans(mat(lhs)) * trans(mat(rhs));
+                    else if (!trans_lhs && trans_rhs)
+                        dest = alpha * mat(lhs) * trans(mat(rhs));
+                    else if (trans_lhs && !trans_rhs)
+                        dest = alpha * trans(mat(lhs)) * mat(rhs);
+                    else
+                        dest = alpha * mat(lhs) * mat(rhs);
+                }
+            }
+            else if (g_mode == PLANE_WISE)
+            {
+                auto is_matrix = [](const auto& tensor) {
+                    return (tensor.num_samples() == 1 && tensor.k() == 1) ||
+                        (tensor.nr() == 1 && tensor.nc() == 1);
+                    };
+
+                long num_samples = std::max({ lhs.num_samples(), rhs.num_samples(), dest.num_samples() });
+                long num_channels = std::max({ lhs.k(), rhs.k(), dest.k() });
+                const bool lhs_is_matrix = is_matrix(lhs), rhs_is_matrix = is_matrix(rhs), dest_is_matrix = is_matrix(dest);
+
+                if (lhs_is_matrix && rhs_is_matrix && dest_is_matrix) {
+                    num_samples = num_channels = 1;
+                }
+                else
+                {
+                    auto adjust = [&](const auto& tensor) {
+                        if (!is_matrix(tensor)) {
+                            if (tensor.num_samples() < num_samples) num_samples = tensor.num_samples();
+                            if (tensor.k() < num_channels) num_channels = tensor.k();
+                        }
+                        };
+                    adjust(lhs);
+                    adjust(rhs);
+                    adjust(dest);
+                }
+
+                long lhs_rows = (lhs_is_matrix && lhs.num_samples() > 1) ? lhs.num_samples() : lhs.nr();
+                long lhs_cols = (lhs_is_matrix && lhs.k() > 1) ? lhs.k() : lhs.nc();
+                long rhs_rows = (rhs_is_matrix && rhs.num_samples() > 1) ? rhs.num_samples() : rhs.nr();
+                long rhs_cols = (rhs_is_matrix && rhs.k() > 1) ? rhs.k() : rhs.nc();
+                long dest_rows = (dest_is_matrix && dest.num_samples() > 1) ? dest.num_samples() : dest.nr();
+                long dest_cols = (dest_is_matrix && dest.k() > 1) ? dest.k() : dest.nc();
+
+                const size_t lhs_plane_size = lhs_rows * lhs_cols;
+                const size_t rhs_plane_size = rhs_rows * rhs_cols;
+                const size_t dest_plane_size = dest_rows * dest_cols;
+
+                for (long b = 0; b < num_samples; ++b)
+                {
+                    for (long c = 0; c < num_channels; ++c)
                     {
-                        if (trans_lhs && trans_rhs)
-                            dest_slice = alpha * trans(mat(lhs_slice)) * trans(mat(rhs_slice));
-                        else if (!trans_lhs && trans_rhs)
-                            dest_slice = alpha * mat(lhs_slice) * trans(mat(rhs_slice));
-                        else if (trans_lhs && !trans_rhs)
-                            dest_slice = alpha * trans(mat(lhs_slice)) * mat(rhs_slice);
+                        auto lhs_slice = lhs_is_matrix ? alias_tensor(lhs_rows, lhs_cols)(lhs, 0) :
+                            alias_tensor(lhs_rows, lhs_cols)(lhs, (b * num_channels + c) * lhs_plane_size);
+                        auto rhs_slice = rhs_is_matrix ? alias_tensor(rhs_rows, rhs_cols)(rhs, 0) :
+                            alias_tensor(rhs_rows, rhs_cols)(rhs, (b * num_channels + c) * rhs_plane_size);
+                        auto dest_slice = dest_is_matrix ? alias_tensor(dest_rows, dest_cols)(dest, 0) :
+                            alias_tensor(dest_rows, dest_cols)(dest, (b * num_channels + c) * dest_plane_size);
+
+                        if (beta != 0)
+                        {
+                            if (trans_lhs && trans_rhs)
+                                dest_slice = alpha * trans(mat(lhs_slice)) * trans(mat(rhs_slice)) + beta * mat(dest_slice);
+                            else if (!trans_lhs && trans_rhs)
+                                dest_slice = alpha * mat(lhs_slice) * trans(mat(rhs_slice)) + beta * mat(dest_slice);
+                            else if (trans_lhs && !trans_rhs)
+                                dest_slice = alpha * trans(mat(lhs_slice)) * mat(rhs_slice) + beta * mat(dest_slice);
+                            else
+                                dest_slice = alpha * mat(lhs_slice) * mat(rhs_slice) + beta * mat(dest_slice);
+                        }
                         else
-                            dest_slice = alpha * mat(lhs_slice) * mat(rhs_slice);
+                        {
+                            if (trans_lhs && trans_rhs)
+                                dest_slice = alpha * trans(mat(lhs_slice)) * trans(mat(rhs_slice));
+                            else if (!trans_lhs && trans_rhs)
+                                dest_slice = alpha * mat(lhs_slice) * trans(mat(rhs_slice));
+                            else if (trans_lhs && !trans_rhs)
+                                dest_slice = alpha * trans(mat(lhs_slice)) * mat(rhs_slice);
+                            else
+                                dest_slice = alpha * mat(lhs_slice) * mat(rhs_slice);
+                        }
                     }
                 }
             }
@@ -1885,27 +2027,23 @@ namespace dlib {
     using positional_embeddings = positional_encodings<htan<embeddings<nb_embeddings, embedding_length, tag10<SUBNET>>>>;
 
     enum linear_bias_mode { LINEAR_HAS_BIAS = 0, LINEAR_NO_BIAS = 1 };
-    struct num_linear_outputs
-    {
-        num_linear_outputs(unsigned long n) : num_outputs(n) {}
-        unsigned long num_outputs;
-    };
+ 
     template <unsigned long num_outputs_, linear_bias_mode bias_mode_>
     class linear_
     {
         static_assert(num_outputs_ > 0, "The number of outputs from a linear_ layer must be > 0");
 
     public:
-        linear_(num_linear_outputs o) :
-            num_outputs(o.num_outputs),
+        linear_() :
+            num_outputs(num_outputs_),
             num_inputs(0),
             learning_rate_multiplier(1),
             bias_mode(bias_mode_) {}
-        linear_() : linear_(num_linear_outputs(num_outputs_)) {}
 
         double get_learning_rate_multiplier() const { return learning_rate_multiplier; }
         void set_learning_rate_multiplier(double val) { learning_rate_multiplier = val; }
 
+        unsigned long get_num_inputs() const { return num_inputs; }
         unsigned long get_num_outputs() const { return num_outputs; }
         void set_num_outputs(long num)
         {
@@ -1946,7 +2084,7 @@ namespace dlib {
 
             output.set_size(prev_output.num_samples(), prev_output.k(), prev_output.nr(), num_outputs);
             auto w = weights(params, 0);
-            tt::c_gemm(0, output, 1, prev_output, false, w, false);            
+            tt::gemm(0, output, 1, prev_output, false, w, false, tt::gemm_mode::PLANE_WISE);
 
             if (bias_mode == LINEAR_HAS_BIAS)
             {
@@ -1968,7 +2106,7 @@ namespace dlib {
         {
             if (learning_rate_multiplier != 0) {
                 auto pw = weights(params_grad, 0);
-                tt::c_gemm(0, pw, learning_rate_multiplier, sub.get_output(), true, gradient_input, false);
+                tt::gemm(0, pw, learning_rate_multiplier, sub.get_output(), true, gradient_input, false, tt::gemm_mode::PLANE_WISE);
                 if (bias_mode == LINEAR_HAS_BIAS)
                 {
                     auto pb = biases(params_grad, weights.size());
@@ -1985,7 +2123,7 @@ namespace dlib {
             }
 
             auto w = weights(params, 0);
-            tt::c_gemm(1, sub.get_gradient_input(), 1, gradient_input, false, w, true);
+            tt::gemm(1, sub.get_gradient_input(), 1, gradient_input, false, w, true, tt::gemm_mode::PLANE_WISE);
         }
 
         alias_tensor_instance get_weights() { return weights(params, 0); }
@@ -2408,7 +2546,7 @@ namespace dlib {
             auto& t2 = layer<tag>(sub).subnet().get_output();
             output.set_size(t1.num_samples(), t1.k(), t1.nr(), t2.nc());
 
-            tt::c_gemm(0, output, 1, t1, false, t2, false);
+            tt::gemm(0, output, 1, t1, false, t2, false, tt::gemm_mode::PLANE_WISE);
         }
 
         template <typename SUBNET>
@@ -2418,8 +2556,8 @@ namespace dlib {
             auto& prev = sub.get_gradient_input();
             auto& prev_tag = layer<tag>(sub).get_gradient_input();            
 
-            tt::c_gemm(1, prev, 1, gradient_input, false, t2, true);
-            tt::c_gemm(1, prev_tag, 1, t1, true, gradient_input, false);
+            tt::gemm(1, prev, 1, gradient_input, false, t2, true, tt::gemm_mode::PLANE_WISE);
+            tt::gemm(1, prev_tag, 1, t1, true, gradient_input, false, tt::gemm_mode::PLANE_WISE);
         }
 
         const tensor& get_layer_params() const { return params; }
@@ -2485,7 +2623,7 @@ namespace dlib {
 
         void forward_inplace(const tensor& input, tensor& output)
         {
-            tt::softmax2(output, input, s_mode_);
+            tt::softmax(output, input, s_mode_);
         }
 
         void backward_inplace(
@@ -2495,7 +2633,7 @@ namespace dlib {
             tensor& /*params_grad*/
         )
         {
-            tt::softmax_gradient2(data_grad, computed_output, gradient_input, s_mode_);
+            tt::softmax_gradient(data_grad, computed_output, gradient_input, s_mode_);
         }
 
         const tensor& get_layer_params() const { return params; }
@@ -2550,9 +2688,9 @@ namespace dlib {
     template <int embedding_dim, int nb_heads, typename SUBNET>
     using multihead_attention_block =
         add_prev3<
-        //linear<embedding_dim,
-        cont<1, 1, nb_heads, 1, nb_heads,
-        //hstack<
+        linear<embedding_dim,
+        //cont<1, 1, nb_heads, 1, nb_heads,
+        hstack<
         multm_prev1<
         dropout_10<softmaxm<
         tril_mask<
@@ -2564,7 +2702,7 @@ namespace dlib {
         tag2<transpose<key<nb_heads, embedding_dim, skip3<
         //tag1<hsplit<nb_heads, value<embedding_dim,
         tag1<value<nb_heads, embedding_dim,
-        tag3<SUBNET>>>>>>>>>>>>>>>>>;
+        tag3<SUBNET>>>>>>>>>>>>>>>>>>;
         //tag3<SUBNET>>>>>>>>>>>>>>>>>>>>>;
 
     // Feedforward blocks
@@ -3235,16 +3373,16 @@ int main(int argc, char* argv[]) {
     if (do_benchmark) {
         const bool display_debug_info = false;
         const bool skip_tests[] = {
-            true,      // 0: strings & tokenization
-            true,      // 1: transpose layer
-            true,      // 2: tril layer
-            true,      // 3: positional_encodings layer
+            false,      // 0: strings & tokenization
+            false,      // 1: transpose layer
+            false,      // 2: tril layer
+            false,      // 3: positional_encodings layer
             false,      // 4: embeddings layer
-            true,      // 5: softmax layer
-            true,      // 6: attention mechanism
-            true,      // 7: linear layer            
+            false,      // 5: softmax layer
+            false,      // 6: attention mechanism
+            false,      // 7: linear layer         
             true,      // 8: hsplit/hstack layers
-            true,      // 9: rms_norm layer
+            false,      // 9: rms_norm layer
             true,      // 10: multihead attention model
             false       // 11: "shakespeare" example
         };
@@ -3346,7 +3484,6 @@ int main(int argc, char* argv[]) {
                 net_type net;
 
                 // Input tensor
-                const float NEG_INF = -std::numeric_limits<float>::infinity();
                 dlib::rand rnd;
                 const long nr = 2, nc = 3;
                 const int n_samples = 3, k = 1;
@@ -3356,7 +3493,7 @@ int main(int argc, char* argv[]) {
                     for (int jj = 0; jj < nr; ++jj)
                         for (int kk = 0; kk < nc; ++kk) {
                             float r = rnd.get_random_gaussian();
-                            if (r > 1 || r < -1) r = NEG_INF;
+                            if (r > 1 || r < -1) r = -std::numeric_limits<float>::infinity();
                             xtmp(jj, kk) = r;
                         }
                     x[ii] = xtmp;
@@ -3377,7 +3514,7 @@ int main(int argc, char* argv[]) {
                         bool all_neg_inf = true;
                         for (int kk = 0; kk < nc; ++kk) {
                             m(0, kk) = input_tensor.host()[tensor_index(input_tensor, ii, 0, jj, kk)];
-                            if (m(0, kk) > NEG_INF) all_neg_inf = false;
+                            if (m(0, kk) > -std::numeric_limits<float>::infinity()) all_neg_inf = false;
                         }
 
                         matrix<float> r(1, nc);
@@ -3851,6 +3988,7 @@ Be all my sins remembered.)";
                     net_b.clean();
                     serialize("llm_shakespeare_model_b.dat") << net_b;
                     cout << "advanced shakespeare model saved: llm_shakespeare_model_b.dat" << endl;
+                    cout << "advanced shakespeare model parameters: " << count_parameters(net_b) << endl;
 
                     // Attempting to generate a new sonnet
                     string sonnet_start = "Shall I compare thee to a winter's night?";

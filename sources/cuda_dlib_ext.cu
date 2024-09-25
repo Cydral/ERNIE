@@ -426,8 +426,7 @@ namespace dlib
                 row_stride, col_stride, add_to);
         }
 
-        __global__ void _cuda_embeddings(
-            size_t ssize, size_t ns, size_t nk, size_t nr, size_t nc,
+        __global__ void _cuda_embeddings(size_t ssize, size_t ns, size_t nk, size_t nr, size_t nc,
             float* d, const float* s, const float* e, size_t es
         )
         {
@@ -448,7 +447,7 @@ namespace dlib
                 }
                 else
                 {
-                    for (long c = 0; c < nc; ++c) d[base_idx + c] = 1;
+                    for (long c = 0; c < nc; ++c) d[base_idx + c] = 0;
                 }
             }
         }
@@ -484,6 +483,40 @@ namespace dlib
                 dest.device(), src.device(), embs.device(), embs.num_samples());
         }
 
+        __global__ void _cuda_embeddings_gradient(size_t ssize, size_t ns, size_t nk, size_t nr, size_t nc,
+            const float* prev, const float* gradient_input, float* embs, const float* freqs,
+            double rate, bool scale, size_t es
+        )
+        {
+            for (auto i : grid_stride_range_y(0, ssize))
+            {
+                const size_t nk_nr = nk * nr;
+                const auto p_idx = i / nk_nr;
+                const auto k = (i % nk_nr) / nr;
+                const auto r = i % nr;
+
+                const unsigned long t_idx = static_cast<unsigned long>(prev[p_idx * nk_nr + k * nr + r]);
+                if (t_idx < es)
+                {
+                    float freq_scale = 1.0f;
+                    if (scale)
+                    {
+                        float ft = 1.0f + freqs[token_idx];
+                        freq_scale = fminf(0.15f, fmaxf(2.0f * (1.0f / ft), 1.0f));
+                    }
+                    
+                    const size_t base_idx = t_idx * nc;
+                    const size_t grad_base_idx = s * nk * nr * nc + k * nr * nc + r * nc;
+
+                    for (long c = 0; c < nc; c++)
+                    {
+                        const float gradient = gradient_input[grad_base_idx + c];
+                        atomicAdd(&embs[base_idx + c], -gradient * rate * freq_scale);
+                    }
+                }
+            }
+        }
+
         void embeddings_gradient(
             const tensor& prev,
             const tensor& gradient_input,
@@ -516,6 +549,14 @@ namespace dlib
                 "\nembs.nr(): " << embs.nr() <<
                 "\nembs.nc(): " << embs.nc()
             );
+            
+            const long ns = gradient_input.num_samples();
+            const long nk = gradient_input.k();
+            const long nr = gradient_input.nr();
+            const long nc = gradient_input.nc();
+
+            launch_kernel(_cuda_embeddings_gradient, ns * nk * nr, ns, nk, nr, nc,
+                prev.device(), gradient_input.device(), embs.device(), freqs.device(), rate, scale, embs.num_samples());
         }
 
         __global__ void batch_multiply_kernel(
