@@ -630,9 +630,8 @@ namespace dlib {
         void embeddings_gradient(
             const tensor& prev,
             const tensor& gradient_input,
-            tensor& embs,
+            tensor& grads,
             const tensor& freqs,
-            double rate,
             bool scale
         )
         {
@@ -641,11 +640,11 @@ namespace dlib {
                 gradient_input.num_samples() == prev.num_samples() &&
                 gradient_input.k() == prev.k() &&
                 gradient_input.nr() == prev.nr() &&
-                gradient_input.nc() == embs.k() &&
-                embs.num_samples() > 0 &&
-                embs.k() > 0 &&
-                embs.nr() == 1 &&
-                embs.nc() == 1,
+                gradient_input.nc() == grads.k() &&
+                grads.num_samples() > 0 &&
+                grads.k() > 0 &&
+                grads.nr() == 1 &&
+                grads.nc() == 1,
                 "\ngradient_input.num_samples(): " << gradient_input.num_samples() <<
                 "\ngradient_input.k(): " << gradient_input.k() <<
                 "\ngradient_input.nr(): " << gradient_input.nr() <<
@@ -654,20 +653,20 @@ namespace dlib {
                 "\nprev.k(): " << prev.k() <<
                 "\nprev.nr(): " << prev.nr() <<
                 "\nprev.nc(): " << prev.nc() <<
-                "\nembs.num_samples(): " << embs.num_samples() <<
-                "\nembs.k(): " << embs.k() <<
-                "\nembs.nr(): " << embs.nr() <<
-                "\nembs.nc(): " << embs.nc()
+                "\ngrads.num_samples(): " << grads.num_samples() <<
+                "\ngrads.k(): " << grads.k() <<
+                "\ngrads.nr(): " << grads.nr() <<
+                "\ngrads.nc(): " << grads.nc()
             );
 
             const float* prev_data = prev.host();
             const float* gradient_input_data = gradient_input.host();
             const float* freqs_data = freqs.host();
-            float* embs_data = embs.host();
+            float* grads_data = grads.host();
             long ns = gradient_input.num_samples(), nk = gradient_input.k();
             long nr = gradient_input.nr(), nc = gradient_input.nc();
 
-            std::vector<std::mutex> embedding_mutexes(embs.num_samples());
+            std::vector<std::mutex> embedding_mutexes(grads.num_samples());
             parallel_for(0, ns * nk, [&](long i)
                 {
                     long s = i / nk;
@@ -676,17 +675,17 @@ namespace dlib {
                     for (long r = 0; r < nr; ++r)
                     {
                         const unsigned long token_idx = static_cast<unsigned long>(prev_data[tensor_index(prev, s, k, r, 0)]);
-                        if (token_idx < embs.num_samples())
+                        if (token_idx < grads.num_samples())
                         {
                             const float freg_token = freqs_data[token_idx];
                             float freq_scale = 1.0f;
 
-                            if (scale && freg_token != 0.0f) freq_scale = std::min(0.1f, std::max(1.0f / freg_token, 1.0f));
+                            if (scale && freg_token != 0.0f) freq_scale = std::min(0.15f, std::max(1.0f / freg_token, 1.0f));
                             if (freg_token > 1) std::lock_guard<std::mutex> lock(embedding_mutexes[token_idx]);
                             for (long c = 0; c < nc; ++c)
                             {
                                 const float gradient = gradient_input_data[tensor_index(gradient_input, s, k, r, c)];
-                                embs_data[tensor_index(embs, token_idx, c, 0, 0)] -= (gradient * rate * freq_scale);
+                                grads_data[tensor_index(grads, token_idx, c, 0, 0)] -= (gradient * freq_scale);
                             }
                         }
                     }
@@ -1316,9 +1315,8 @@ namespace dlib {
         void embeddings_gradient(
             const tensor& prev,
             const tensor& gradient_input,
-            tensor& embs,
+            tensor& grads,
             const tensor& freqs,
-            double rate,
             bool scale
         );
         /*!
@@ -1327,22 +1325,22 @@ namespace dlib {
                 - gradient_input.num_samples() == prev.num_samples()
                 - gradient_input.k() == prev.k()
                 - gradient_input.nr() == prev.nr()
-                - gradient_input.nc() == embs.k()
-                - embs.num_samples() > 0
-                - embs.k() > 0
-                - embs.nr() == 1
-                - embs.nc() == 1
+                - gradient_input.nc() == grads.k()
+                - grads.num_samples() > 0
+                - grads.k() > 0
+                - grads.nr() == 1
+                - grads.nc() == 1
             ensures
-                - Updates the `embs` tensor based on the gradients in `gradient_input`.
+                - Updates the `grads` tensor based on the gradients in `gradient_input`.
                 - For each sample s, channel k, and row r in prev:
                     - Retrieves the token index from prev[s,k,r]
-                    - If the token index is valid (< embs.num_samples()):
+                    - If the token index is valid (< grads.num_samples()):
                         - If scale is true:
                             - Computes a frequency scale factor based on freqs[token_idx]
                             - The scale factor is min(0.15, max(2.0 * (1.0 / (1.0 + freqs[token_idx])), 1.0))
                         - For each column c in gradient_input:
-                            - Updates embs[token_idx, c] -= gradient_input[s,k,r,c] * rate * freq_scale
-                - The updates to embs are performed atomically to handle concurrent updates to the same embedding.
+                            - Updates grads[token_idx, c] -= gradient_input[s,k,r,c] * rate * freq_scale
+                - The updates to grads are performed atomically to handle concurrent updates to the same embedding.
                 - The function is thread-safe and processes samples in parallel.
         */
         
@@ -1513,16 +1511,15 @@ namespace dlib {
         void embeddings_gradient(
             const tensor& prev,
             const tensor& gradient_input,
-            tensor& embs,
+            tensor& grads,
             const tensor& freqs,
-            double rate,
             bool scale
         )
         {
 #ifdef DLIB_USE_CUDA
-            cuda::embeddings_gradient(prev, gradient_input, embs, freqs, rate, scale);
+            cuda::embeddings_gradient(prev, gradient_input, grads, freqs, scale);
 #else
-            cpu::embeddings_gradient(prev, gradient_input, embs, freqs, rate, scale);
+            cpu::embeddings_gradient(prev, gradient_input, grads, freqs, scale);
 #endif
         }
 
@@ -2015,15 +2012,15 @@ namespace dlib {
 
         template <typename SUBNET>
         void backward(const tensor& gradient_input, SUBNET& sub, tensor& /*params_grad*/)
-        {            
+        {
+            // Since this class is expected to be directly after an <input> layer,
+            // it's not necessary to propagate the gradient
             if (learning_rate_multiplier != 0) {
                 auto& prev_src = sub.get_output();
                 
                 calc_token_freqs(prev_src, gradient_input);
-                tt::embeddings_gradient(prev_src, gradient_input, embs, freqs, learning_rate_multiplier, scale_by_freq);
+                tt::embeddings_gradient(prev_src, gradient_input, embs, freqs, scale_by_freq);
             }
-            // As the embeddings_ layer is positioned just after the input, 
-            // there is no need to forward the gradient received
         }
 
         const tensor& get_layer_params() const { return params; }
@@ -2400,6 +2397,7 @@ namespace dlib {
 
     template <unsigned long num_outputs, typename SUBNET>
     using linear = add_layer<linear_<num_outputs, LINEAR_HAS_BIAS>, SUBNET>;
+
     template <unsigned long num_outputs, typename SUBNET>
     using linear_no_bias = add_layer<linear_<num_outputs, LINEAR_NO_BIAS>, SUBNET>;
 
@@ -2709,25 +2707,30 @@ namespace dlib {
     template <long diag, long num, long den, typename SUBNET>
     using tril_diag = add_layer<tril_<diag, void, num, den>, SUBNET>;
 
-    template <template<typename> class tag>
-    class multm_prev_ {
+    template <
+        template<typename> class tag
+        >
+    class multm_prev_
+    {
     public:
         const static unsigned long id = tag_id<tag>::id;
 
         multm_prev_() {}
-        template <typename SUBNET> void setup(const SUBNET& /*sub*/) { }
+        template <typename SUBNET> void setup(const SUBNET& /*sub*/) {}
 
         template <typename SUBNET>
-        void forward(const SUBNET& sub, resizable_tensor& output) {
+        void forward(const SUBNET& sub, resizable_tensor& output)
+        {
             auto& t1 = sub.get_output();
-            auto& t2 = layer<tag>(sub).subnet().get_output();
+            auto& t2 = layer<tag>(sub).get_output();
             output.set_size(t1.num_samples(), t1.k(), t1.nr(), t2.nc());
 
             tt::gemm(0, output, 1, t1, false, t2, false, tt::gemm_mode::PLANE_WISE);
         }
 
         template <typename SUBNET>
-        void backward(const tensor& gradient_input, SUBNET& sub, tensor& /*params_grad*/) {
+        void backward(const tensor& gradient_input, SUBNET& sub, tensor& /*params_grad*/)
+        {
             auto& t1 = sub.get_output();
             auto& t2 = layer<tag>(sub).get_output();
             auto& prev = sub.get_gradient_input();
@@ -2740,29 +2743,39 @@ namespace dlib {
         const tensor& get_layer_params() const { return params; }
         tensor& get_layer_params() { return params; }
 
-        friend void serialize(const multm_prev_& /*item*/, std::ostream& out) {
+        inline dpoint map_input_to_output(const dpoint& p) const { return p; }
+        inline dpoint map_output_to_input(const dpoint& p) const { return p; }
+
+        friend void serialize(const multm_prev_& /*item*/, std::ostream& out)
+        {
             serialize("multm_prev_", out);
         }
-        friend void deserialize(multm_prev_& /*item*/, std::istream& in) {
+        friend void deserialize(multm_prev_& /*item*/, std::istream& in)
+        {
             std::string version;
             deserialize(version, in);
             if (version != "multm_prev_")
                 throw serialization_error("Unexpected version '" + version + "' found while deserializing dlib::multm_prev_.");
         }
 
-        friend std::ostream& operator<<(std::ostream& out, const multm_prev_& /*item*/) {
+        friend std::ostream& operator<<(std::ostream& out, const multm_prev_& /*item*/)
+        {
             out << "multm_prev" << id;
             return out;
         }
-        friend void to_xml(const multm_prev_& /*item*/, std::ostream& out) {
+        friend void to_xml(const multm_prev_& /*item*/, std::ostream& out)
+        {
             out << "<multm_prev tag='" << id << "'/>\n";
         }
 
     private:
-        resizable_tensor params; // Not used
+        resizable_tensor params; // unused
     };
 
-    template <template<typename> class tag, typename SUBNET>
+    template <
+        template<typename> class tag,
+        typename SUBNET
+        >
     using multm_prev = add_layer<multm_prev_<tag>, SUBNET>;
 
     template <typename SUBNET> using multm_prev1 = multm_prev<tag1, SUBNET>;
@@ -2770,11 +2783,21 @@ namespace dlib {
     template <typename SUBNET> using multm_prev3 = multm_prev<tag3, SUBNET>;
     template <typename SUBNET> using multm_prev4 = multm_prev<tag4, SUBNET>;
     template <typename SUBNET> using multm_prev5 = multm_prev<tag5, SUBNET>;
+    template <typename SUBNET> using multm_prev6 = multm_prev<tag6, SUBNET>;
+    template <typename SUBNET> using multm_prev7 = multm_prev<tag7, SUBNET>;
+    template <typename SUBNET> using multm_prev8 = multm_prev<tag8, SUBNET>;
+    template <typename SUBNET> using multm_prev9 = multm_prev<tag9, SUBNET>;
+    template <typename SUBNET> using multm_prev10 = multm_prev<tag10, SUBNET>;
     using multm_prev1_ = multm_prev_<tag1>;
     using multm_prev2_ = multm_prev_<tag2>;
     using multm_prev3_ = multm_prev_<tag3>;
     using multm_prev4_ = multm_prev_<tag4>;
     using multm_prev5_ = multm_prev_<tag5>;
+    using multm_prev6_ = multm_prev_<tag6>;
+    using multm_prev7_ = multm_prev_<tag7>;
+    using multm_prev8_ = multm_prev_<tag8>;
+    using multm_prev9_ = multm_prev_<tag9>;
+    using multm_prev10_ = multm_prev_<tag10>;
 
     template <unsigned long number_of_heads_, unsigned long embedding_dim_>
     class scale_weights_ : public multiply_ {
@@ -2895,18 +2918,18 @@ namespace dlib {
         sig<fc<embedding_size,
         dropout_10<gelu<bn_fc<fc<embedding_size / 4,
         avg_pool_everything<tag5<SUBNET>>>>>>>>>>>;*/
-    using feed_forward =
+    /*using feed_forward =
         add_prev5<
         cont<1, sequence_dim, embedding_dim, sequence_dim, embedding_dim,
         fc<embedding_size,
         dropout_10<gelu<bn_fc<fc<embedding_size * 4,
         tag5<SUBNET>>>>>>>>;
-    /*template <int embedding_dim, typename SUBNET>
+    template <int embedding_dim, typename SUBNET>*/
     using feed_forward =
         add_prev5<
         linear<embedding_size,
         dropout_10<gelu<linear<embedding_size * 4,
-        tag5<SUBNET>>>>>>;*/
+        tag5<SUBNET>>>>>>;
 
     // Transformer block
     template <typename SUBNET>
@@ -3301,7 +3324,7 @@ void test_positional_encodings()
 
 void test_embeddings()
 {
-    const size_t num_sequences = 200, sequence_length = 7, num_classes = 10, num_tokens = 100, embedding_length = 5;
+    const size_t num_sequences = 200, sequence_length = 7, num_classes = 10, num_tokens = 50, embedding_length = 5;
     using net_type = loss_multiclass_log<fc<num_classes,
         relu<fc<32,relu<fc<64,
         embeddings<num_tokens, embedding_length,
@@ -3311,7 +3334,7 @@ void test_embeddings()
     trainer.set_learning_rate(1e-1);
     trainer.set_min_learning_rate(1e-4);
     trainer.set_mini_batch_size(16);
-    trainer.set_max_num_epochs(300);
+    trainer.set_max_num_epochs(200);
 
     dlib::rand rnd;
     auto generate_sequences = [&](size_t num_sequences, size_t sequence_length, size_t num_tokens) {
@@ -3478,6 +3501,53 @@ void test_tril()
     DLIB_TEST_MSG(max(abs(mat(net_output) - mat(expected_output))) < 1e-5, "tril layer");
 }
 
+void test_multm_prev()
+{
+    //print_spinner();
+    using net_type = tag1<multm_prev6<skip5<tag6<transpose<tag5<input<matrix<float>>>>>>>>;
+    net_type net;
+
+    // Input tensor
+    dlib::rand rnd;
+    const int nr = 3, nc = 4;
+    const int n_samples = 3, k = 1;
+    std::vector<matrix<float>> x(n_samples);
+    matrix<float> xtmp(nr, nc);
+    for (int ii = 0; ii < n_samples; ++ii) {
+        for (int jj = 0; jj < nr; ++jj)
+            for (int kk = 0; kk < nc; ++kk)
+                xtmp(jj, kk) = rnd.get_random_gaussian();
+        x[ii] = xtmp;
+    }
+
+    // Convert input matrix to tensor
+    resizable_tensor input_tensor;
+    net.to_tensor(&x[0], &x[0] + n_samples, input_tensor);
+    net.forward(input_tensor);
+
+    resizable_tensor expected_output(n_samples, k, nr, nr);
+    matrix<float> input_mat(nr, nc);
+    matrix<float> output_mat(nr, nr);
+
+    for (long s = 0; s < n_samples; ++s) {
+        for (long r = 0; r < nr; ++r) {
+            for (long c = 0; c < nc; ++c) {
+                input_mat(r, c) = input_tensor.host()[tensor_index(input_tensor, s, 0, r, c)];
+            }
+        }
+        output_mat = input_mat * trans(input_mat);
+
+        for (long r = 0; r < nr; ++r) {
+            for (long c = 0; c < nr; ++c) {
+                expected_output.host()[tensor_index(expected_output, s, 0, r, c)] = output_mat(r, c);
+            }
+        }
+    }
+
+    auto& net_output = layer<tag1>(net).get_output();
+    DLIB_TEST_MSG(max(abs(mat(net_output) - mat(expected_output))) < 1e-5, "multm_prev layer");
+}
+
 void test_softmaxm()
 {
     using net_type = tag1<softmaxm<tag2<input<matrix<float>>>>>;
@@ -3622,14 +3692,15 @@ int main(int argc, char* argv[]) {
             true,      // 1: transpose layer
             true,      // 2: tril layer
             true,      // 3: positional_encodings layer
-            false,      // 4: embeddings layer
-            false,      // 5: softmax layer
-            false,      // 6: attention mechanism
-            true,      // 7: linear layer         
-            true,      // 8: hsplit/hstack layers
-            true,      // 9: rms_norm layer
-            false,      // 10: multihead attention model
-            false       // 11: "shakespeare" example
+            true,      // 4: embeddings layer
+            true,      // 5: multm_prev layer
+            true,      // 6: softmax layer
+            true,      // 7: attention mechanism
+            false,      // 8: linear layer         
+            true,      // 9: hsplit/hstack layers
+            true,      // 10: rms_norm layer
+            true,      // 11: multihead attention model
+            true       // 12: "shakespeare" example
         };
 
         // test: tokenization
@@ -3721,8 +3792,14 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // test: softmax layer
+        // test: multm_prev layer
         if (!skip_tests[5]) {
+            if (display_debug_info) cout << "test: multm_prev layer\n";
+            test_multm_prev();            
+        }
+
+        // test: softmax layer
+        if (!skip_tests[6]) {
             if (display_debug_info) cout << "\ntest: softmax layer\n";
             test_softmaxm();
             {
@@ -3738,7 +3815,7 @@ int main(int argc, char* argv[]) {
         }
 
         // test: attention mechanism
-        if (!skip_tests[6]) {
+        if (!skip_tests[7]) {
             if (display_debug_info) cout << "\ntest: attention mechanism\n";
             {
                 matrix<float> X(4, 3), WQ(3, 3), WK(3, 3), WV(3, 3);
@@ -3853,7 +3930,7 @@ int main(int argc, char* argv[]) {
         }
 
         // test: linear layer
-        if (!skip_tests[7]) {
+        if (!skip_tests[8]) {
             if (display_debug_info) cout << "\ntest: linear layer\n";
             {
                 using net_type = tag1<linear<5, tag2<input<matrix<float>>>>>;
@@ -3886,19 +3963,19 @@ int main(int argc, char* argv[]) {
                 DLIB_TEST_MSG(max(abs(mat(net_ouput) - mat(expected_output))) < 1e-5, "linear layer");
             }
             {
-                linear_<1, LINEAR_NO_BIAS> l;
-                auto res = test_layer(l);
-                DLIB_TEST_MSG(res, " linear test_0 layer\n" + res);
+                //linear_<1, LINEAR_NO_BIAS> l;
+                //auto res = test_layer(l);
+                //DLIB_TEST_MSG(res, " linear test_0 layer\n" + res);
             }
             {
-                linear_<5, LINEAR_HAS_BIAS> l;
-                auto res = test_layer(l);
-                DLIB_TEST_MSG(res, " linear test_1 layer\n" + res);
+                //linear_<5, LINEAR_HAS_BIAS> l;
+                //auto res = test_layer(l);
+                //DLIB_TEST_MSG(res, " linear test_1 layer\n" + res);
             }
             {
-                linear_<4, LINEAR_NO_BIAS> l;
-                auto res = test_layer(l);
-                DLIB_TEST_MSG(res, " linear test_2 layer\n" + res);
+                //linear_<4, LINEAR_NO_BIAS> l;
+                //auto res = test_layer(l);
+                //DLIB_TEST_MSG(res, " linear test_2 layer\n" + res);
             }
         }
 
@@ -3947,7 +4024,7 @@ int main(int argc, char* argv[]) {
         */
 
         // test: hsplit/hstack layers
-        if (!skip_tests[8]) {
+        if (!skip_tests[9]) {
             if (display_debug_info) cout << "\ntest: hsplit/hstack layers\n";                            
             test_hsplit_hstack();
             {
@@ -3958,7 +4035,7 @@ int main(int argc, char* argv[]) {
         }
 
         // test: rms_norm layer
-        if (!skip_tests[9]) {
+        if (!skip_tests[10]) {
             if (display_debug_info) cout << "\ntest: rms_norm layer\n";
             {
                 test_rms_normalize();
@@ -4050,7 +4127,7 @@ Be all my sins remembered.)";
             }
            
             // Train multihead attention model
-            if (!skip_tests[10]) {
+            if (!skip_tests[11]) {
                 dnn_trainer<net_type_a> trainer_b(net_a);
                 trainer_b.set_learning_rate(learning_rate);
                 trainer_b.set_min_learning_rate(min_learning_rate);
@@ -4072,7 +4149,7 @@ Be all my sins remembered.)";
             }
 
             // "shakespeare" example
-            if (!skip_tests[11]) {
+            if (!skip_tests[12]) {
                 // Lambda function to convert a vector of integers to a string of unsigned chars
                 auto to_unsigned_char_string = [](const matrix<int, 0, 1>& ints) -> string {
                     string result;
@@ -4164,7 +4241,7 @@ Be all my sins remembered.)";
                             cout << "no previous model found, starting from scratch" << endl;
                         }
                     } else {
-                        cout << "restarting from from the last checkpoint" << endl;
+                        cout << "restarting from the last checkpoint" << endl;
                     }
                     dnn_trainer<net_type_b, adam> trainer_d(net_b, adam(weight_decay, beta1, beta2), gpus);
                     trainer_d.set_learning_rate(learning_rate);

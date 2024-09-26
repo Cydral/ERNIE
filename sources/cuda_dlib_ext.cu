@@ -478,7 +478,7 @@ namespace dlib
         }
 
         __global__ void _cuda_embeddings_gradient(size_t ssize, size_t sk, size_t sr, size_t sc,
-            const float* o, const float* gi, float* e, const float* f, double rate, bool scale, size_t es
+            const float* o, const float* gi, float* g, const float* f, bool scale, size_t es
         )
         {
             for (auto i : grid_stride_range(0, ssize))
@@ -495,9 +495,9 @@ namespace dlib
                     const float f_t = f[t_idx];
                     float f_s = 1.0f;                    
 
-                    if (scale && f_t != 0.0f) f_s = fminf(0.1f, fmaxf(1.0f / f_t, 1.0f));
-                    if (f_t > 1) atomicAdd(&e[t_idx * sc + c], -gi[i] * rate * f_s);
-                    else e[t_idx * sc + c] -= gi[i] * rate * f_s;
+                    if (scale && f_t != 0.0f) f_s = fminf(0.15f, fmaxf(1.0f / f_t, 1.0f));
+                    if (f_t > 1) atomicAdd(&g[t_idx * sc + c], -gi[i] * f_s);
+                    else g[t_idx * sc + c] -= gi[i] * f_s;
                 }
             }
         }
@@ -505,9 +505,8 @@ namespace dlib
         void embeddings_gradient(
             const tensor& prev,
             const tensor& gradient_input,
-            tensor& embs,
+            tensor& grads,
             const tensor& freqs,
-            double rate,
             bool scale
         )
         {
@@ -516,11 +515,11 @@ namespace dlib
                 gradient_input.num_samples() == prev.num_samples() &&
                 gradient_input.k() == prev.k() &&
                 gradient_input.nr() == prev.nr() &&
-                gradient_input.nc() == embs.k() &&
-                embs.num_samples() > 0 &&
-                embs.k() > 0 &&
-                embs.nr() == 1 &&
-                embs.nc() == 1,
+                gradient_input.nc() == grads.k() &&
+                grads.num_samples() > 0 &&
+                grads.k() > 0 &&
+                grads.nr() == 1 &&
+                grads.nc() == 1,
                 "\ngradient_input.num_samples(): " << gradient_input.num_samples() <<
                 "\ngradient_input.k(): " << gradient_input.k() <<
                 "\ngradient_input.nr(): " << gradient_input.nr() <<
@@ -529,10 +528,10 @@ namespace dlib
                 "\nprev.k(): " << prev.k() <<
                 "\nprev.nr(): " << prev.nr() <<
                 "\nprev.nc(): " << prev.nc() <<
-                "\nembs.num_samples(): " << embs.num_samples() <<
-                "\nembs.k(): " << embs.k() <<
-                "\nembs.nr(): " << embs.nr() <<
-                "\nembs.nc(): " << embs.nc()
+                "\grads.num_samples(): " << grads.num_samples() <<
+                "\grads.k(): " << grads.k() <<
+                "\grads.nr(): " << grads.nr() <<
+                "\grads.nc(): " << grads.nc()
             );
             
             const long sk = gradient_input.k();
@@ -540,7 +539,7 @@ namespace dlib
             const long sc = gradient_input.nc();
 
             launch_kernel(_cuda_embeddings_gradient, gradient_input.size(), sk, sr, sc,
-                prev.device(), gradient_input.device(), embs.device(), freqs.device(), rate, scale, embs.num_samples());
+                prev.device(), gradient_input.device(), grads.device(), freqs.device(), scale, grads.num_samples());
         }
 
         __global__ void batch_multiply_kernel(

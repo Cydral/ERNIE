@@ -80,9 +80,8 @@ namespace dlib
         void embeddings_gradient(
             const tensor& prev,
             const tensor& gradient_input,
-            tensor& embs,
+            tensor& grads,
             const tensor& freqs,
-            double rate,
             bool scale
         );
 
