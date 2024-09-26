@@ -478,14 +478,14 @@ namespace dlib {
 
         void softmax_gradient(
             tensor& grad,
-            const tensor& dest,
+            const tensor& output,
             const tensor& gradient_input,
             size_t mode
         )
         {
-            DLIB_CASSERT(have_same_dimensions(grad, dest));
+            DLIB_CASSERT(have_same_dimensions(grad, output));
             DLIB_CASSERT(have_same_dimensions(grad, gradient_input));
-            ttimpl::softmax_gradient(grad.nr() * grad.nc(), grad.k(), grad, dest, gradient_input, mode);
+            ttimpl::softmax_gradient(grad.nr() * grad.nc(), grad.k(), grad, output, gradient_input, mode);
         }
 
         // -----------------------------------------------------------------------------------
@@ -1214,15 +1214,15 @@ namespace dlib {
 
         void softmax_gradient(
             tensor& grad,
-            const tensor& dest,
+            const tensor& output,
             const tensor& gradient_input,
             size_t s_mode
         )
         {
             DLIB_CASSERT(
-                have_same_dimensions(dest, gradient_input) == true &&
-                have_same_dimensions(dest, grad) == true);
-            if (dest.size() == 0) return;
+                have_same_dimensions(output, gradient_input) == true &&
+                have_same_dimensions(output, grad) == true);
+            if (output.size() == 0) return;
 
             const float alpha = 1;
             const float beta = is_same_object(grad, gradient_input) ? 0 : 1;
@@ -1233,8 +1233,8 @@ namespace dlib {
                     CUDNN_SOFTMAX_ACCURATE,
                     CUDNN_SOFTMAX_MODE_CHANNEL,
                     &alpha,
-                    descriptor(dest),
-                    dest.device(),
+                    descriptor(output),
+                    output.device(),
                     descriptor(gradient_input),
                     gradient_input.device(),
                     &beta,
@@ -1243,18 +1243,18 @@ namespace dlib {
             }
             else if (s_mode == 1)
             {
-                const long num_samples = dest.num_samples();
-                const long num_channels = dest.k();
-                const size_t plane_size = dest.nr() * dest.nc();
+                const long num_samples = output.num_samples();
+                const long num_channels = output.k();
+                const size_t plane_size = output.nr() * output.nc();
 
                 for (long s = 0; s < num_samples; ++s)
                 {
                     for (long k = 0; k < num_channels; ++k)
                     {
-                        auto dest_slice = dest.device() + (s * num_channels + k) * plane_size;
+                        auto output_slice = output.device() + (s * num_channels + k) * plane_size;
                         auto gi_slice = gradient_input.device() + (s * num_channels + k) * plane_size;
                         auto grad_slice = grad.device() + (s * num_channels + k) * plane_size;
-                        auto a_dest_slice = alias_tensor(dest.nr(), dest.nc())(dest, (s * num_channels + k) * plane_size);
+                        auto a_output_slice = alias_tensor(output.nr(), output.nc())(output, (s * num_channels + k) * plane_size);
                         auto a_gi_slice = alias_tensor(gradient_input.nr(), gradient_input.nc())(gradient_input, (s * num_channels + k) * plane_size);
                         auto a_grad_slice = alias_tensor(grad.nr(), grad.nc())(grad, (s * num_channels + k) * plane_size);
 
@@ -1262,13 +1262,13 @@ namespace dlib {
                             CUDNN_SOFTMAX_ACCURATE,
                             CUDNN_SOFTMAX_MODE_CHANNEL,
                             &alpha,
-                            descriptor(a_dest_slice),
-                            dest_slice,
+                            descriptor(a_output_slice),
+                            output_slice,
                             descriptor(a_gi_slice),
                             gi_slice,
                             &beta,
-                            descriptor(grad),
-                            grad.device()));
+                            descriptor(a_grad_slice),
+                            grad_slice));
                     }
                 }
             }
@@ -2918,18 +2918,18 @@ namespace dlib {
         sig<fc<embedding_size,
         dropout_10<gelu<bn_fc<fc<embedding_size / 4,
         avg_pool_everything<tag5<SUBNET>>>>>>>>>>>;*/
-    /*using feed_forward =
+    using feed_forward =
         add_prev5<
         cont<1, sequence_dim, embedding_dim, sequence_dim, embedding_dim,
         fc<embedding_size,
         dropout_10<gelu<bn_fc<fc<embedding_size * 4,
         tag5<SUBNET>>>>>>>>;
-    template <int embedding_dim, typename SUBNET>*/
+    /*template <int embedding_dim, typename SUBNET>
     using feed_forward =
         add_prev5<
         linear<embedding_size,
         dropout_10<gelu<linear<embedding_size * 4,
-        tag5<SUBNET>>>>>>;
+        tag5<SUBNET>>>>>>;*/
 
     // Transformer block
     template <typename SUBNET>
@@ -3608,13 +3608,23 @@ void test_softmaxm()
     DLIB_TEST_MSG(max(abs(mat(net_output) - mat(expected_output))) < 1e-5, "softmaxm layer");
 
     // Compare CPU and CUDA direct functions
-    resizable_tensor output_tensor;
+    resizable_tensor output_tensor, cpu_grad, gradient_input;
     output_tensor.copy_size(input_tensor);
-    cpu::softmax(output_tensor, input_tensor, 1);
-    DLIB_TEST_MSG(max(abs(mat(output_tensor) - mat(expected_output))) < 1e-5, "softmax function (cpu)");
+    cpu_grad.copy_size(input_tensor);
+    cpu_grad = 0;
+    gradient_input.copy_size(input_tensor);    
+    randomize_parameters(gradient_input, nr + nc, rnd);
+    cpu::softmax(output_tensor, input_tensor, 1);    
+    cpu::softmax_gradient(cpu_grad, output_tensor, gradient_input, 1);
+    DLIB_TEST_MSG(max(abs(mat(output_tensor) - mat(expected_output))) < 1e-5, "softmax (cpu)");
 #ifdef DLIB_USE_CUDA
+    resizable_tensor cuda_grad;
+    cuda_grad.copy_size(input_tensor);
+    cuda_grad = 0;
     cuda::softmax(output_tensor, input_tensor, 1);
-    DLIB_TEST_MSG(max(abs(mat(output_tensor) - mat(expected_output))) < 1e-5, "softmax function (cuda)");
+    cpu::softmax_gradient(cuda_grad, output_tensor, gradient_input, 1);
+    DLIB_TEST_MSG(max(abs(mat(output_tensor) - mat(expected_output))) < 1e-5, "softmax (cuda)");
+    DLIB_TEST_MSG(max(abs(mat(cuda_grad) - mat(cpu_grad))) < 1e-5, "softmax_gradient cpu-cuda");
 #endif
 }
 
@@ -3688,19 +3698,19 @@ int main(int argc, char* argv[]) {
     if (do_benchmark) {
         const bool display_debug_info = false;
         const bool skip_tests[] = {
-            true,      // 0: strings & tokenization
-            true,      // 1: transpose layer
-            true,      // 2: tril layer
-            true,      // 3: positional_encodings layer
-            true,      // 4: embeddings layer
-            true,      // 5: multm_prev layer
-            true,      // 6: softmax layer
-            true,      // 7: attention mechanism
+            false,      // 0: strings & tokenization
+            false,      // 1: transpose layer
+            false,      // 2: tril layer
+            false,      // 3: positional_encodings layer
+            false,      // 4: embeddings layer
+            false,      // 5: multm_prev layer
+            false,      // 6: softmax layer
+            false,      // 7: attention mechanism
             false,      // 8: linear layer         
             true,      // 9: hsplit/hstack layers
-            true,      // 10: rms_norm layer
-            true,      // 11: multihead attention model
-            true       // 12: "shakespeare" example
+            false,      // 10: rms_norm layer
+            false,      // 11: multihead attention model
+            false       // 12: "shakespeare" example
         };
 
         // test: tokenization
@@ -3805,12 +3815,12 @@ int main(int argc, char* argv[]) {
             {
                 softmax2_<softmax_mode::CHANNEL_WISE> l;
                 auto res = test_layer(l);
-                DLIB_TEST_MSG(res, " embeddings test_0 layer\n" + res);
+                DLIB_TEST_MSG(res, " softmaxm test_0 layer\n" + res);
             }
             {
                 softmax2_<softmax_mode::PLANE_WISE> l;
                 auto res = test_layer(l);
-                DLIB_TEST_MSG(res, " embeddings test_1 layer\n" + res);
+                DLIB_TEST_MSG(res, " softmaxm test_1 layer\n" + res);
             }
         }
 

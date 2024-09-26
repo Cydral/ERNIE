@@ -528,10 +528,10 @@ namespace dlib
                 "\nprev.k(): " << prev.k() <<
                 "\nprev.nr(): " << prev.nr() <<
                 "\nprev.nc(): " << prev.nc() <<
-                "\grads.num_samples(): " << grads.num_samples() <<
-                "\grads.k(): " << grads.k() <<
-                "\grads.nr(): " << grads.nr() <<
-                "\grads.nc(): " << grads.nc()
+                "\ngrads.num_samples(): " << grads.num_samples() <<
+                "\ngrads.k(): " << grads.k() <<
+                "\ngrads.nr(): " << grads.nr() <<
+                "\ngrads.nc(): " << grads.nc()
             );
             
             const long sk = gradient_input.k();
