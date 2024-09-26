@@ -92,6 +92,7 @@ void signalHandler(int signal) {
     }
 }
 
+#ifdef DLIB_USE_CUDA
 static const char* cudnn_get_error_string(cudnnStatus_t s)
 {
     switch (s)
@@ -149,6 +150,7 @@ do{ \
         throw dlib::cublas_error(sout.str()); \
     } \
 }while(false)
+#endif // DLIB_USE_CUDA
 
 void configure_console() {
     SetConsoleOutputCP(CP_UTF8);
@@ -323,7 +325,7 @@ namespace dlib {
                 const tensor& src,
                 size_t mode
             )
-            {                
+            {
                 DLIB_ASSERT(num_channels * num_locations == src.nr() * src.nc() * src.k());
                 DLIB_CASSERT(have_same_dimensions(dest, src));
                 const auto d = dest.host();
@@ -367,7 +369,7 @@ namespace dlib {
                                 float max_val = -std::numeric_limits<float>::infinity();
                                 for (long c = 0, idx = r * src.nc(); c < src.nc(); ++c, ++idx)
                                     max_val = std::max(max_val, s_channel[idx]);
-                                
+
                                 if (max_val == -std::numeric_limits<float>::infinity())
                                 {
                                     for (long c = 0, idx = r * src.nc(); c < src.nc(); ++c, ++idx)
@@ -385,7 +387,7 @@ namespace dlib {
                                     for (long c = 0, idx = r * src.nc(); c < src.nc(); ++c, ++idx)
                                         d_channel[idx] /= sum;
                                 }
-                            }                           
+                            }
                         }
                     }
                 }
@@ -486,8 +488,8 @@ namespace dlib {
             ttimpl::softmax_gradient(grad.nr() * grad.nc(), grad.k(), grad, dest, gradient_input, mode);
         }
 
-// -----------------------------------------------------------------------------------
-        
+        // -----------------------------------------------------------------------------------
+
         void reorg2(
             bool add_to,
             tensor& dest,
@@ -511,26 +513,26 @@ namespace dlib {
             const size_t dk = dest.k(), dnr = dest.nr(), dnc = dest.nc(), dsize = dest.size();
 
             dlib::parallel_for(0, dsize, [&](long i)
-            {
-                const size_t out_plane_size = dnr * dnc;
-                const size_t out_sample_size = dk * out_plane_size;
+                {
+                    const size_t out_plane_size = dnr * dnc;
+                    const size_t out_sample_size = dk * out_plane_size;
 
-                const size_t n = i / out_sample_size;
-                const size_t out_idx = i % out_sample_size;
-                const size_t out_k = out_idx / out_plane_size;
-                const size_t out_rc = out_idx % out_plane_size;
-                const size_t out_r = out_rc / dnc;
-                const size_t out_c = out_rc % dnc;
+                    const size_t n = i / out_sample_size;
+                    const size_t out_idx = i % out_sample_size;
+                    const size_t out_k = out_idx / out_plane_size;
+                    const size_t out_rc = out_idx % out_plane_size;
+                    const size_t out_r = out_rc / dnc;
+                    const size_t out_c = out_rc % dnc;
 
-                const size_t in_k = out_k % sk;
-                const size_t in_r = out_r * row_stride + (out_k / sk) / col_stride;
-                const size_t in_c = out_c * col_stride + (out_k / sk) % col_stride;
+                    const size_t in_k = out_k % sk;
+                    const size_t in_r = out_r * row_stride + (out_k / sk) / col_stride;
+                    const size_t in_c = out_c * col_stride + (out_k / sk) % col_stride;
 
-                const size_t in_idx = ((n * sk + in_k) * snr + in_r) * snc + in_c;
+                    const size_t in_idx = ((n * sk + in_k) * snr + in_r) * snc + in_c;
 
-                if (add_to) d[i] += s[in_idx];
-                else d[i] = s[in_idx];
-            });
+                    if (add_to) d[i] += s[in_idx];
+                    else d[i] = s[in_idx];
+                });
         }
 
         void reorg_gradient2(
@@ -553,29 +555,29 @@ namespace dlib {
             float* g = grad.host();
 
             parallel_for(0, gradient_input.num_samples(), [&](long n)
-            {
-                for (long k = 0; k < gradient_input.k(); ++k)
                 {
-                    for (long r = 0; r < gradient_input.nr(); ++r)
+                    for (long k = 0; k < gradient_input.k(); ++k)
                     {
-                        for (long c = 0; c < gradient_input.nc(); ++c)
+                        for (long r = 0; r < gradient_input.nr(); ++r)
                         {
+                            for (long c = 0; c < gradient_input.nc(); ++c)
+                            {
                                 const auto in_idx = tensor_index(gradient_input, n, k, r, c);
                                 const auto out_idx = tensor_index(grad,
                                     n,
                                     k % grad.k(),
                                     r * row_stride + (k / grad.k()) / col_stride,
                                     c * col_stride + (k / grad.k()) % col_stride);
-                                
+
                                 if (add_to) g[out_idx] += gi[in_idx];
                                 else g[out_idx] = gi[in_idx];
+                            }
                         }
                     }
-                }
-            });
+                });
         }
-        
-// -----------------------------------------------------------------------------------
+
+        // -----------------------------------------------------------------------------------
 
         void embeddings(
             resizable_tensor& dest,
@@ -624,7 +626,7 @@ namespace dlib {
                 }
             }
         }
-        
+
         void embeddings_gradient(
             const tensor& prev,
             const tensor& gradient_input,
@@ -660,41 +662,39 @@ namespace dlib {
 
             const float* prev_data = prev.host();
             const float* gradient_input_data = gradient_input.host();
-            float* embs_data = embs.host();
             const float* freqs_data = freqs.host();
+            float* embs_data = embs.host();
             long ns = gradient_input.num_samples(), nk = gradient_input.k();
             long nr = gradient_input.nr(), nc = gradient_input.nc();
 
             std::vector<std::mutex> embedding_mutexes(embs.num_samples());
             parallel_for(0, ns * nk, [&](long i)
-            {
-                long s = i / nk;
-                long k = i % nk;
-                
-                for (long r = 0; r < nr; ++r)
                 {
-                    const unsigned long token_idx = static_cast<unsigned long>(prev_data[tensor_index(prev, s, k, r, 0)]);
-                    if (token_idx < embs.num_samples())
+                    long s = i / nk;
+                    long k = i % nk;
+
+                    for (long r = 0; r < nr; ++r)
                     {
-                        float freq_scale = 1.0f;
-                        if (scale)
+                        const unsigned long token_idx = static_cast<unsigned long>(prev_data[tensor_index(prev, s, k, r, 0)]);
+                        if (token_idx < embs.num_samples())
                         {
-                            float ft = freqs_data[tensor_index(freqs, token_idx, 0, 0, 0)];
-                            if (ft != 0.0f) freq_scale = std::min(0.1f, std::max(1.0f / ft, 1.0f));
-                        }
-                        std::lock_guard<std::mutex> lock(embedding_mutexes[token_idx]);
-                        for (long c = 0; c < nc; ++c)
-                        {
-                            const float gradient = gradient_input_data[tensor_index(gradient_input, s, k, r, c)];
-                            embs_data[tensor_index(embs, token_idx, c, 0, 0)] -= (gradient * rate * freq_scale);
+                            const float freg_token = freqs_data[token_idx];
+                            float freq_scale = 1.0f;
+
+                            if (scale && freg_token != 0.0f) freq_scale = std::min(0.1f, std::max(1.0f / freg_token, 1.0f));
+                            if (freg_token > 1) std::lock_guard<std::mutex> lock(embedding_mutexes[token_idx]);
+                            for (long c = 0; c < nc; ++c)
+                            {
+                                const float gradient = gradient_input_data[tensor_index(gradient_input, s, k, r, c)];
+                                embs_data[tensor_index(embs, token_idx, c, 0, 0)] -= (gradient * rate * freq_scale);
+                            }
                         }
                     }
-                }
-            });
+                });
         }
 
-// -----------------------------------------------------------------------------------
-        
+        // -----------------------------------------------------------------------------------
+
         void rms_normalize(
             const double eps,
             resizable_tensor& dest,
@@ -831,12 +831,12 @@ namespace dlib {
             }
         }
 
-// -----------------------------------------------------------------------------------
+        // -----------------------------------------------------------------------------------
 
         void transpose(
             bool add,
             tensor& dest,
-            const tensor& src            
+            const tensor& src
         )
         {
             DLIB_CASSERT(dest.num_samples() == src.num_samples() &&
@@ -870,10 +870,10 @@ namespace dlib {
                         else dest_data[dest_idx] = src_data[src_idx];
                     }
                 }
-            });
+                });
         }
 
-// -----------------------------------------------------------------------------------
+        // -----------------------------------------------------------------------------------
 
         void split_columns(
             bool add_to,
@@ -905,7 +905,7 @@ namespace dlib {
             }
         }
 
-// -----------------------------------------------------------------------------------
+        // -----------------------------------------------------------------------------------
 
         void merge_columns(
             bool add_to,
@@ -1166,8 +1166,7 @@ namespace dlib {
         )
         {
             DLIB_CASSERT(have_same_dimensions(dest, src));
-            if (src.size() == 0)
-                return;
+            if (src.size() == 0) return;
 
             const float alpha = 1;
             const float beta = 0;
@@ -1224,24 +1223,56 @@ namespace dlib {
             DLIB_CASSERT(
                 have_same_dimensions(dest, gradient_input) == true &&
                 have_same_dimensions(dest, grad) == true);
-            if (dest.size() == 0)
-                return;
+            if (dest.size() == 0) return;
 
             const float alpha = 1;
             const float beta = is_same_object(grad, gradient_input) ? 0 : 1;
-            const cudnnSoftmaxMode_t mode = (s_mode == 0) ? CUDNN_SOFTMAX_MODE_CHANNEL : CUDNN_SOFTMAX_MODE_INSTANCE;
 
-            CHECK_CUDNN(cudnnSoftmaxBackward(ccontext(),
-                CUDNN_SOFTMAX_ACCURATE,
-                mode,
-                &alpha,
-                descriptor(dest),
-                dest.device(),
-                descriptor(gradient_input),
-                gradient_input.device(),
-                &beta,
-                descriptor(grad),
-                grad.device()));
+            if (s_mode == 0)
+            {
+                CHECK_CUDNN(cudnnSoftmaxBackward(ccontext(),
+                    CUDNN_SOFTMAX_ACCURATE,
+                    CUDNN_SOFTMAX_MODE_CHANNEL,
+                    &alpha,
+                    descriptor(dest),
+                    dest.device(),
+                    descriptor(gradient_input),
+                    gradient_input.device(),
+                    &beta,
+                    descriptor(grad),
+                    grad.device()));
+            }
+            else if (s_mode == 1)
+            {
+                const long num_samples = dest.num_samples();
+                const long num_channels = dest.k();
+                const size_t plane_size = dest.nr() * dest.nc();
+
+                for (long s = 0; s < num_samples; ++s)
+                {
+                    for (long k = 0; k < num_channels; ++k)
+                    {
+                        auto dest_slice = dest.device() + (s * num_channels + k) * plane_size;
+                        auto gi_slice = gradient_input.device() + (s * num_channels + k) * plane_size;
+                        auto grad_slice = grad.device() + (s * num_channels + k) * plane_size;
+                        auto a_dest_slice = alias_tensor(dest.nr(), dest.nc())(dest, (s * num_channels + k) * plane_size);
+                        auto a_gi_slice = alias_tensor(gradient_input.nr(), gradient_input.nc())(gradient_input, (s * num_channels + k) * plane_size);
+                        auto a_grad_slice = alias_tensor(grad.nr(), grad.nc())(grad, (s * num_channels + k) * plane_size);
+
+                        CHECK_CUDNN(cudnnSoftmaxBackward(ccontext(),
+                            CUDNN_SOFTMAX_ACCURATE,
+                            CUDNN_SOFTMAX_MODE_CHANNEL,
+                            &alpha,
+                            descriptor(a_dest_slice),
+                            dest_slice,
+                            descriptor(a_gi_slice),
+                            gi_slice,
+                            &beta,
+                            descriptor(grad),
+                            grad.device()));
+                    }
+                }
+            }
         }
     }
 #endif
@@ -1987,7 +2018,8 @@ namespace dlib {
         {            
             if (learning_rate_multiplier != 0) {
                 auto& prev_src = sub.get_output();
-                if (scale_by_freq) calculate_token_frequencies(prev_src, gradient_input);
+                
+                calc_token_freqs(prev_src, gradient_input);
                 tt::embeddings_gradient(prev_src, gradient_input, embs, freqs, learning_rate_multiplier, scale_by_freq);
             }
             // As the embeddings_ layer is positioned just after the input, 
@@ -2039,7 +2071,7 @@ namespace dlib {
         }
 
     private:
-        void calculate_token_frequencies(const tensor& prev, const tensor& input) {
+        void calc_token_freqs(const tensor& prev, const tensor& input) {
             if (freqs.size() == 0) freqs.set_size(num_embeddings, 1, 1, 1);
             freqs = 0;
 
@@ -2833,9 +2865,9 @@ namespace dlib {
     template <int embedding_dim, int nb_heads, typename SUBNET>
     using multihead_attention_block =
         add_prev3<
-        linear<embedding_dim,
-        //cont<1, 1, nb_heads, 1, nb_heads,
-        hstack<
+        //linear<embedding_dim,
+        cont<1, 1, nb_heads, 1, nb_heads,
+        //hstack<
         multm_prev1<
         dropout_10<softmaxm<
         tril_mask<
@@ -2847,7 +2879,7 @@ namespace dlib {
         tag2<transpose<key<nb_heads, embedding_dim, skip3<
         //tag1<hsplit<nb_heads, value<embedding_dim,
         tag1<value<nb_heads, embedding_dim,
-        tag3<SUBNET>>>>>>>>>>>>>>>>>>;
+        tag3<SUBNET>>>>>>>>>>>>>>>>>;
         //tag3<SUBNET>>>>>>>>>>>>>>>>>>>>>;
 
     // Feedforward blocks
@@ -3446,6 +3478,76 @@ void test_tril()
     DLIB_TEST_MSG(max(abs(mat(net_output) - mat(expected_output))) < 1e-5, "tril layer");
 }
 
+void test_softmaxm()
+{
+    using net_type = tag1<softmaxm<tag2<input<matrix<float>>>>>;
+    net_type net;
+
+    // Input tensor
+    dlib::rand rnd;
+    const long nr = 2, nc = 3;
+    const int n_samples = 3, k = 1;
+    std::vector<matrix<float>> x(n_samples);
+    matrix<float> xtmp(nr, nc);
+    for (int ii = 0; ii < n_samples; ++ii) {
+        for (int jj = 0; jj < nr; ++jj)
+            for (int kk = 0; kk < nc; ++kk) {
+                float r = rnd.get_random_gaussian();
+                if (r > 1 || r < -1) r = -std::numeric_limits<float>::infinity();
+                xtmp(jj, kk) = r;
+            }
+        x[ii] = xtmp;
+    }
+
+    // Convert input matrix to tensor
+    resizable_tensor input_tensor;
+    net.to_tensor(&x[0], &x[0] + n_samples, input_tensor);
+    net.forward(input_tensor);
+
+    // Expected output tensor
+    resizable_tensor expected_output;
+    expected_output.copy_size(input_tensor);
+    for (int ii = 0; ii < n_samples; ++ii) {
+        for (int jj = 0; jj < nr; ++jj) {
+            matrix<float> m(1, nc);
+            bool all_neg_inf = true;
+            for (int kk = 0; kk < nc; ++kk) {
+                m(0, kk) = input_tensor.host()[tensor_index(input_tensor, ii, 0, jj, kk)];
+                if (m(0, kk) > -std::numeric_limits<float>::infinity()) all_neg_inf = false;
+            }
+
+            matrix<float> r(1, nc);
+            if (all_neg_inf) {
+                for (int kk = 0; kk < nc; ++kk) r(0, kk) = 0.0f;
+            }
+            else {
+                // Stabilize the computation by subtracting the max value
+                float max_val = max(m);
+                matrix<float> exp_m = exp(m - max_val);
+                float sum_exp = sum(exp_m) + std::numeric_limits<float>::epsilon();
+                r = exp_m / sum_exp;
+            }
+            for (int kk = 0; kk < nc; ++kk) {
+                expected_output.host()[tensor_index(expected_output, ii, 0, jj, kk)] = r(0, kk);
+            }
+        }
+    }
+
+    // Compare output tensor with expected output
+    auto& net_output = layer<tag1>(net).get_output();
+    DLIB_TEST_MSG(max(abs(mat(net_output) - mat(expected_output))) < 1e-5, "softmaxm layer");
+
+    // Compare CPU and CUDA direct functions
+    resizable_tensor output_tensor;
+    output_tensor.copy_size(input_tensor);
+    cpu::softmax(output_tensor, input_tensor, 1);
+    DLIB_TEST_MSG(max(abs(mat(output_tensor) - mat(expected_output))) < 1e-5, "softmax function (cpu)");
+#ifdef DLIB_USE_CUDA
+    cuda::softmax(output_tensor, input_tensor, 1);
+    DLIB_TEST_MSG(max(abs(mat(output_tensor) - mat(expected_output))) < 1e-5, "softmax function (cuda)");
+#endif
+}
+
 int main(int argc, char* argv[]) {
     string corpus_dir;
     bool do_benchmark = false, text_generation = false;
@@ -3520,14 +3622,14 @@ int main(int argc, char* argv[]) {
             true,      // 1: transpose layer
             true,      // 2: tril layer
             true,      // 3: positional_encodings layer
-            true,      // 4: embeddings layer
+            false,      // 4: embeddings layer
             false,      // 5: softmax layer
             false,      // 6: attention mechanism
             true,      // 7: linear layer         
             true,      // 8: hsplit/hstack layers
             true,      // 9: rms_norm layer
-            true,      // 10: multihead attention model
-            true       // 11: "shakespeare" example
+            false,      // 10: multihead attention model
+            false       // 11: "shakespeare" example
         };
 
         // test: tokenization
@@ -3622,74 +3724,16 @@ int main(int argc, char* argv[]) {
         // test: softmax layer
         if (!skip_tests[5]) {
             if (display_debug_info) cout << "\ntest: softmax layer\n";
+            test_softmaxm();
             {
-                using net_type = tag1<softmaxm<tag2<input<matrix<float>>>>>;
-                net_type net;
-
-                // Input tensor
-                dlib::rand rnd;
-                const long nr = 2, nc = 3;
-                const int n_samples = 3, k = 1;
-                std::vector<matrix<float>> x(n_samples);
-                matrix<float> xtmp(nr, nc);
-                for (int ii = 0; ii < n_samples; ++ii) {
-                    for (int jj = 0; jj < nr; ++jj)
-                        for (int kk = 0; kk < nc; ++kk) {
-                            float r = rnd.get_random_gaussian();
-                            if (r > 1 || r < -1) r = -std::numeric_limits<float>::infinity();
-                            xtmp(jj, kk) = r;
-                        }
-                    x[ii] = xtmp;
-                }
-
-                // Convert input matrix to tensor
-                resizable_tensor input_tensor;
-                net.to_tensor(&x[0], &x[0] + n_samples, input_tensor);
-                net.forward(input_tensor);
-                if (display_debug_info) DBG_INFO("input_tensor: ", input_tensor, true);
-
-                // Expected output tensor
-                resizable_tensor expected_output;
-                expected_output.copy_size(input_tensor);
-                for (int ii = 0; ii < n_samples; ++ii) {
-                    for (int jj = 0; jj < nr; ++jj) {
-                        matrix<float> m(1, nc);
-                        bool all_neg_inf = true;
-                        for (int kk = 0; kk < nc; ++kk) {
-                            m(0, kk) = input_tensor.host()[tensor_index(input_tensor, ii, 0, jj, kk)];
-                            if (m(0, kk) > -std::numeric_limits<float>::infinity()) all_neg_inf = false;
-                        }
-
-                        matrix<float> r(1, nc);
-                        if (all_neg_inf) {
-                            for (int kk = 0; kk < nc; ++kk) r(0, kk) = 0.0f;
-                        }
-                        else {
-                            // Stabilize the computation by subtracting the max value
-                            float max_val = max(m);
-                            matrix<float> exp_m = exp(m - max_val);
-                            float sum_exp = sum(exp_m) + std::numeric_limits<float>::epsilon();
-                            r = exp_m / sum_exp;
-                        }
-                        for (int kk = 0; kk < nc; ++kk) {
-                            expected_output.host()[tensor_index(expected_output, ii, 0, jj, kk)] = r(0, kk);
-                        }
-                    }
-                }
-                if (display_debug_info) DBG_INFO("expected_output: ", expected_output, true);
-
-                // Compare output tensor with expected output
-                auto& net_output = layer<tag1>(net).get_output();
-                if (display_debug_info) DBG_INFO("net_output: ", net_output, true);
-                DLIB_TEST_MSG(max(abs(mat(net_output) - mat(expected_output))) < 1e-5, "softmaxm layer");
-
-                // Compare CPU and CUDA direct functions
-                resizable_tensor output_tensor;
-                output_tensor.copy_size(input_tensor);
-                cpu::softmax(output_tensor, input_tensor, 1);
-                if (display_debug_info) DBG_INFO("output_tensor (cpu): ", output_tensor, true);
-                cuda::softmax(output_tensor, input_tensor, 1);
-                if (display_debug_info) DBG_INFO("output_tensor (cuda): ", output_tensor, true);
+                softmax2_<softmax_mode::CHANNEL_WISE> l;
+                auto res = test_layer(l);
+                DLIB_TEST_MSG(res, " embeddings test_0 layer\n" + res);
+            }
+            {
+                softmax2_<softmax_mode::PLANE_WISE> l;
+                auto res = test_layer(l);
+                DLIB_TEST_MSG(res, " embeddings test_1 layer\n" + res);
             }
         }
 

@@ -492,13 +492,12 @@ namespace dlib
                 const unsigned long t_idx = static_cast<unsigned long>(o[(n * sk + k) * sr + r]);
                 if (t_idx < es)
                 {
-                    float freq_scale = 1.0f;
-                    if (scale)
-                    {
-                        const float ft = f[t_idx];
-                        if (ft != 0.0f) freq_scale = fminf(0.1f, fmaxf(1.0f / ft, 1.0f));
-                    }
-                    atomicAdd(&e[t_idx * sc + c], -gi[i] * rate * freq_scale);
+                    const float f_t = f[t_idx];
+                    float f_s = 1.0f;                    
+
+                    if (scale && f_t != 0.0f) f_s = fminf(0.1f, fmaxf(1.0f / f_t, 1.0f));
+                    if (f_t > 1) atomicAdd(&e[t_idx * sc + c], -gi[i] * rate * f_s);
+                    else e[t_idx * sc + c] -= gi[i] * rate * f_s;
                 }
             }
         }
