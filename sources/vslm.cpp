@@ -68,7 +68,7 @@ const int vocab_size = 20000;                                           // Size 
 const int sequence_size = 24;                                           // Length of the sequence
 const int number_of_heads = 8;                                          // Number of attention heads
 const int number_of_blocks = 4;                                         // Number of transformer blocks
-const int embedding_size = (64 / number_of_heads) * number_of_heads;   // Size of the embedding
+const int embedding_size = (128 / number_of_heads) * number_of_heads;   // Size of the embedding
 const int bos_id = 0, eos_id = 1, unk_id = 2, pad_id = 3;
 
 // Other global parameters
@@ -2921,8 +2921,8 @@ namespace dlib {
     using feed_forward =
         add_prev5<
         cont<1, sequence_dim, embedding_dim, sequence_dim, embedding_dim,
-        fc<embedding_size,
-        dropout_10<gelu<bn_fc<fc<embedding_size * 4,
+        sig<fc<embedding_size,
+        gelu<bn_fc<fc<embedding_size / 4,
         tag5<SUBNET>>>>>>>>;
     /*template <int embedding_dim, typename SUBNET>
     using feed_forward =
