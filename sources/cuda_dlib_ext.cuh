@@ -82,6 +82,7 @@ namespace dlib
             const tensor& gradient_input,
             tensor& grads,
             const tensor& freqs,
+            float learning_rate,
             bool scale
         );
 

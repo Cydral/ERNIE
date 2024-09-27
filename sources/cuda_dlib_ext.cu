@@ -478,7 +478,7 @@ namespace dlib
         }
 
         __global__ void _cuda_embeddings_gradient(size_t ssize, size_t sk, size_t sr, size_t sc,
-            const float* o, const float* gi, float* g, const float* f, bool scale, size_t es
+            const float* o, const float* gi, float* g, const float* f, float lr, bool sl, size_t es
         )
         {
             for (auto i : grid_stride_range(0, ssize))
@@ -495,9 +495,9 @@ namespace dlib
                     const float f_t = f[t_idx];
                     float f_s = 1.0f;                    
 
-                    if (scale && f_t != 0.0f) f_s = fminf(0.15f, fmaxf(1.0f / f_t, 1.0f));
-                    if (f_t > 1) atomicAdd(&g[t_idx * sc + c], -gi[i] * f_s);
-                    else g[t_idx * sc + c] -= gi[i] * f_s;
+                    if (sl && f_t != 0.0f) f_s = fminf(0.15f, fmaxf(1.0f / f_t, 1.0f));
+                    if (f_t > 1) atomicAdd(&g[t_idx * sc + c], -gi[i] * lr * f_s);
+                    else g[t_idx * sc + c] -= gi[i] * lr * f_s;
                 }
             }
         }
@@ -507,6 +507,7 @@ namespace dlib
             const tensor& gradient_input,
             tensor& grads,
             const tensor& freqs,
+            float learning_rate,
             bool scale
         )
         {
@@ -539,7 +540,8 @@ namespace dlib
             const long sc = gradient_input.nc();
 
             launch_kernel(_cuda_embeddings_gradient, gradient_input.size(), sk, sr, sc,
-                prev.device(), gradient_input.device(), grads.device(), freqs.device(), scale, grads.num_samples());
+                prev.device(), gradient_input.device(), grads.device(), freqs.device(),
+                learning_rate, scale, grads.num_samples());
         }
 
         __global__ void batch_multiply_kernel(

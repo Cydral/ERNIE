@@ -632,6 +632,7 @@ namespace dlib {
             const tensor& gradient_input,
             tensor& grads,
             const tensor& freqs,
+            float learning_rate,
             bool scale
         )
         {
@@ -685,7 +686,7 @@ namespace dlib {
                             for (long c = 0; c < nc; ++c)
                             {
                                 const float gradient = gradient_input_data[tensor_index(gradient_input, s, k, r, c)];
-                                grads_data[tensor_index(grads, token_idx, c, 0, 0)] -= (gradient * freq_scale);
+                                grads_data[tensor_index(grads, token_idx, c, 0, 0)] -= (gradient * learning_rate * freq_scale);
                             }
                         }
                     }
@@ -1317,6 +1318,7 @@ namespace dlib {
             const tensor& gradient_input,
             tensor& grads,
             const tensor& freqs,
+            float learning_rate,
             bool scale
         );
         /*!
@@ -1513,13 +1515,14 @@ namespace dlib {
             const tensor& gradient_input,
             tensor& grads,
             const tensor& freqs,
+            float learning_rate,
             bool scale
         )
         {
 #ifdef DLIB_USE_CUDA
-            cuda::embeddings_gradient(prev, gradient_input, grads, freqs, scale);
+            cuda::embeddings_gradient(prev, gradient_input, grads, freqs, learning_rate, scale);
 #else
-            cpu::embeddings_gradient(prev, gradient_input, grads, freqs, scale);
+            cpu::embeddings_gradient(prev, gradient_input, grads, freqs, learning_rate, scale);
 #endif
         }
 
@@ -1956,8 +1959,6 @@ namespace dlib {
     };
     template <int DROP_RATE, typename SUBNET>
     using dropout_rate = add_layer<dropout_rate_<DROP_RATE>, SUBNET>;
-    template <typename SUBNET>
-    using dropout_10 = add_layer<dropout_rate_<10>, SUBNET>;
 
     // ----------------------------------------------------------------------------------------
     /* TO BE ADDED TO <layers.h> */
@@ -2014,12 +2015,14 @@ namespace dlib {
         void backward(const tensor& gradient_input, SUBNET& sub, tensor& /*params_grad*/)
         {
             // Since this class is expected to be directly after an <input> layer,
-            // it's not necessary to propagate the gradient
+            // it's not necessary to propagate the gradient.
+            // Additionally, this layer is treated as constant during backpropagation,
+            // so it technically doesn't contribute to the gradient computation.
             if (learning_rate_multiplier != 0) {
                 auto& prev_src = sub.get_output();
                 
                 calc_token_freqs(prev_src, gradient_input);
-                tt::embeddings_gradient(prev_src, gradient_input, embs, freqs, scale_by_freq);
+                tt::embeddings_gradient(prev_src, gradient_input, embs, freqs, learning_rate_multiplier, scale_by_freq);
             }
         }
 
@@ -2892,7 +2895,7 @@ namespace dlib {
         cont<1, 1, nb_heads, 1, nb_heads,
         //hstack<
         multm_prev1<
-        dropout_10<softmaxm<
+        dropout_rate<10, softmaxm<
         tril_mask<
         scale_weights<nb_heads, embedding_dim,
         multm_prev2<
@@ -2916,19 +2919,19 @@ namespace dlib {
         scale5<con<1, 1, 1, 1, 1,
         //cont<1, sequence_dim, embedding_dim, sequence_dim, embedding_dim,
         sig<fc<embedding_size,
-        dropout_10<gelu<bn_fc<fc<embedding_size / 4,
+        dropout_rate<10, gelu<bn_fc<fc<embedding_size / 4,
         avg_pool_everything<tag5<SUBNET>>>>>>>>>>>;*/
     using feed_forward =
         add_prev5<
         cont<1, sequence_dim, embedding_dim, sequence_dim, embedding_dim,
-        sig<fc<embedding_size,
-        gelu<bn_fc<fc<embedding_size / 4,
+        fc<embedding_size,
+        dropout_rate<10, gelu<bn_fc<fc<embedding_size / 4,
         tag5<SUBNET>>>>>>>>;
     /*template <int embedding_dim, typename SUBNET>
     using feed_forward =
         add_prev5<
         linear<embedding_size,
-        dropout_10<gelu<linear<embedding_size * 4,
+        dropout_rate<10, gelu<linear<embedding_size * 4,
         tag5<SUBNET>>>>>>;*/
 
     // Transformer block
@@ -3184,7 +3187,7 @@ void test_transpose()
 
     resizable_tensor input(num_samples, k, nr, nc);
     resizable_tensor output_cpu_a(num_samples, k, nc, nr);
-    tt::tensor_rand rnd(0);
+    tt::tensor_rand rnd(std::rand());
     rnd.fill_uniform(input);
     resizable_tensor output_cpu_b(input);
 
@@ -3219,7 +3222,7 @@ void test_hsplit_hstack() {
 
     resizable_tensor input_tensor;
     input_tensor.set_size(num_samples, input_k, input_nr, input_nc);
-    tt::tensor_rand rnd;
+    tt::tensor_rand rnd(std::rand());
     rnd.fill_uniform(input_tensor);
 
     net.forward(input_tensor);
@@ -3243,7 +3246,7 @@ void test_hsplit_hstack() {
 
     resizable_tensor input;
     input.set_size(num_samples, num_channels, num_rows, num_cols);
-    tt::tensor_rand rnd(0);
+    tt::tensor_rand rnd(std::rand());
     rnd.fill_uniform(input);
 
     const int row_stride = 1;
@@ -3374,7 +3377,7 @@ void test_rms_normalize()
 {
     resizable_tensor x(2, 3, 4, 5);
     resizable_tensor y_cpu(x);
-    tt::tensor_rand rnd(0);
+    tt::tensor_rand rnd(std::rand());
     rnd.fill_uniform(x);
     resizable_tensor scale_cpu;
     resizable_tensor gamma(1, x.k());
@@ -3949,7 +3952,7 @@ int main(int argc, char* argv[]) {
                 // Input tensor
                 resizable_tensor input_tensor;
                 input_tensor.set_size(1, 1, 2, 3);
-                tt::tensor_rand rnd;
+                tt::tensor_rand rnd(std::rand());
                 rnd.fill_gaussian(input_tensor);
 
                 // Convert input matrix to tensor
