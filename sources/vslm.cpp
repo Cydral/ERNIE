@@ -66,9 +66,9 @@ using namespace dlib;
 // Global parameters for the Transformer network
 const int vocab_size = 20000;                                           // Size of the vocabulary
 const int sequence_size = 24;                                           // Length of the sequence
-const int number_of_heads = 8;                                          // Number of attention heads
-const int number_of_blocks = 4;                                         // Number of transformer blocks
-const int embedding_size = (128 / number_of_heads) * number_of_heads;   // Size of the embedding
+const int number_of_heads = 16;                                         // Number of attention heads
+const int number_of_blocks = 2;                                         // Number of transformer blocks
+const int embedding_size = (256 / number_of_heads) * number_of_heads;   // Size of the embedding
 const int bos_id = 0, eos_id = 1, unk_id = 2, pad_id = 3;
 
 // Other global parameters
@@ -315,7 +315,6 @@ using utils::concatenate_files;
 namespace dlib {
     namespace cpu {
         /* TO BE ADDED TO <cpu_dlib.cpp> */
-
         namespace ttimpl
         {
             void softmax(
@@ -1162,7 +1161,7 @@ namespace dlib {
         void softmax(
             tensor& dest,
             const tensor& src,
-            size_t s_mode = 0
+            size_t mode = 0
         )
         {
             DLIB_CASSERT(have_same_dimensions(dest, src));
@@ -1172,7 +1171,7 @@ namespace dlib {
             const float alpha = 1;
             const float beta = 0;
 
-            if (s_mode == 0)
+            if (mode == 0)
             {
                 CHECK_CUDNN(cudnnSoftmaxForward(ccontext(),
                     CUDNN_SOFTMAX_ACCURATE,
@@ -1184,7 +1183,7 @@ namespace dlib {
                     descriptor(dest),
                     dest.device()));
             }
-            else if (s_mode == 1)
+            else if (mode == 1)
             {
                 const long num_samples = src.num_samples();
                 const long num_channels = src.k();
@@ -1217,7 +1216,7 @@ namespace dlib {
             tensor& grad,
             const tensor& output,
             const tensor& gradient_input,
-            size_t s_mode = 0
+            size_t mode = 0
         )
         {
             DLIB_CASSERT(
@@ -1229,7 +1228,7 @@ namespace dlib {
             const float alpha = 1;
             const float beta = is_same_object(grad, gradient_input) ? 0 : 1;
 
-            if (s_mode == 0)
+            if (mode == 0)
             {
                 CHECK_CUDNN(cudnnSoftmaxBackward(ccontext(),
                     CUDNN_SOFTMAX_ACCURATE,
@@ -1243,7 +1242,7 @@ namespace dlib {
                     descriptor(grad),
                     grad.device()));
             }
-            else if (s_mode == 1)
+            else if (mode == 1)
             {
                 const long num_samples = output.num_samples();
                 const long num_channels = output.k();
@@ -2249,7 +2248,7 @@ namespace dlib {
                 biases = alias_tensor(1, num_outputs);
                 biases(params, weights.size()) = 0;
             }*/
-            num_inputs = sub.get_output().k() * sub.get_output().nr() * sub.get_output().nc();
+            num_inputs = sub.get_output().nc();
             if (bias_mode == LINEAR_HAS_BIAS)
                 params.set_size(num_inputs + 1, num_outputs);
             else
@@ -2270,18 +2269,18 @@ namespace dlib {
         void forward(const SUBNET& sub, resizable_tensor& output)
         {
             const auto& prev_output = sub.get_output();
-            DLIB_CASSERT((long)num_inputs == sub.get_output().nr() * sub.get_output().nc() * sub.get_output().k(),
+            DLIB_CASSERT((long)num_inputs == sub.get_output().nc(),
                 "The size of the input tensor to this fc layer doesn't match the size the fc layer was trained with.");
             output.set_size(prev_output.num_samples(), prev_output.k(), prev_output.nr(), num_outputs);
-            //output.set_size(sub.get_output().num_samples(), num_outputs);
-            auto output_tmp = alias_tensor(prev_output.num_samples(), num_outputs)(output, 0);
+            auto o = alias_tensor(prev_output.num_samples() * prev_output.k() * prev_output.nr(), num_outputs)(output, 0);
+            auto so = alias_tensor(sub.get_output().num_samples() * sub.get_output().k() * sub.get_output().nr(), num_inputs)(sub.get_output(), 0);
 
             auto w = weights(params, 0);
-            tt::gemm(0, (tensor&)output_tmp, 1, sub.get_output(), false, w, false, tt::CHANNEL_WISE);
+            tt::gemm(0, (tensor&)o, 1, so, false, w, false, tt::CHANNEL_WISE);
             if (bias_mode == LINEAR_HAS_BIAS)
             {
                 auto b = biases(params, weights.size());
-                tt::add(1, (tensor&)output_tmp, 1, b);
+                tt::add(1, (tensor&)o, 1, b);
             }
             /*const auto& prev_output = sub.get_output();
             DLIB_CASSERT((long)num_inputs == prev_output.nc(),
@@ -2309,26 +2308,26 @@ namespace dlib {
         template <typename SUBNET>
         void backward(const tensor& gradient_input, SUBNET& sub, tensor& params_grad)
         {
-            auto gi_tmp = alias_tensor(gradient_input.num_samples(), num_outputs)(gradient_input, 0);
+            auto gi = alias_tensor(gradient_input.num_samples() * gradient_input.k() * gradient_input.nr(), num_outputs)(gradient_input, 0);
             if (learning_rate_multiplier != 0)
             {
                 // compute the gradient of the weight parameters.  
                 auto pw = weights(params_grad, 0);
-                auto so_tmp = alias_tensor(sub.get_output().num_samples(), num_inputs)(sub.get_output(), 0);
-                tt::gemm(0, pw, 1, so_tmp, true, gi_tmp, false, tt::CHANNEL_WISE);
+                auto so = alias_tensor(sub.get_output().num_samples() * sub.get_output().k() * sub.get_output().nr(), num_inputs)(sub.get_output(), 0);
+                tt::gemm(0, pw, 1, so, true, gi, false, tt::CHANNEL_WISE);
 
                 if (bias_mode == LINEAR_HAS_BIAS)
                 {
                     // compute the gradient of the bias parameters.  
                     auto pb = biases(params_grad, weights.size());
-                    tt::assign_bias_gradient(pb, gi_tmp);
+                    tt::assign_bias_gradient(pb, gi);
                 }
             }
 
             // compute the gradient for the data
             auto w = weights(params, 0);
-            auto sgi_tmp = alias_tensor(sub.get_gradient_input().num_samples(), num_inputs)(sub.get_gradient_input(), 0);
-            tt::gemm(1, (tensor&)sgi_tmp, 1, gi_tmp, false, w, true, tt::CHANNEL_WISE);
+            auto sgi = alias_tensor(sub.get_gradient_input().num_samples() * sub.get_gradient_input().k() * sub.get_gradient_input().nr(), num_inputs)(sub.get_gradient_input(), 0);
+            tt::gemm(1, (tensor&)sgi, 1, gi, false, w, true, tt::CHANNEL_WISE);
 
             /*auto pw = weights(params_grad, 0);
             if (learning_rate_multiplier != 0) {                
@@ -2961,8 +2960,7 @@ namespace dlib {
     template <int N, typename SUBNET>
     using se = scale8<sig<fc<N, relu<bn_fc<fc<N / 16, avg_pool_everything<tag8<SUBNET>>>>>>>>;
 
-    template <int sequence_dim, int embedding_dim, typename SUBNET>
-
+    //template <int sequence_dim, int embedding_dim, typename SUBNET>
     /*using feed_forward =
         add_prev5<
         scale5<con<1, 1, 1, 1, 1,
@@ -2970,23 +2968,23 @@ namespace dlib {
         sig<fc<embedding_size,
         dropout_rate<10, gelu<bn_fc<fc<embedding_size / 4,
         avg_pool_everything<tag5<SUBNET>>>>>>>>>>>;*/
-    using feed_forward =
+    /*using feed_forward =
         add_prev5<
         cont<1, sequence_dim, embedding_dim, sequence_dim, embedding_dim,
         fc<embedding_size,
         dropout_rate<10, gelu<bn_fc<fc<embedding_size * 2,
-        tag5<SUBNET>>>>>>>>;
-    /*template <int embedding_dim, typename SUBNET>
+        tag5<SUBNET>>>>>>>>;*/
+    template <int embedding_dim, typename SUBNET>
     using feed_forward =
         add_prev5<
         linear<embedding_size,
         dropout_rate<10, gelu<linear<embedding_size * 4,
-        tag5<SUBNET>>>>>>;*/
+        tag5<SUBNET>>>>>>;
 
     // Transformer block
     template <typename SUBNET>
     using transformer_block =
-        feed_forward<sequence_size, embedding_size,
+        feed_forward<embedding_size,
         multihead_attention_block<embedding_size, number_of_heads, 
         rms_norm<SUBNET>>>;
 
@@ -4023,19 +4021,14 @@ int main(int argc, char* argv[]) {
                 DLIB_TEST_MSG(max(abs(mat(net_ouput) - mat(expected_output))) < 1e-5, "linear layer");
             }
             {
-                linear_<1, LINEAR_NO_BIAS> l;
+                linear_<4, LINEAR_NO_BIAS> l;
                 auto res = test_layer(l);
-                DLIB_TEST_MSG(res, res);
+                DLIB_TEST_MSG(res, " linear test_0 layer\n" + res);
             }
             {
-                //linear_<5, LINEAR_HAS_BIAS> l;
-                //auto res = test_layer(l);
-                //DLIB_TEST_MSG(res, " linear test_1 layer\n" + res);
-            }
-            {
-                //linear_<4, LINEAR_NO_BIAS> l;
-                //auto res = test_layer(l);
-                //DLIB_TEST_MSG(res, " linear test_2 layer\n" + res);
+                linear_<3, LINEAR_HAS_BIAS> l;
+                auto res = test_layer(l);
+                DLIB_TEST_MSG(res, " linear test_1 layer\n" + res);
             }
         }
 

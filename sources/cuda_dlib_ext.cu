@@ -329,7 +329,7 @@ namespace dlib
             DLIB_CASSERT(dest.nr() == src.nr() / row_stride, "The number of rows must match.");
             DLIB_CASSERT(dest.nc() == src.nc() / col_stride, "The number of columns must match.");
 
-            launch_kernel(_cuda_reorg2, max_jobs(dest.size()), dest.k(), dest.nr(), dest.nc(), dest.device(),
+            launch_kernel(_cuda_reorg2, dest.size(), dest.k(), dest.nr(), dest.nc(), dest.device(),
                 src.k(), src.nr(), src.nc(), src.device(), row_stride, col_stride, add_to);
         }
 
@@ -372,7 +372,7 @@ namespace dlib
             DLIB_CASSERT(grad.nr() == gradient_input.nr() * row_stride, "The number of rows in grad must be gradient_input.nr() multiplied by row_stride.");
             DLIB_CASSERT(grad.nc() == gradient_input.nc() * col_stride, "The number of columns in grad must be gradient_input.nc() multiplied by col_stride.");
 
-            launch_kernel(_cuda_reorg_gradient2, max_jobs(gradient_input.size()), grad.k(), grad.nr(), grad.nc(), grad.device(),
+            launch_kernel(_cuda_reorg_gradient2, gradient_input.size(), grad.k(), grad.nr(), grad.nc(), grad.device(),
                 gradient_input.k(), gradient_input.nr(), gradient_input.nc(), gradient_input.device(),
                 row_stride, col_stride, add_to);
         }
@@ -424,7 +424,7 @@ namespace dlib
             const long dr = dest.nr();
             const long dc = dest.nc();
 
-            launch_kernel(_cuda_embeddings, max_jobs(dest.size()), dk, dr, dc,
+            launch_kernel(_cuda_embeddings, dest.size(), dk, dr, dc,
                 dest.device(), src.device(), embs.device(), embs.num_samples());
         }
 
@@ -490,7 +490,7 @@ namespace dlib
             const long sr = gradient_input.nr();
             const long sc = gradient_input.nc();
 
-            launch_kernel(_cuda_embeddings_gradient, max_jobs(gradient_input.size()), sk, sr, sc,
+            launch_kernel(_cuda_embeddings_gradient, gradient_input.size(), sk, sr, sc,
                 prev.device(), gradient_input.device(), grads.device(), freqs.device(),
                 learning_rate, scale, grads.num_samples());
         }
