@@ -65,10 +65,10 @@ using namespace dlib;
 
 // Global parameters for the Transformer network
 const int vocab_size = 20000;                                           // Size of the vocabulary
-const int sequence_size = 24;                                           // Length of the sequence
-const int number_of_heads = 16;                                         // Number of attention heads
-const int number_of_blocks = 2;                                         // Number of transformer blocks
-const int embedding_size = (256 / number_of_heads) * number_of_heads;   // Size of the embedding
+int sequence_size = 24;                                           // Length of the sequence
+int number_of_heads = 16;                                         // Number of attention heads
+int number_of_blocks = 2;                                         // Number of transformer blocks
+int embedding_size = (256 / number_of_heads) * number_of_heads;   // Size of the embedding
 const int bos_id = 0, eos_id = 1, unk_id = 2, pad_id = 3;
 
 // Other global parameters
@@ -2924,44 +2924,77 @@ namespace dlib {
     template <typename SUBNET>
     using softmaxm = add_layer<softmax2_<PLANE_WISE>, SUBNET>;
 
-    // Basic layers for Query, Key, and Value
-    template <int nb_heads, int num_filters_out, typename SUBNET>
-    //using query = linear_no_bias<num_filters_out, SUBNET>;
-    using query = con<nb_heads, 1, 1, 1, nb_heads, SUBNET>;
-    template <int nb_heads, int num_filters_out, typename SUBNET>
-    //using key = linear_no_bias<num_filters_out, SUBNET>;
-    using key = con<nb_heads, 1, 1, 1, nb_heads, SUBNET>;
-    template <int nb_heads, int num_filters_out, typename SUBNET>
-    //using value = linear_no_bias<num_filters_out, SUBNET>;
-    using value = con<nb_heads, 1, 1, 1, nb_heads, SUBNET>;
+    namespace v1 {
+        // Basic layers for "Query", "Key", and "Value"
+        template <int nb_heads, int num_filters_out, typename SUBNET>
+        using query = con<nb_heads, 1, 1, 1, nb_heads, SUBNET>;
+        template <int nb_heads, int num_filters_out, typename SUBNET>
+        using key = con<nb_heads, 1, 1, 1, nb_heads, SUBNET>;
+        template <int nb_heads, int num_filters_out, typename SUBNET>
+        using value = con<nb_heads, 1, 1, 1, nb_heads, SUBNET>;
+
+        // Core masked multihead attention block
+        template <int embedding_dim, int nb_heads, typename SUBNET>
+        using multihead_attention_block =
+            add_prev3<
+            cont<1, 1, nb_heads, 1, nb_heads,
+            multm_prev1<
+            dropout_rate<10, softmaxm<
+            tril_mask<
+            scale_weights<nb_heads, embedding_dim,
+            multm_prev2<
+            query<nb_heads, embedding_dim, skip3<
+            tag2<transpose<key<nb_heads, embedding_dim, skip3<
+            tag1<value<nb_heads, embedding_dim,
+            tag3<SUBNET>>>>>>>>>>>>>>>>>;
+
+        // Feedforward block
+        template <int embedding_dim, typename SUBNET>
+        using feed_forward =
+            add_prev5<
+            linear<embedding_size,
+            dropout_rate<10, gelu<linear<embedding_size * 4,
+            tag5<SUBNET>>>>>>;
+
+        // Classification head
+        template <int num_logits, typename SUBNET>
+        using classification_head = loss_multiclass_log<fc<num_logits, SUBNET>>;
+
+    }
+
+    // Basic layers for "Query", "Key", and "Value"
+    template <int num_filters_out, typename SUBNET>
+    using query = linear<num_filters_out, SUBNET>;
+    template <int num_filters_out, typename SUBNET>
+    using key = linear<num_filters_out, SUBNET>;
+    template <int num_filters_out, typename SUBNET>
+    using value = linear<num_filters_out, SUBNET>;
 
     // Core masked multihead attention block
     template <int embedding_dim, int nb_heads, typename SUBNET>
     using multihead_attention_block =
         add_prev3<
-        //linear<embedding_dim,
-        cont<1, 1, nb_heads, 1, nb_heads,
-        //hstack<
+        linear<embedding_dim,
+        hstack<
         multm_prev1<
         dropout_rate<10, softmaxm<
         tril_mask<
         scale_weights<nb_heads, embedding_dim,
         multm_prev2<
-        //hsplit<nb_heads, query<embedding_dim, skip3<
-        query<nb_heads, embedding_dim, skip3<
-        //tag2<transpose<hsplit<nb_heads, key<embedding_dim, skip3<
-        tag2<transpose<key<nb_heads, embedding_dim, skip3<
-        //tag1<hsplit<nb_heads, value<embedding_dim,
-        tag1<value<nb_heads, embedding_dim,
-        tag3<SUBNET>>>>>>>>>>>>>>>>>;
-        //tag3<SUBNET>>>>>>>>>>>>>>>>>>>>>;
+        hsplit<nb_heads, query<embedding_dim, skip3<
+        tag2<transpose<hsplit<nb_heads, key<embedding_dim, skip3<
+        tag1<hsplit<nb_heads, value<embedding_dim,
+        tag3<SUBNET>>>>>>>>>>>>>>>>>>>>>;
 
-    // Feedforward blocks
-    template <int N, typename SUBNET>
-    using se = scale8<sig<fc<N, relu<bn_fc<fc<N / 16, avg_pool_everything<tag8<SUBNET>>>>>>>>;
-
-    //template <int sequence_dim, int embedding_dim, typename SUBNET>
-    /*using feed_forward =
+    // Feedforward block
+    template <int embedding_dim, typename SUBNET>
+    using feed_forward =
+        add_prev5<
+        linear<embedding_size,
+        dropout_rate<10, gelu<linear<embedding_size * 4,
+        tag5<SUBNET>>>>>>;
+    /*template <int sequence_dim, int embedding_dim, typename SUBNET>
+    using feed_forward =
         add_prev5<
         scale5<con<1, 1, 1, 1, 1,
         //cont<1, sequence_dim, embedding_dim, sequence_dim, embedding_dim,
@@ -2974,12 +3007,6 @@ namespace dlib {
         fc<embedding_size,
         dropout_rate<10, gelu<bn_fc<fc<embedding_size * 2,
         tag5<SUBNET>>>>>>>>;*/
-    template <int embedding_dim, typename SUBNET>
-    using feed_forward =
-        add_prev5<
-        linear<embedding_size,
-        dropout_rate<10, gelu<linear<embedding_size * 4,
-        tag5<SUBNET>>>>>>;
 
     // Transformer block
     template <typename SUBNET>
@@ -4146,6 +4173,10 @@ And lose the name of action.—Soft you now,
 The fair Ophelia.—Nymph, in thy orisons
 Be all my sins remembered.)";
 
+            // Custom values for the local assessment
+            sequence_size = 24;
+            const int number_of_heads = 16;
+            const int embedding_size = (256 / number_of_heads) * number_of_heads;
             using net_type_a = classification_head<num_classes,
                 repeat<1, transformer_block,
                 tag10<input<matrix<float>>>>>;
