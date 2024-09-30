@@ -1409,7 +1409,7 @@ Be all my sins remembered.)";
                 if (pos != string::npos) input_sequence = input_sequence.substr(0, pos + start_seq.length());
                 cout << "input sequence for text generation: <" << start_seq << ">" << endl;
                 matrix<int> next_input(llm::o_sequence_size, 1);
-                for (int i = 0; i < 400; ++i) {
+                for (int i = 0; i < 430; ++i) {
                     unsigned long next_char = net_b(input_tokens.back());
                     input_sequence += static_cast<unsigned char>(next_char);
                     for (int j = 0; j < (llm::o_sequence_size - 1); ++j) next_input(j, 0) = input_tokens.back()(j + 1, 0);
