@@ -1460,8 +1460,8 @@ Be all my sins remembered.)";
                     cout << "advanced shakespeare model parameters: " << count_parameters(net_b) << endl;
 
                     // Attempting to generate a new sonnet
-                    string sonnet_start = "Shall I compare thee to a winter's night?";
-                    std::vector<matrix<int, 0, 1>> input_tokens = tokenize_text(sonnet_start+"\n", llm::o_sequence_size);
+                    string sonnet_start = "Shall I compare thee to a winter's night?\nThy beauty warms the frost - bitten bough.\nIn darkness, thou art my guiding light,\nA beacon of hope 'midst winter's vow.";
+                   std::vector<matrix<int, 0, 1>> input_tokens = tokenize_text(sonnet_start+"\n", llm::o_sequence_size);
                     if (!input_tokens.empty()) {
                         string generated_sonnet = sonnet_start;
                         matrix<int> next_input(llm::o_sequence_size, 1);
