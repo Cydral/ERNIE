@@ -23,11 +23,14 @@ namespace llm
     using namespace dlib;
 
     // Global parameters for the Transformer network
-    const int vocab_size = 20000;                                           // Size of the vocabulary
-    const int sequence_size = 32;                                           // Length of the sequence
-    const int number_of_heads = 6;                                          // Number of attention heads
-    const int number_of_blocks = 2;                                         // Number of transformer blocks
-    const int embedding_size = (36 / number_of_heads) * number_of_heads;    // Size of the embedding
+    const long comp_factor = 2;
+    const long vocab_size = 20000;                                           // Size of the vocabulary
+    const long sequence_size = 24;                                           // Length of the sequence after compression
+    const long o_sequence_size = (sequence_size * comp_factor);              // Original length of the sequence
+    const long number_of_heads = 6;                                          // Number of attention heads
+    const long number_of_blocks = 2;                                         // Number of transformer blocks
+    const long embedding_size = (42 / number_of_heads) * number_of_heads;    // Size of the embedding after compression
+    const long o_embedding_size = (embedding_size * comp_factor);            // Original size of the embedding
 
     // Scale Weights Layer
     // This layer scales the attention weights by a factor of 1/sqrt(d_k),
@@ -55,24 +58,24 @@ namespace llm
 
     // Classification head
     // This adds a final fully connected layer for classification
-    template <int num_logits, typename SUBNET>
+    template <long num_logits, typename SUBNET>
     using classification_head = loss_multiclass_log<fc<num_logits, SUBNET>>;
 
     namespace v1_0_6 {
         // Basic layers for "Query", "Key", and "Value"
         // These are 1x1 convolutions that project the input into different spaces
-        template <int nb_heads, int num_filters_out, typename SUBNET>
+        template <long nb_heads, typename SUBNET>
         using query = con<nb_heads, 1, 1, 1, nb_heads, SUBNET>;
 
-        template <int nb_heads, int num_filters_out, typename SUBNET>
+        template <long nb_heads, typename SUBNET>
         using key = con<nb_heads, 1, 1, 1, nb_heads, SUBNET>;
 
-        template <int nb_heads, int num_filters_out, typename SUBNET>
+        template <long nb_heads, typename SUBNET>
         using value = con<nb_heads, 1, 1, 1, nb_heads, SUBNET>;
 
         // Core masked multihead attention block
         // This implements the core of the transformer's attention mechanism
-        template <int embedding_dim, int nb_heads, typename SUBNET>
+        template <long embedding_dim, long nb_heads, typename SUBNET>
         using multihead_attention =
             add_prev3<  // Add the output to the input (residual connection)
             cont<1, 1, nb_heads, 1, nb_heads,  // Combine heads
@@ -82,15 +85,23 @@ namespace llm
             tril_mask<  // Apply triangular mask for causal attention
             scale_weights<nb_heads, embedding_dim,  // Scale dot products
             multm_prev2<  // Matrix multiplication of query and key
-            query<nb_heads, embedding_dim, skip3<  // Query transformation
+            query<nb_heads, skip3<  // Query transformation
             tag2<transpose<  // Transpose key for dot product
-            key<nb_heads, embedding_dim, skip3<  // Key transformation
-            tag1<value<nb_heads, embedding_dim,  // Value transformation
+            key<nb_heads, skip3<  // Key transformation
+            tag1<value<nb_heads,  // Value transformation
             tag3<SUBNET>>>>>>>>>>>>>>>>>;
 
-        // Feedforward block
+        // Feedforward blocks
         // This implements the position-wise feedforward network in the transformer
-        template <int embedding_dim, typename SUBNET>
+        template <long sequence_dim, long embedding_dim, typename SUBNET>
+        using feed_forward_fc =
+            add_prev5<
+            scale5<con<1, 1, 1, 1, 1,
+            fc<embedding_size,
+            dropout_rate<10, gelu<bn_fc<fc<embedding_size / 4,
+            avg_pool_everything<tag5<SUBNET>>>>>>>>>>;
+
+        template <long embedding_dim, typename SUBNET>
         using feed_forward =
             add_prev5<  // Add the output to the input (residual connection)
             linear<embedding_size,  // Project back to embedding size
@@ -108,14 +119,14 @@ namespace llm
     }
 
     namespace v1_1_4 {
-        template <int num_filters_out, typename SUBNET>
+        template <long num_filters_out, typename SUBNET>
         using query = linear_no_bias<num_filters_out, SUBNET>;
-        template <int num_filters_out, typename SUBNET>
+        template <long num_filters_out, typename SUBNET>
         using key = linear_no_bias<num_filters_out, SUBNET>;
-        template <int num_filters_out, typename SUBNET>
+        template <long num_filters_out, typename SUBNET>
         using value = linear_no_bias<num_filters_out, SUBNET>;
 
-        template <int embedding_dim, int nb_heads, typename SUBNET>
+        template <long embedding_dim, long nb_heads, typename SUBNET>
         using multihead_attention =
             add_prev3<
             linear<embedding_dim,
@@ -130,7 +141,7 @@ namespace llm
             tag1<hsplit<nb_heads, value<embedding_dim,
             tag3<SUBNET>>>>>>>>>>>>>>>>>>>>>;
 
-        template <int embedding_dim, typename SUBNET>
+        template <long embedding_dim, typename SUBNET>
         using feed_forward =
             add_prev5<
             linear<embedding_size,
@@ -144,38 +155,72 @@ namespace llm
             rms_norm<SUBNET>>>;
     }
 
-    // VSLM networks
+    template <long num_filters, long x_stride, long y_stride, typename SUBNET>
+    using comp = con<num_filters, x_stride, y_stride, x_stride, y_stride, SUBNET>;
+
+    // Transformer-based Large Language Model (LLM) architecture
+
+    /**
+     * This network defines a Transformer-style LLM inspired by the original
+     * architecture from "Attention Is All You Need" (Vaswani et al., 2017)
+     * with some modern optimizations:
+     *
+     * 1. Input: Tokenized text as integer sequences
+     * 2. Embeddings: Combines token and positional embeddings with tanh activation
+     * 3. Transformer Blocks: Stacked identical blocks, each containing:
+     *    a. RMS Normalization: For training stability (similar to GPT-3)
+     *    b. Multi-head Attention: With causal masking for autoregressive tasks
+     *    c. Feed-forward Network: With GELU activation
+     * 4. Classification Head: For next-token prediction
+     *
+     * Key features:
+     * - Uses 1x1 convolutions for Q, K, V projections in attention mechanism
+     * - Implements residual connections throughout the network
+     * - Employs dropout for regularization
+     *
+     * This architecture balances classic Transformer elements with modern
+     * optimizations, suitable for various language modeling tasks.
+     */
     using net_v1_0 = classification_head<vocab_size,
         repeat<number_of_blocks, v1_0_6::transformer_block,
         positional_embeddings<vocab_size, embedding_size,
         input<matrix<int, 0, 1>>>>>;
 
+    /**
+     * This network defines an advanced version of the Transformer-style LLM,
+     * featuring input compression for improved efficiency and local context awareness:
+     *
+     * 1. Input: Tokenized text as integer sequences
+     * 2. Embeddings: Combines token and positional embeddings with increased dimension (o_embedding_size)
+     * 3. Input Compression:
+     *    a. First compression layer: Reduces sequence length by comp_factor
+     *    b. Second compression layer: Reduces embedding dimension to final embedding_size
+     *    These layers use convolutions to capture local relationships and reduce input size
+     * 4. Transformer Blocks: Stacked identical blocks, each containing:
+     *    a. RMS Normalization: For improved training stability
+     *    b. Enhanced Multi-head Attention:
+     *       - Uses linear layers without bias for Q, K, V projections
+     *       - Implements efficient head splitting and stacking
+     *    c. Optimized Feed-forward Network: With GELU activation
+     * 5. Classification Head: For next-token prediction
+     *
+     * Key features and improvements:
+     * - Allows for longer input sequences and larger initial embeddings
+     * - Uses convolutional compression to maintain computational efficiency
+     * - Captures local context through input convolutions
+     * - Refines attention mechanism for potential performance gains
+     * - Balances increased model capacity with efficient processing
+     *
+     * This architecture enhances the v1_0 model by allowing for richer input
+     * representations while maintaining computational efficiency through
+     * strategic compression, potentially improving both performance and
+     * the model's ability to capture local and global contexts.
+     */
     using net_v1_1 = classification_head<vocab_size,
         repeat<number_of_blocks, v1_1_4::transformer_block,
-        positional_embeddings<vocab_size, embedding_size,
-        input<matrix<int, 0, 1>>>>>;
-
-    // Feedforward block
-    /*template <int embedding_dim, typename SUBNET>
-    using feed_forward =
-        add_prev5<
-        linear<embedding_size,
-        dropout_rate<10, gelu<linear<embedding_size * 4,
-        tag5<SUBNET>>>>>>;*/
-    /*template <int sequence_dim, int embedding_dim, typename SUBNET>
-    using feed_forward =
-        add_prev5<
-        scale5<con<1, 1, 1, 1, 1,
-        //cont<1, sequence_dim, embedding_dim, sequence_dim, embedding_dim,
-        sig<fc<embedding_size,
-        dropout_rate<10, gelu<bn_fc<fc<embedding_size / 4,
-        avg_pool_everything<tag5<SUBNET>>>>>>>>>>>;*/
-        /*using feed_forward =
-            add_prev5<
-            cont<1, sequence_dim, embedding_dim, sequence_dim, embedding_dim,
-            fc<embedding_size,
-            dropout_rate<10, gelu<bn_fc<fc<embedding_size * 2,
-            tag5<SUBNET>>>>>>>>;*/
+        comp<1, comp_factor, 1, comp<7, 1, comp_factor,
+        positional_embeddings<vocab_size, o_embedding_size,
+        input<matrix<int, 0, 1>>>>>>>;
 }
 
 #endif // LlmNet_H

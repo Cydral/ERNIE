@@ -2212,13 +2212,11 @@ namespace dlib {
     using linear_no_bias = add_layer<linear_<num_outputs, LINEAR_NO_BIAS>, SUBNET>;
 
     // ----------------------------------------------------------------------------------------
-    const long DEFAULT_NUM_HEADS = 4;
-
-    template <long nb_heads>
+    template <unsigned long nb_heads_>
     class hsplit_
     {
     public:
-        hsplit_(long nb_heads_ = DEFAULT_NUM_HEADS) : num_heads(nb_heads_) {}
+        hsplit_() : num_heads(nb_heads_) {}
 
         template <typename SUBNET>
         void setup(const SUBNET& sub)
@@ -2274,10 +2272,10 @@ namespace dlib {
 
     private:
         resizable_tensor params; // unused
-        long num_heads;
+        unsigned long num_heads;
     };
 
-    template <long num_heads, typename SUBNET>
+    template <unsigned long num_heads, typename SUBNET>
     using hsplit = add_layer<hsplit_<num_heads>, SUBNET>;
 
     class hstack_

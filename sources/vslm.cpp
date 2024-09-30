@@ -180,7 +180,7 @@ using utils::replace_html_entities;
 using utils::is_utf8;
 using utils::concatenate_files;
 
-const size_t std_global_context_size = (5 * llm::sequence_size);
+const size_t std_global_context_size = (5 * llm::o_sequence_size);
 class context_window {
 public:
     context_window(size_t window_size, int pad_value = pad_id, size_t max_global_context_size = std_global_context_size)
@@ -246,7 +246,7 @@ private:
 
 class documents {
 public:
-    documents(size_t seq_size = llm::sequence_size, int pad_value = pad_id, bool use_letter_tokenization = false) :
+    documents(size_t seq_size = llm::o_sequence_size, int pad_value = pad_id, bool use_letter_tokenization = false) :
         sequence_size_(seq_size), pad_value_(pad_value), use_letter_tokenization_(use_letter_tokenization) {
         is_initialized_ = false;
         if (!use_letter_tokenization_) {
@@ -1290,22 +1290,24 @@ Be all my sins remembered.)";
             // Custom values for the local assessment
             using net_type_a = llm::classification_head<num_classes,
                 repeat<1, llm::v1_1_4::transformer_block,
-                tag10<input<matrix<float>>>>>;
+                llm::comp<1, llm::comp_factor, 1, llm::comp<7, 1, llm::comp_factor,
+                tag10<input<matrix<float>>>>>>>;
             net_type_a net_a;
             using net_type_b = llm::classification_head<num_classes,
                 repeat<1, llm::v1_1_4::transformer_block,
-                llm::positional_embeddings<num_classes, llm::embedding_size,
-                input<matrix<int, 0, 1>>>>>;
-            net_type_b net_b;            
+                llm::comp<1, llm::comp_factor, 1, llm::comp<7, 1, llm::comp_factor,
+                llm::positional_embeddings<num_classes, llm::o_embedding_size,
+                input<matrix<int, 0, 1>>>>>>>;
+            net_type_b net_b;
 
             // Generate synthetic training data
             dlib::rand rnd(std::rand());
             std::vector<matrix<float>> samples;
             std::vector<unsigned long> labels;
             for (int i = 0; i < num_samples; ++i) {
-                matrix<float> sample(llm::sequence_size, llm::embedding_size);
-                for (int r = 0; r < llm::sequence_size; ++r) {
-                    for (int c = 0; c < llm::embedding_size; ++c) sample(r, c) = rnd.get_random_float() * 2.0f - 1.0f;
+                matrix<float> sample(llm::o_sequence_size, llm::o_embedding_size);
+                for (int r = 0; r < llm::o_sequence_size; ++r) {
+                    for (int c = 0; c < llm::o_embedding_size; ++c) sample(r, c) = rnd.get_random_float() * 2.0f - 1.0f;
                 }
                 samples.push_back(sample);
                 labels.push_back(rnd.get_random_32bit_number() % num_classes);
@@ -1364,13 +1366,13 @@ Be all my sins remembered.)";
                     return tokens;
                 };
                 // Tokenize the Shakespeare text
-                documents data(llm::sequence_size, 0, true);
+                documents data(llm::o_sequence_size, 0, true);
                 data.load_text(shakespeare_text, false);
-                std::vector<matrix<int, 0, 1>> samples_txt = tokenize_text(shakespeare_text, llm::sequence_size);
+                std::vector<matrix<int, 0, 1>> samples_txt = tokenize_text(shakespeare_text, llm::o_sequence_size);
                 cout << "batch size: " << mini_batch_size << endl;
                 cout << "samples used for the training: " << samples_txt.size() << endl;
                 std::vector<unsigned long> labels_txt;
-                for (size_t i = 0; i < samples_txt.size(); ++i) labels_txt.push_back(static_cast<unsigned long>(shakespeare_text[i + llm::sequence_size])); // Next character as label              
+                for (size_t i = 0; i < samples_txt.size(); ++i) labels_txt.push_back(static_cast<unsigned long>(shakespeare_text[i + llm::o_sequence_size])); // Next character as label              
                 dnn_trainer<net_type_b, adam> trainer_c(net_b, adam(weight_decay, beta1, beta2), gpus);
                 trainer_c.set_learning_rate(learning_rate);
                 trainer_c.set_min_learning_rate(min_learning_rate);
@@ -1397,21 +1399,21 @@ Be all my sins remembered.)";
                     int num_correct_c = 0;
                     for (size_t i = 0; i < labels_txt.size(); ++i) if (predicted_labels_c[i] == labels_txt[i]) ++num_correct_c;
                     double accuracy_c = static_cast<double>(num_correct_c) / labels_txt.size();
-                    DLIB_TEST_MSG(accuracy_c > 0.8, "shakespeare model (accuracy: " + to_string(accuracy_c) + ")");
+                    DLIB_TEST_MSG(accuracy_c > 0.9, "shakespeare model (accuracy: " + to_string(accuracy_c) + ")");
                 }
                 // Predict the next sequence of characters
-                string input_sequence = "To be or not to be—that is the ques";
-                std::vector<matrix<int, 0, 1>> input_tokens = tokenize_text(input_sequence, llm::sequence_size);
+                string input_sequence = "Act Three, Scene One\nTo be or not to be—that is the quest";
+                std::vector<matrix<int, 0, 1>> input_tokens = tokenize_text(input_sequence, llm::o_sequence_size);
                 string start_seq = to_unsigned_char_string(input_tokens.back());
                 size_t pos = input_sequence.find(start_seq);
                 if (pos != string::npos) input_sequence = input_sequence.substr(0, pos + start_seq.length());
                 cout << "input sequence for text generation: <" << start_seq << ">" << endl;
-                matrix<int> next_input(llm::sequence_size, 1);
+                matrix<int> next_input(llm::o_sequence_size, 1);
                 for (int i = 0; i < 400; ++i) {
                     unsigned long next_char = net_b(input_tokens.back());
                     input_sequence += static_cast<unsigned char>(next_char);
-                    for (int j = 0; j < (llm::sequence_size - 1); ++j) next_input(j, 0) = input_tokens.back()(j + 1, 0);
-                    next_input(llm::sequence_size - 1, 0) = static_cast<int>(next_char);
+                    for (int j = 0; j < (llm::o_sequence_size - 1); ++j) next_input(j, 0) = input_tokens.back()(j + 1, 0);
+                    next_input(llm::o_sequence_size - 1, 0) = static_cast<int>(next_char);
                     input_tokens.clear();
                     input_tokens.push_back(next_input);
                 }
@@ -1420,7 +1422,7 @@ Be all my sins remembered.)";
                 // Loading now the complete Shakespeare file
                 string shakespeare_file = "shakespeare.txt";
                 if (fs::exists(shakespeare_file)) {
-                    documents shakespeare_data(llm::sequence_size, 0, true);
+                    documents shakespeare_data(llm::o_sequence_size, 0, true);
                     shakespeare_data.load_documents(shakespeare_file, false);
                     cout << "loaded " << shakespeare_data.get_total_tokens() << " tokens from " << shakespeare_file << endl;
 
@@ -1459,10 +1461,10 @@ Be all my sins remembered.)";
 
                     // Attempting to generate a new sonnet
                     string sonnet_start = "Shall I compare thee to a winter's night?";
-                    std::vector<matrix<int, 0, 1>> input_tokens = tokenize_text(sonnet_start+"\n", llm::sequence_size);
+                    std::vector<matrix<int, 0, 1>> input_tokens = tokenize_text(sonnet_start+"\n", llm::o_sequence_size);
                     if (!input_tokens.empty()) {
                         string generated_sonnet = sonnet_start;
-                        matrix<int> next_input(llm::sequence_size, 1);
+                        matrix<int> next_input(llm::o_sequence_size, 1);
 
                         cout << "generated sonnet starting by \"" << sonnet_start << "\":\n\n" << sonnet_start << "\n";
                         for (int i = 0; i < 700 && !input_tokens.empty(); ++i) {
@@ -1475,8 +1477,8 @@ Be all my sins remembered.)";
                                 cout << "\n";
                             }
 
-                            for (int j = 0; j < (llm::sequence_size - 1); ++j) next_input(j, 0) = input_tokens.back()(j + 1, 0);
-                            next_input(llm::sequence_size - 1, 0) = static_cast<int>(next_char);
+                            for (int j = 0; j < (llm::o_sequence_size - 1); ++j) next_input(j, 0) = input_tokens.back()(j + 1, 0);
+                            next_input(llm::o_sequence_size - 1, 0) = static_cast<int>(next_char);
 
                             input_tokens.clear();
                             input_tokens.push_back(next_input);
@@ -1527,7 +1529,7 @@ Be all my sins remembered.)";
         }
         generator.subnet().subnet() = net.subnet();
         cout << "number of model parameters: " << count_parameters(generator) << endl << endl;
-        context_window prompt(llm::sequence_size);
+        context_window prompt(llm::o_sequence_size);
         string input = "The salesperson", output = "";
         cout << "Input prompt: " << input << " (...)" << endl;
         cout << "Generated text: " << input << " ";
@@ -1682,8 +1684,8 @@ Be all my sins remembered.)";
 
         std::random_device rd;
         std::mt19937 gen(rd());
-        std::uniform_int_distribution<> dis(llm::sequence_size/2, llm::sequence_size*6);
-        context_window prompt(llm::sequence_size);
+        std::uniform_int_distribution<> dis(llm::o_sequence_size/2, llm::o_sequence_size*6);
+        context_window prompt(llm::o_sequence_size);
         std::vector<int> prompt_ids, endings = { eos_id, pad_id }, response_ids;
 
         cout << ">>> press [CTRL+C] to stop the dialog with ERNIE <<<" << endl << endl;
@@ -1695,7 +1697,7 @@ Be all my sins remembered.)";
                 sp.Encode(dlib::trim(input), &prompt_ids);
                 prompt.reset();
                 prompt.add_input(prompt_ids);
-                size_t total_steps = std::min(static_cast<int>(llm::sequence_size), dis(gen));
+                size_t total_steps = std::min(static_cast<int>(llm::o_sequence_size), dis(gen));
                 // Generate response
                 response_ids.clear();
                 cout << "[ERNIE] ";
