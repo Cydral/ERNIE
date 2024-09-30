@@ -24,7 +24,7 @@ namespace llm
 
     // Global parameters for the Transformer network
     const long comp_factor = 2;
-    const long vocab_size = 20000;                                           // Size of the vocabulary
+    const long vocab_size = 3000;                                            // Size of the vocabulary
     const long sequence_size = 24;                                           // Length of the sequence after compression
     const long o_sequence_size = (sequence_size * comp_factor);              // Original length of the sequence
     const long number_of_heads = 6;                                          // Number of attention heads

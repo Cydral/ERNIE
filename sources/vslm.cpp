@@ -55,7 +55,7 @@ namespace po = boost::program_options;
 const int bos_id = 0, eos_id = 1, unk_id = 2, pad_id = 3;
 
 // Other global parameters
-string vocabulary_prefix = "ernie.en-fr.ung.20k", language_model = "ernie_vslm_v1.dat";
+string vocabulary_prefix = "ernie.en-fr.ung.3k", language_model = "ernie_vslm_v1.dat";
 std::unique_ptr<advanced_tokenizer> tokenizer_;
 
 void configure_console() {
@@ -1472,10 +1472,6 @@ Be all my sins remembered.)";
                             unsigned char c = static_cast<unsigned char>(next_char);
                             generated_sonnet += c;
                             cout << c;
-                            if (c == '\n') {
-                                generated_sonnet += '\n';  // Double newline for readability
-                                cout << "\n";
-                            }
 
                             for (int j = 0; j < (llm::o_sequence_size - 1); ++j) next_input(j, 0) = input_tokens.back()(j + 1, 0);
                             next_input(llm::o_sequence_size - 1, 0) = static_cast<int>(next_char);
@@ -1484,7 +1480,7 @@ Be all my sins remembered.)";
                             input_tokens.push_back(next_input);
 
                             // Stop after generating what looks like a complete sonnet
-                            if (generated_sonnet.find("END") != string::npos || generated_sonnet.find("\n\n\n\n") != string::npos) break;
+                            if (generated_sonnet.find("END") != string::npos || generated_sonnet.find("\n\n") != string::npos) break;
                         }
                         cout << endl;
 
