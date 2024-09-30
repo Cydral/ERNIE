@@ -895,7 +895,7 @@ int main(int argc, char* argv[]) {
     bool do_benchmark = false, text_generation = false;
     bool voc_training = false, model_training = false, model_prompting = false, use_sync_file = false;
     double learning_rate = 1e-3, min_learning_rate = 1e-6, weight_decay = 0.001, beta1 = 0.9, beta2 = 0.999, temperature = 0.9;
-    long mini_batch_size = 16, iterations_without_progress_threshold = 50000, top_k = 3;
+    long mini_batch_size = 64, iterations_without_progress_threshold = 50000, top_k = 3;
     std::vector<int> gpus = { 0 };
     set_dnn_prefer_fastest_algorithms();
        
@@ -1518,8 +1518,8 @@ Be all my sins remembered.)";
             cerr << "vocabulary file not found! (<" << (vocabulary_prefix + ".model|.vocab") << ">)" << endl;
             return 1;
         }
-        llm::net_v1_0 net;
-        softmax<multiply<llm::net_v1_0::subnet_type>> generator(multiply_(1.0 / temperature));
+        llm::net_v1_1 net;
+        softmax<multiply<llm::net_v1_1::subnet_type>> generator(multiply_(1.0 / temperature));
         if (fs::exists(language_model)) deserialize(language_model) >> net;
         else {
             cerr << "language model not found! (<" << language_model << ">)" << endl;
@@ -1600,9 +1600,9 @@ Be all my sins remembered.)";
         }
         
         const string model_sync_filename = fs::current_path().string() + "/ernie_checkpoint.dat";        
-        llm::net_v1_0 net;
+        llm::net_v1_1 net;
         adam solver(weight_decay, beta1, beta2);
-        dnn_trainer<llm::net_v1_0, adam> my_trainer(net, solver, gpus);
+        dnn_trainer<llm::net_v1_1, adam> my_trainer(net, solver, gpus);
         my_trainer.set_learning_rate(learning_rate);
         my_trainer.set_min_learning_rate(min_learning_rate);
         my_trainer.set_iterations_without_progress_threshold(iterations_without_progress_threshold);
@@ -1670,8 +1670,8 @@ Be all my sins remembered.)";
             cerr << "vocabulary file not found! (<" << (vocabulary_prefix + ".model|.vocab") << ">)" << endl;
             return 1;
         }
-        llm::net_v1_0 net;
-        softmax<multiply<llm::net_v1_0::subnet_type>> generator(multiply_(1.0 / temperature));
+        llm::net_v1_1 net;
+        softmax<multiply<llm::net_v1_1::subnet_type>> generator(multiply_(1.0 / temperature));
         if (fs::exists(language_model)) deserialize(language_model) >> net;
         else {
             cerr << "language model not found! (<" << language_model << ">)" << endl;

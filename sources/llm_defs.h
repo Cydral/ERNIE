@@ -24,10 +24,10 @@ namespace llm
 
     // Global parameters for the Transformer network
     const int vocab_size = 20000;                                           // Size of the vocabulary
-    const int sequence_size = 64;                                           // Length of the sequence
+    const int sequence_size = 32;                                           // Length of the sequence
     const int number_of_heads = 6;                                          // Number of attention heads
     const int number_of_blocks = 2;                                         // Number of transformer blocks
-    const int embedding_size = (192 / number_of_heads) * number_of_heads;   // Size of the embedding
+    const int embedding_size = (36 / number_of_heads) * number_of_heads;    // Size of the embedding
 
     // Scale Weights Layer
     // This layer scales the attention weights by a factor of 1/sqrt(d_k),
