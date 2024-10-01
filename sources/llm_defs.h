@@ -23,14 +23,11 @@ namespace llm
     using namespace dlib;
 
     // Global parameters for the Transformer network
-    const long comp_factor = 2;
     const long vocab_size = 3000;                                            // Size of the vocabulary
-    const long sequence_size = 24;                                           // Length of the sequence after compression
-    const long o_sequence_size = (sequence_size * comp_factor);              // Original length of the sequence
+    const long sequence_size = 24;                                           // Length of the sequence
     const long number_of_heads = 6;                                          // Number of attention heads
     const long number_of_blocks = 2;                                         // Number of transformer blocks
-    const long embedding_size = (42 / number_of_heads) * number_of_heads;    // Size of the embedding after compression
-    const long o_embedding_size = (embedding_size * comp_factor);            // Original size of the embedding
+    const long embedding_size = (42 / number_of_heads) * number_of_heads;    // Size of the embedding
 
     // Scale Weights Layer
     // This layer scales the attention weights by a factor of 1/sqrt(d_k),
@@ -59,7 +56,7 @@ namespace llm
     // Classification head
     // This adds a final fully connected layer for classification
     template <long num_logits, typename SUBNET>
-    using classification_head = loss_multiclass_log<fc<num_logits, SUBNET>>;
+    using classification_head = loss_multiclass_log<fc<num_logits, rms_norm<SUBNET>>>;
 
     namespace v1_0_6 {
         // Basic layers for "Query", "Key", and "Value"
@@ -104,9 +101,9 @@ namespace llm
         template <long embedding_dim, typename SUBNET>
         using feed_forward =
             add_prev5<  // Add the output to the input (residual connection)
-            linear<embedding_size,  // Project back to embedding size
+            linear<embedding_dim,  // Project back to embedding size
             dropout_rate<10,  // Apply dropout
-            gelu<linear<embedding_size * 4,  // Expand and apply GELU activation
+            gelu<linear<embedding_dim * 4,  // Expand and apply GELU activation
             tag5<SUBNET>>>>>>;
 
         // Transformer block
@@ -121,8 +118,10 @@ namespace llm
     namespace v1_1_4 {
         template <long num_filters_out, typename SUBNET>
         using query = linear_no_bias<num_filters_out, SUBNET>;
+
         template <long num_filters_out, typename SUBNET>
         using key = linear_no_bias<num_filters_out, SUBNET>;
+
         template <long num_filters_out, typename SUBNET>
         using value = linear_no_bias<num_filters_out, SUBNET>;
 
@@ -132,27 +131,25 @@ namespace llm
             linear<embedding_dim,
             hstack<
             multm_prev1<
-            dropout_rate<10, softmaxm<
-            tril_mask<
+            softmaxm<tril_mask<
             scale_weights<nb_heads, embedding_dim,
-            multm_prev2<
-            hsplit<nb_heads, query<embedding_dim, skip3<
+            multm_prev2<hsplit<nb_heads, query<embedding_dim, skip3<
             tag2<transpose<hsplit<nb_heads, key<embedding_dim, skip3<
             tag1<hsplit<nb_heads, value<embedding_dim,
-            tag3<SUBNET>>>>>>>>>>>>>>>>>>>>>;
+            tag3<SUBNET>>>>>>>>>>>>>>>>>>>>;
 
         template <long embedding_dim, typename SUBNET>
         using feed_forward =
             add_prev5<
-            linear<embedding_size,
-            dropout_rate<10, gelu<linear<embedding_size * 4,
+            linear<embedding_dim,
+            dropout_rate<10, gelu<linear<embedding_dim * 4,
             tag5<SUBNET>>>>>>;
 
         template <typename SUBNET>
         using transformer_block =
             feed_forward<embedding_size,
-            multihead_attention<embedding_size, number_of_heads,
-            rms_norm<SUBNET>>>;
+            rms_norm<multihead_attention<embedding_size, number_of_heads,
+            rms_norm<SUBNET>>>>;
     }
 
     template <long num_filters, long x_stride, long y_stride, typename SUBNET>
@@ -191,7 +188,7 @@ namespace llm
      * featuring input compression for improved efficiency and local context awareness:
      *
      * 1. Input: Tokenized text as integer sequences
-     * 2. Embeddings: Combines token and positional embeddings with increased dimension (o_embedding_size)
+     * 2. Embeddings: Combines token and positional embeddings
      * 3. Input Compression:
      *    a. First compression layer: Reduces sequence length by comp_factor
      *    b. Second compression layer: Reduces embedding dimension to final embedding_size
@@ -218,8 +215,8 @@ namespace llm
      */
     using net_v1_1 = classification_head<vocab_size,
         repeat<number_of_blocks, v1_1_4::transformer_block,
-        comp<1, comp_factor, 1, comp<7, 1, comp_factor,
-        positional_embeddings<vocab_size, o_embedding_size,
+        llm::comp<1, 1, 1, llm::comp<llm::number_of_heads, 2, 1,
+        positional_embeddings<vocab_size, embedding_size,
         input<matrix<int, 0, 1>>>>>>>;
 }
 

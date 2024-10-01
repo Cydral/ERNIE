@@ -2020,7 +2020,10 @@ namespace dlib {
 
     enum linear_bias_mode { LINEAR_HAS_BIAS = 0, LINEAR_NO_BIAS = 1 };
 
-    template <unsigned long num_outputs_, linear_bias_mode bias_mode_>
+    template <
+        unsigned long num_outputs_,
+        linear_bias_mode bias_mode_
+        >
     class linear_
     {
         static_assert(num_outputs_ > 0, "The number of outputs from a linear_ layer must be > 0");
@@ -2060,10 +2063,9 @@ namespace dlib {
 
             dlib::rand rnd(std::rand());
             randomize_parameters(params, num_inputs + num_outputs, rnd);
+            
             weights = alias_tensor(num_inputs, num_outputs);
-
-            if (bias_mode == LINEAR_HAS_BIAS)
-            {
+            if (bias_mode == LINEAR_HAS_BIAS) {
                 biases = alias_tensor(1, num_outputs);
                 biases(params, weights.size()) = 0;
             }
@@ -2076,11 +2078,13 @@ namespace dlib {
             DLIB_CASSERT((long)num_inputs == sub.get_output().nc(),
                 "The size of the input tensor to this fc layer doesn't match the size the fc layer was trained with.");
             output.set_size(prev_output.num_samples(), prev_output.k(), prev_output.nr(), num_outputs);
-            auto o = alias_tensor(prev_output.num_samples() * prev_output.k() * prev_output.nr(), num_outputs)(output, 0);
-            auto so = alias_tensor(sub.get_output().num_samples() * sub.get_output().k() * sub.get_output().nr(), num_inputs)(sub.get_output(), 0);
+            
+            auto o = alias_tensor(output.num_samples() * output.k() * output.nr(), num_outputs)(output, 0);
+            auto so = alias_tensor(prev_output.num_samples() * prev_output.k() * prev_output.nr(), num_inputs)(prev_output, 0);
 
             auto w = weights(params, 0);
             tt::gemm(0, (tensor&)o, 1, so, false, w, false, tt::CHANNEL_WISE);
+            
             if (bias_mode == LINEAR_HAS_BIAS)
             {
                 auto b = biases(params, weights.size());
@@ -2094,8 +2098,9 @@ namespace dlib {
             auto gi = alias_tensor(gradient_input.num_samples() * gradient_input.k() * gradient_input.nr(), num_outputs)(gradient_input, 0);
             if (learning_rate_multiplier != 0)
             {
+                const auto& prev_output = sub.get_output();
                 auto pw = weights(params_grad, 0);
-                auto so = alias_tensor(sub.get_output().num_samples() * sub.get_output().k() * sub.get_output().nr(), num_inputs)(sub.get_output(), 0);
+                auto so = alias_tensor(prev_output.num_samples() * prev_output.k() * prev_output.nr(), num_inputs)(prev_output, 0);
                 tt::gemm(0, pw, learning_rate_multiplier, so, true, gi, false, tt::CHANNEL_WISE);
 
                 if (bias_mode == LINEAR_HAS_BIAS)
@@ -2104,9 +2109,10 @@ namespace dlib {
                     tt::assign_bias_gradient(pb, gi);
                 }
             }
-
+            
+            const auto& prev_gradient = sub.get_gradient_input();
             auto w = weights(params, 0);
-            auto sgi = alias_tensor(sub.get_gradient_input().num_samples() * sub.get_gradient_input().k() * sub.get_gradient_input().nr(), num_inputs)(sub.get_gradient_input(), 0);
+            auto sgi = alias_tensor(prev_gradient.num_samples() * prev_gradient.k() * prev_gradient.nr(), num_inputs)(prev_gradient, 0);
             tt::gemm(1, (tensor&)sgi, 1, gi, false, w, true, tt::CHANNEL_WISE);
         }
 
@@ -2152,7 +2158,7 @@ namespace dlib {
                 deserialize(item.weights, in);
                 deserialize(item.biases, in);
                 deserialize(item.bias_mode, in);
-                if (bias_mode_ != item.bias_mode) throw serialization_error("Wrong linear_bias_mode found while deserializing dlib::linear_");
+                if (bias_mode_ != item.bias_mode) throw serialization_error("Wrong 'bias_mode' found while deserializing dlib::linear_");
                 deserialize(item.learning_rate_multiplier, in);
             }
             else
@@ -2163,37 +2169,20 @@ namespace dlib {
 
         friend std::ostream& operator<<(std::ostream& out, const linear_& item)
         {
-            if (item.bias_mode == LINEAR_HAS_BIAS)
-            {
-                out << "linear (num_outputs=" << item.num_outputs << ")";
-                out << " learning_rate_mult=" << item.learning_rate_multiplier;
-            }
-            else
-            {
-                out << "linear_no_bias (num_outputs=" << item.num_outputs << ")";
-                out << " learning_rate_mult=" << item.learning_rate_multiplier;
-            }
+            out << "linear (num_outputs=" << item.num_outputs
+                << " bias=" << ((item.bias_mode == LINEAR_HAS_BIAS) ? "yes" : "no") << ")";
+            out << " learning_rate_mult=" << item.learning_rate_multiplier;
             return out;
         }
 
         friend void to_xml(const linear_& item, std::ostream& out)
         {
-            if (item.bias_mode == LINEAR_HAS_BIAS)
-            {
-                out << "<linear"
-                    << " num_outputs='" << item.num_outputs << "'"
-                    << " learning_rate_mult='" << item.learning_rate_multiplier << "'>\n";
-                out << mat(item.params);
-                out << "</linear>\n";
-            }
-            else
-            {
-                out << "<linear_no_bias"
-                    << " num_outputs='" << item.num_outputs << "'"
-                    << " learning_rate_mult='" << item.learning_rate_multiplier << "'>\n";
-                out << mat(item.params);
-                out << "</linear_no_bias>\n";
-            }
+            out << "<linear"
+                << " num_outputs='" << item.num_outputs << "'"
+                << " bias='" << ((item.bias_mode == LINEAR_HAS_BIAS) ? "yes" : "no") << "'"
+                << " learning_rate_mult='" << item.learning_rate_multiplier << "'>\n";
+            out << mat(item.params);
+            out << "</linear>\n";
         }
 
     private:
@@ -2205,10 +2194,16 @@ namespace dlib {
         alias_tensor weights, biases;
     };
 
-    template <unsigned long num_outputs, typename SUBNET>
+    template <
+        unsigned long num_outputs,
+        typename SUBNET
+        >
     using linear = add_layer<linear_<num_outputs, LINEAR_HAS_BIAS>, SUBNET>;
 
-    template <unsigned long num_outputs, typename SUBNET>
+    template <
+        unsigned long num_outputs,
+        typename SUBNET
+        >
     using linear_no_bias = add_layer<linear_<num_outputs, LINEAR_NO_BIAS>, SUBNET>;
 
     // ----------------------------------------------------------------------------------------

@@ -180,7 +180,7 @@ using utils::replace_html_entities;
 using utils::is_utf8;
 using utils::concatenate_files;
 
-const size_t std_global_context_size = (5 * llm::o_sequence_size);
+const size_t std_global_context_size = (5 * llm::sequence_size);
 class context_window {
 public:
     context_window(size_t window_size, int pad_value = pad_id, size_t max_global_context_size = std_global_context_size)
@@ -246,7 +246,7 @@ private:
 
 class documents {
 public:
-    documents(size_t seq_size = llm::o_sequence_size, int pad_value = pad_id, bool use_letter_tokenization = false) :
+    documents(size_t seq_size = llm::sequence_size, int pad_value = pad_id, bool use_letter_tokenization = false) :
         sequence_size_(seq_size), pad_value_(pad_value), use_letter_tokenization_(use_letter_tokenization) {
         is_initialized_ = false;
         if (!use_letter_tokenization_) {
@@ -894,7 +894,7 @@ int main(int argc, char* argv[]) {
     string corpus_dir;
     bool do_benchmark = false, text_generation = false;
     bool voc_training = false, model_training = false, model_prompting = false, use_sync_file = false;
-    double learning_rate = 1e-3, min_learning_rate = 1e-6, weight_decay = 0.001, beta1 = 0.9, beta2 = 0.999, temperature = 0.9;
+    double learning_rate = 1e-3, min_learning_rate = 1e-6, weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999, temperature = 0.9;
     long mini_batch_size = 64, iterations_without_progress_threshold = 50000, top_k = 3;
     std::vector<int> gpus = { 0 };
     set_dnn_prefer_fastest_algorithms();
@@ -1290,13 +1290,13 @@ Be all my sins remembered.)";
             // Custom values for the local assessment
             using net_type_a = llm::classification_head<num_classes,
                 repeat<1, llm::v1_1_4::transformer_block,
-                llm::comp<1, llm::comp_factor, 1, llm::comp<7, 1, llm::comp_factor,
+                llm::comp<1, 1, 1, llm::comp<llm::number_of_heads, 2, 1,
                 tag10<input<matrix<float>>>>>>>;
             net_type_a net_a;
             using net_type_b = llm::classification_head<num_classes,
                 repeat<1, llm::v1_1_4::transformer_block,
-                llm::comp<1, llm::comp_factor, 1, llm::comp<7, 1, llm::comp_factor,
-                llm::positional_embeddings<num_classes, llm::o_embedding_size,
+                llm::comp<1, 1, 1, llm::comp<llm::number_of_heads, 2, 1,
+                llm::positional_embeddings<num_classes, llm::embedding_size,
                 input<matrix<int, 0, 1>>>>>>>;
             net_type_b net_b;
 
@@ -1305,9 +1305,9 @@ Be all my sins remembered.)";
             std::vector<matrix<float>> samples;
             std::vector<unsigned long> labels;
             for (int i = 0; i < num_samples; ++i) {
-                matrix<float> sample(llm::o_sequence_size, llm::o_embedding_size);
-                for (int r = 0; r < llm::o_sequence_size; ++r) {
-                    for (int c = 0; c < llm::o_embedding_size; ++c) sample(r, c) = rnd.get_random_float() * 2.0f - 1.0f;
+                matrix<float> sample(llm::sequence_size, llm::embedding_size);
+                for (int r = 0; r < llm::sequence_size; ++r) {
+                    for (int c = 0; c < llm::embedding_size; ++c) sample(r, c) = rnd.get_random_float() * 2.0f - 1.0f;
                 }
                 samples.push_back(sample);
                 labels.push_back(rnd.get_random_32bit_number() % num_classes);
@@ -1353,26 +1353,36 @@ Be all my sins remembered.)";
                     for (int v = 0; v < ints.nr(); ++v) result += static_cast<unsigned char>(ints(v, 0));
                     return result;
                 };
+
                 // Lambda function for tokenizing text
-                auto tokenize_text = [](const string& text, int sequence_len) -> std::vector<matrix<int, 0, 1>> {
+                auto tokenize_text = [](const string& text, int sequence_len, char padding_char = pad_id) -> std::vector<matrix<int, 0, 1>> {
                     std::vector<matrix<int, 0, 1>> tokens;
-                    if (text.size() > (sequence_len + 1)) {
-                        for (int i = 0; i < (int)(text.size()) - (sequence_len + 1); ++i) {
+                    if (text.empty()) return tokens;
+
+                    if (text.size() <= sequence_len) {
+                        matrix<int> sample(sequence_len, 1);
+                        sample = static_cast<int>(padding_char);
+                        for (size_t i = 0; i < text.size(); ++i) sample(i, 0) = static_cast<unsigned char>(text[i]);
+                        tokens.push_back(sample);
+                    }
+                    else {
+                        for (int i = 0; i <= static_cast<int>(text.size()) - sequence_len; ++i) {
                             matrix<int> sample(sequence_len, 1);
-                            for (size_t j = 0; j < sequence_len; ++j) sample(j, 0) = static_cast<unsigned char>(text[i + j]);
+                            for (int j = 0; j < sequence_len; ++j) sample(j, 0) = static_cast<unsigned char>(text[i + j]);
                             tokens.push_back(sample);
                         }
-                    }                                        
+                    }
                     return tokens;
                 };
+
                 // Tokenize the Shakespeare text
-                documents data(llm::o_sequence_size, 0, true);
+                documents data(llm::sequence_size, 0, true);
                 data.load_text(shakespeare_text, false);
-                std::vector<matrix<int, 0, 1>> samples_txt = tokenize_text(shakespeare_text, llm::o_sequence_size);
+                std::vector<matrix<int, 0, 1>> samples_txt = tokenize_text(shakespeare_text, llm::sequence_size);
                 cout << "batch size: " << mini_batch_size << endl;
                 cout << "samples used for the training: " << samples_txt.size() << endl;
                 std::vector<unsigned long> labels_txt;
-                for (size_t i = 0; i < samples_txt.size(); ++i) labels_txt.push_back(static_cast<unsigned long>(shakespeare_text[i + llm::o_sequence_size])); // Next character as label              
+                for (size_t i = 0; i < samples_txt.size(); ++i) labels_txt.push_back(static_cast<unsigned long>(shakespeare_text[i + llm::sequence_size])); // Next character as label              
                 dnn_trainer<net_type_b, adam> trainer_c(net_b, adam(weight_decay, beta1, beta2), gpus);
                 trainer_c.set_learning_rate(learning_rate);
                 trainer_c.set_min_learning_rate(min_learning_rate);
@@ -1403,17 +1413,25 @@ Be all my sins remembered.)";
                 }
                 // Predict the next sequence of characters
                 string input_sequence = "Act Three, Scene One\nTo be or not to be—that is the quest";
-                std::vector<matrix<int, 0, 1>> input_tokens = tokenize_text(input_sequence, llm::o_sequence_size);
+                std::vector<matrix<int, 0, 1>> input_tokens = tokenize_text(input_sequence, llm::sequence_size);
                 string start_seq = to_unsigned_char_string(input_tokens.back());
                 size_t pos = input_sequence.find(start_seq);
                 if (pos != string::npos) input_sequence = input_sequence.substr(0, pos + start_seq.length());
                 cout << "input sequence for text generation: <" << start_seq << ">" << endl;
-                matrix<int> next_input(llm::o_sequence_size, 1);
+                matrix<int> next_input(llm::sequence_size, 1);
                 for (int i = 0; i < 430; ++i) {
                     unsigned long next_char = net_b(input_tokens.back());
                     input_sequence += static_cast<unsigned char>(next_char);
-                    for (int j = 0; j < (llm::o_sequence_size - 1); ++j) next_input(j, 0) = input_tokens.back()(j + 1, 0);
-                    next_input(llm::o_sequence_size - 1, 0) = static_cast<int>(next_char);
+
+                    for (int j = 0; j < (llm::sequence_size - 1); ++j) next_input(j, 0) = input_tokens.back()(j + 1, 0);
+                    int insert_pos = std::distance(
+                        input_tokens.back().begin(),
+                        std::find_if(input_tokens.back().begin(), input_tokens.back().end(),
+                            [&](const auto& element) { return element == pad_id; })
+                    );
+                    if (insert_pos == llm::sequence_size) insert_pos = llm::sequence_size - 1;
+                    next_input(insert_pos, 0) = static_cast<int>(next_char);
+
                     input_tokens.clear();
                     input_tokens.push_back(next_input);
                 }
@@ -1422,7 +1440,7 @@ Be all my sins remembered.)";
                 // Loading now the complete Shakespeare file
                 string shakespeare_file = "shakespeare.txt";
                 if (fs::exists(shakespeare_file)) {
-                    documents shakespeare_data(llm::o_sequence_size, 0, true);
+                    documents shakespeare_data(llm::sequence_size, 0, true);
                     shakespeare_data.load_documents(shakespeare_file, false);
                     cout << "loaded " << shakespeare_data.get_total_tokens() << " tokens from " << shakespeare_file << endl;
 
@@ -1461,20 +1479,25 @@ Be all my sins remembered.)";
 
                     // Attempting to generate a new sonnet
                     string sonnet_start = "Shall I compare thee to a winter's night?\nThy beauty warms the frost - bitten bough.\nIn darkness, thou art my guiding light,\nA beacon of hope 'midst winter's vow.";
-                   std::vector<matrix<int, 0, 1>> input_tokens = tokenize_text(sonnet_start+"\n", llm::o_sequence_size);
+                    std::vector<matrix<int, 0, 1>> input_tokens = tokenize_text(sonnet_start+"\n", llm::sequence_size);
                     if (!input_tokens.empty()) {
                         string generated_sonnet = sonnet_start;
-                        matrix<int> next_input(llm::o_sequence_size, 1);
+                        matrix<int> next_input(llm::sequence_size, 1);
 
-                        cout << "generated sonnet starting by \"" << sonnet_start << "\":\n\n" << sonnet_start << "\n";
+                        cout << "generated sonnet:\n\n";
                         for (int i = 0; i < 700 && !input_tokens.empty(); ++i) {
                             unsigned long next_char = net_b(input_tokens.back());
                             unsigned char c = static_cast<unsigned char>(next_char);
                             generated_sonnet += c;
-                            cout << c;
 
-                            for (int j = 0; j < (llm::o_sequence_size - 1); ++j) next_input(j, 0) = input_tokens.back()(j + 1, 0);
-                            next_input(llm::o_sequence_size - 1, 0) = static_cast<int>(next_char);
+                            for (int j = 0; j < (llm::sequence_size - 1); ++j) next_input(j, 0) = input_tokens.back()(j + 1, 0);
+                            int insert_pos = std::distance(
+                                input_tokens.back().begin(),
+                                std::find_if(input_tokens.back().begin(), input_tokens.back().end(),
+                                    [&](const auto& element) { return element == pad_id; })
+                            );
+                            if (insert_pos == llm::sequence_size) insert_pos = llm::sequence_size - 1;
+                            next_input(insert_pos, 0) = static_cast<int>(next_char);
 
                             input_tokens.clear();
                             input_tokens.push_back(next_input);
@@ -1482,7 +1505,7 @@ Be all my sins remembered.)";
                             // Stop after generating what looks like a complete sonnet
                             if (generated_sonnet.find("END") != string::npos || generated_sonnet.find("\n\n") != string::npos) break;
                         }
-                        cout << endl;
+                        cout << generated_sonnet << endl;
 
                         // Basic relevance test
                         std::vector<string> keywords = {
@@ -1525,7 +1548,7 @@ Be all my sins remembered.)";
         }
         generator.subnet().subnet() = net.subnet();
         cout << "number of model parameters: " << count_parameters(generator) << endl << endl;
-        context_window prompt(llm::o_sequence_size);
+        context_window prompt(llm::sequence_size);
         string input = "The salesperson", output = "";
         cout << "Input prompt: " << input << " (...)" << endl;
         cout << "Generated text: " << input << " ";
@@ -1680,8 +1703,8 @@ Be all my sins remembered.)";
 
         std::random_device rd;
         std::mt19937 gen(rd());
-        std::uniform_int_distribution<> dis(llm::o_sequence_size/2, llm::o_sequence_size*6);
-        context_window prompt(llm::o_sequence_size);
+        std::uniform_int_distribution<> dis(llm::sequence_size/2, llm::sequence_size*6);
+        context_window prompt(llm::sequence_size);
         std::vector<int> prompt_ids, endings = { eos_id, pad_id }, response_ids;
 
         cout << ">>> press [CTRL+C] to stop the dialog with ERNIE <<<" << endl << endl;
@@ -1693,7 +1716,7 @@ Be all my sins remembered.)";
                 sp.Encode(dlib::trim(input), &prompt_ids);
                 prompt.reset();
                 prompt.add_input(prompt_ids);
-                size_t total_steps = std::min(static_cast<int>(llm::o_sequence_size), dis(gen));
+                size_t total_steps = std::min(static_cast<int>(llm::sequence_size), dis(gen));
                 // Generate response
                 response_ids.clear();
                 cout << "[ERNIE] ";
