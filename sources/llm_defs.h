@@ -24,10 +24,10 @@ namespace llm
 
     // Global parameters for the Transformer network
     const long vocab_size = 3000;                                            // Size of the vocabulary
-    const long sequence_size = 24;                                           // Length of the sequence
+    const long sequence_size = 50;                                           // Length of the sequence
     const long number_of_heads = 6;                                          // Number of attention heads
     const long number_of_blocks = 2;                                         // Number of transformer blocks
-    const long embedding_size = (42 / number_of_heads) * number_of_heads;    // Size of the embedding
+    const long embedding_size = (114 / number_of_heads) * number_of_heads;   // Size of the embedding
 
     // Scale Weights Layer
     // This layer scales the attention weights by a factor of 1/sqrt(d_k),
@@ -158,25 +158,42 @@ namespace llm
     // Transformer-based Large Language Model (LLM) architecture
 
     /**
+     * Transformer-based Large Language Model (LLM) architecture version 1.0
+     *
      * This network defines a Transformer-style LLM inspired by the original
-     * architecture from "Attention Is All You Need" (Vaswani et al., 2017)
+     * "Attention Is All You Need" (Vaswani et al., 2017) architecture
      * with some modern optimizations:
      *
-     * 1. Input: Tokenized text as integer sequences
-     * 2. Embeddings: Combines token and positional embeddings with tanh activation
-     * 3. Transformer Blocks: Stacked identical blocks, each containing:
-     *    a. RMS Normalization: For training stability (similar to GPT-3)
-     *    b. Multi-head Attention: With causal masking for autoregressive tasks
-     *    c. Feed-forward Network: With GELU activation
-     * 4. Classification Head: For next-token prediction
+     * 1. Input Layer:
+     *    - Uses a matrix of integers (input<matrix<int, 0, 1>>)
+     *    - Represents tokenized text as integer sequences
+     *
+     * 2. Embeddings:
+     *    - Combines token embeddings with positional encodings
+     *    - Uses tanh activation (positional_embeddings<...>)
+     *
+     * 3. Transformer Blocks:
+     *    - Stacks 'number_of_blocks' identical blocks (repeat<number_of_blocks, ...>)
+     *    - Each block (v1_0_6::transformer_block) contains:
+     *      a. RMS Normalization: For training stability
+     *      b. Multi-head Attention: With causal masking for autoregressive tasks
+     *      c. Feed-forward Network: With GELU activation
+     *
+     * 4. Classification Head:
+     *    - For next-token prediction (classification_head<vocab_size, ...>)
      *
      * Key features:
-     * - Uses 1x1 convolutions for Q, K, V projections in attention mechanism
+     * - Uses 1x1 convolutions for Q, K, V projections in the attention mechanism
      * - Implements residual connections throughout the network
      * - Employs dropout for regularization
      *
+     * Global parameters used:
+     * - vocab_size: Size of the vocabulary
+     * - number_of_blocks: Number of Transformer blocks
+     * - embedding_size: Dimension of the embeddings
+     *
      * This architecture balances classic Transformer elements with modern
-     * optimizations, suitable for various language modeling tasks.
+     * optimizations, making it suitable for various language modeling tasks.
      */
     using net_v1_0 = classification_head<vocab_size,
         repeat<number_of_blocks, v1_0_6::transformer_block,
@@ -184,29 +201,50 @@ namespace llm
         input<matrix<int, 0, 1>>>>>;
 
     /**
-     * This network defines an advanced version of the Transformer-style LLM,
+     * Advanced Transformer-based Large Language Model (LLM) architecture version 1.1
+     *
+     * This network defines an enhanced version of the Transformer-style LLM,
      * featuring input compression for improved efficiency and local context awareness:
      *
-     * 1. Input: Tokenized text as integer sequences
-     * 2. Embeddings: Combines token and positional embeddings
-     * 3. Input Compression:
-     *    a. First compression layer: Reduces sequence length by comp_factor
-     *    b. Second compression layer: Reduces embedding dimension to final embedding_size
-     *    These layers use convolutions to capture local relationships and reduce input size
-     * 4. Transformer Blocks: Stacked identical blocks, each containing:
-     *    a. RMS Normalization: For improved training stability
-     *    b. Enhanced Multi-head Attention:
-     *       - Uses linear layers without bias for Q, K, V projections
-     *       - Implements efficient head splitting and stacking
-     *    c. Optimized Feed-forward Network: With GELU activation
-     * 5. Classification Head: For next-token prediction
+     * 1. Input Layer:
+     *    - Uses a matrix of integers (input<matrix<int, 0, 1>>)
+     *    - Represents tokenized text as integer sequences
      *
-     * Key features and improvements:
+     * 2. Embeddings:
+     *    - Combines token embeddings with positional encodings (positional_embeddings<...>)
+     *
+     * 3. Input Compression:
+     *    - Two-stage compression using convolutional layers (llm::comp<...>)
+     *    a. First compression: Reduces sequence length
+     *       Parameters: number_of_heads filters, stride 2 in sequence dimension
+     *    b. Second compression: Reduces embedding dimension
+     *       Parameters: 1 filter, stride 1 in both dimensions
+     *    - Captures local relationships and reduces input size for efficiency
+     *
+     * 4. Transformer Blocks:
+     *    - Stacks 'number_of_blocks' identical blocks (repeat<number_of_blocks, ...>)
+     *    - Each block (v1_1_4::transformer_block) contains:
+     *      a. RMS Normalization: For improved training stability
+     *      b. Enhanced Multi-head Attention:
+     *         - Uses linear layers without bias for Q, K, V projections
+     *         - Implements efficient head splitting and stacking
+     *      c. Optimized Feed-forward Network: With GELU activation
+     *
+     * 5. Classification Head:
+     *    - For next-token prediction (classification_head<vocab_size, ...>)
+     *
+     * Key improvements over v1_0:
      * - Allows for longer input sequences and larger initial embeddings
      * - Uses convolutional compression to maintain computational efficiency
      * - Captures local context through input convolutions
      * - Refines attention mechanism for potential performance gains
      * - Balances increased model capacity with efficient processing
+     *
+     * Global parameters used:
+     * - vocab_size: Size of the vocabulary
+     * - number_of_blocks: Number of Transformer blocks
+     * - embedding_size: Final dimension of the embeddings
+     * - number_of_heads: Number of attention heads, also used in compression
      *
      * This architecture enhances the v1_0 model by allowing for richer input
      * representations while maintaining computational efficiency through

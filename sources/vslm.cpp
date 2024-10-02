@@ -971,7 +971,7 @@ int main(int argc, char* argv[]) {
             false,      // 8: linear layer         
             true,       // 9: hsplit/hstack layers
             false,      // 10: rms_norm layer
-            false,      // 11: multihead attention model
+            true,       // 11: multihead attention model
             false       // 12: "shakespeare" example
         };
 
@@ -1312,6 +1312,10 @@ Be all my sins remembered.)";
                 samples.push_back(sample);
                 labels.push_back(rnd.get_random_32bit_number() % num_classes);
             }
+            auto count_unique_classes = [&labels]() {
+                std::unordered_set<unsigned long> unique_classes(labels.begin(), labels.end());
+                return unique_classes.size();
+            };
 
             // Split data into batches
             std::vector<std::vector<matrix<float>>> batches;
@@ -1325,7 +1329,12 @@ Be all my sins remembered.)";
            
             // Train multihead attention model
             if (!skip_tests[11]) {
-                dnn_trainer<net_type_a> trainer_b(net_a);
+                cout << "number of samples: " << samples.size() << endl;
+                cout << "number of classes: " << count_unique_classes() << std::endl;
+                cout << "number of sample batches: " << batches.size() << endl;
+                cout << "number of label batches: " << label_batches.size() << endl;
+
+                dnn_trainer<net_type_a> trainer_b(net_a, sgd(weight_decay, beta1), gpus);
                 trainer_b.set_learning_rate(learning_rate);
                 trainer_b.set_min_learning_rate(min_learning_rate);
                 trainer_b.set_mini_batch_size(mini_batch_size);
@@ -1383,7 +1392,7 @@ Be all my sins remembered.)";
                 cout << "samples used for the training: " << samples_txt.size() << endl;
                 std::vector<unsigned long> labels_txt;
                 for (size_t i = 0; i < samples_txt.size(); ++i) labels_txt.push_back(static_cast<unsigned long>(shakespeare_text[i + llm::sequence_size])); // Next character as label              
-                dnn_trainer<net_type_b, adam> trainer_c(net_b, adam(weight_decay, beta1, beta2), gpus);
+                dnn_trainer<net_type_b> trainer_c(net_b, sgd(weight_decay, beta1), gpus);
                 trainer_c.set_learning_rate(learning_rate);
                 trainer_c.set_min_learning_rate(min_learning_rate);
                 trainer_c.set_mini_batch_size(mini_batch_size);
@@ -1458,7 +1467,8 @@ Be all my sins remembered.)";
                     } else {
                         cout << "restarting from the last checkpoint" << endl;
                     }
-                    dnn_trainer<net_type_b, adam> trainer_d(net_b, adam(weight_decay, beta1, beta2), gpus);
+
+                    dnn_trainer<net_type_b> trainer_d(net_b, sgd(weight_decay, beta1), gpus);
                     trainer_d.set_learning_rate(learning_rate);
                     trainer_d.set_min_learning_rate(min_learning_rate);
                     trainer_d.set_mini_batch_size(mini_batch_size);
