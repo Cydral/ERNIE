@@ -55,7 +55,7 @@ namespace po = boost::program_options;
 const int bos_id = 0, eos_id = 1, unk_id = 2, pad_id = 3;
 
 // Other global parameters
-string vocabulary_prefix = "ernie.en-fr.ung.3k", language_model = "ernie_vslm_v1.dat";
+string vocabulary_prefix = "ernie.en-fr.ung.8k", language_model = "ernie_vslm_v1.dat";
 std::unique_ptr<advanced_tokenizer> tokenizer_;
 
 void configure_console() {
@@ -1291,13 +1291,12 @@ Be all my sins remembered.)";
             using net_type_a = llm::classification_head<num_classes,
                 repeat<1, llm::v1_1_4::transformer_block,
                 llm::comp<1, 1, 1, llm::comp<llm::number_of_heads, 2, 1,
-                tag10<input<matrix<float>>>>>>>;
+                input<matrix<float>>>>>>;
             net_type_a net_a;
             using net_type_b = llm::classification_head<num_classes,
                 repeat<1, llm::v1_1_4::transformer_block,
-                llm::comp<1, 1, 1, llm::comp<llm::number_of_heads, 2, 1,
                 llm::positional_embeddings<num_classes, llm::embedding_size,
-                input<matrix<int, 0, 1>>>>>>>;
+                input<matrix<int, 0, 1>>>>>;
             net_type_b net_b;
 
             // Generate synthetic training data

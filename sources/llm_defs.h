@@ -23,11 +23,11 @@ namespace llm
     using namespace dlib;
 
     // Global parameters for the Transformer network
-    const long vocab_size = 3000;                                            // Size of the vocabulary
-    const long sequence_size = 50;                                           // Length of the sequence
-    const long number_of_heads = 6;                                          // Number of attention heads
+    const long vocab_size = 8000;                                            // Size of the vocabulary
     const long number_of_blocks = 2;                                         // Number of transformer blocks
-    const long embedding_size = (114 / number_of_heads) * number_of_heads;   // Size of the embedding
+    const long number_of_heads = 16;                                         // Number of attention heads
+    const long embedding_size = (480 / number_of_heads) * number_of_heads;   // Size of the embedding
+    const long sequence_size = (embedding_size / number_of_heads);           // Length of the sequence
 
     // Scale Weights Layer
     // This layer scales the attention weights by a factor of 1/sqrt(d_k),
@@ -253,9 +253,9 @@ namespace llm
      */
     using net_v1_1 = classification_head<vocab_size,
         repeat<number_of_blocks, v1_1_4::transformer_block,
-        llm::comp<1, 1, 1, llm::comp<llm::number_of_heads, 2, 1,
+        //llm::comp<1, 1, 1, llm::comp<llm::number_of_heads, 2, 1,
         positional_embeddings<vocab_size, embedding_size,
-        input<matrix<int, 0, 1>>>>>>>;
+        input<matrix<int, 0, 1>>>>>;
 }
 
 #endif // LlmNet_H
