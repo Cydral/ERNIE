@@ -1491,7 +1491,7 @@ Be all my sins remembered.)";
                     string sonnet_start = "Shall I compare thee to a winter's night?\nThy beauty warms the frost - bitten bough.\nIn darkness, thou art my guiding light,\nA beacon of hope 'midst winter's vow.";
                     std::vector<matrix<int, 0, 1>> input_tokens = tokenize_text(sonnet_start+"\n", llm::sequence_size);
                     if (!input_tokens.empty()) {
-                        string generated_sonnet = sonnet_start;
+                        string generated_sonnet;
                         matrix<int> next_input(llm::sequence_size, 1);
 
                         cout << "generated sonnet:\n\n";
@@ -1515,7 +1515,7 @@ Be all my sins remembered.)";
                             // Stop after generating what looks like a complete sonnet
                             if (generated_sonnet.find("END") != string::npos || generated_sonnet.find("\n\n") != string::npos) break;
                         }
-                        cout << generated_sonnet << endl;
+                        cout << sonnet_start << "\n" << generated_sonnet << "\n";
 
                         // Basic relevance test
                         std::vector<string> keywords = {
@@ -1632,8 +1632,9 @@ Be all my sins remembered.)";
         
         const string model_sync_filename = fs::current_path().string() + "/ernie_checkpoint.dat";        
         llm::net_v1_1 net;
-        adam solver(weight_decay, beta1, beta2);
-        dnn_trainer<llm::net_v1_1, adam> my_trainer(net, solver, gpus);
+        //adam solver(weight_decay, beta1, beta2);
+        //dnn_trainer<llm::net_v1_1, adam> my_trainer(net, solver, gpus);
+        dnn_trainer<llm::net_v1_1> my_trainer(net, sgd(weight_decay, beta1), gpus);
         my_trainer.set_learning_rate(learning_rate);
         my_trainer.set_min_learning_rate(min_learning_rate);
         my_trainer.set_iterations_without_progress_threshold(iterations_without_progress_threshold);
