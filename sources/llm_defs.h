@@ -27,17 +27,15 @@ namespace llm
     const long number_of_blocks = 4;        // Number of transformer blocks
     const long number_of_heads = 8;         // Number of attention heads
     const long embedding_size = 256;        // Size of the embedding (d_model)
-    const long sequence_size = 48/*64*/;    // Maximum length of the input sequence
-    const long dim_k = embedding_size / number_of_heads;  // Size of keys and queries (d_k)
-    const long dim_v = dim_k;               // Size of values (d_v), typically equal to d_k
+    const long sequence_size = 48;          // Maximum length of the input sequence
 
     // Scale Weights Layer
-    template <long dim_k_>
+    template <long d_k_>
     class scale_weights_ : public multiply_ {
-        static_assert(dim_k_ > 0, "The dimension of each attention head must be > 0");
+        static_assert(d_k_ > 0, "The dimension of each attention head must be > 0");
 
     public:
-        explicit scale_weights_() : multiply_(1.0f / std::sqrt(static_cast<float>(dim_k_))) {}
+        explicit scale_weights_() : multiply_(1.0f / std::sqrt(static_cast<float>(d_k_))) {}
     };
 
     template <long d_k, typename SUBNET>
@@ -56,27 +54,28 @@ namespace llm
     using classification_head = loss_multiclass_log<fc<num_logits, SUBNET>>;
 
     namespace v1_1_4 {
-        template <long d_k, long nb_heads, typename SUBNET>
-        using query = linear_no_bias<d_k * nb_heads, SUBNET>;
+        template <long seq_len, long d_model, typename SUBNET>
+        using query = extract<0, 1, seq_len, d_model, SUBNET>;
 
-        template <long d_k, long nb_heads, typename SUBNET>
-        using key = linear_no_bias<d_k * nb_heads, SUBNET>;
+        template <long seq_len, long d_model, typename SUBNET>
+        using key = extract<seq_len * d_model, 1, seq_len, d_model, SUBNET>;
 
-        template <long d_v, long nb_heads, typename SUBNET>
-        using value = linear_no_bias<d_v * nb_heads, SUBNET>;
+        template <long seq_len, long d_model, typename SUBNET>
+        using value = extract<(seq_len * d_model) * 2, 1, seq_len, d_model, SUBNET>;
 
-        template <long d_k, long d_v, long d_model, long nb_heads, typename SUBNET>
+        template <long seq_len, long d_model, long nb_heads, typename SUBNET>
         using multihead_attention =
-            add_prev3<
+            add_prev1<
             dropout_rate<10, linear<d_model,
             hstack<
-            multm_prev1<
+            multm_prev3<
             softmaxm<tril_mask<
-            scale_weights<d_k,
-            multm_prev2<hsplit<nb_heads, query<d_k, nb_heads, skip3<
-            tag2<transpose<hsplit<nb_heads, key<d_k, nb_heads, skip3<
-            tag1<hsplit<nb_heads, value<d_v, nb_heads,
-            tag3<SUBNET>>>>>>>>>>>>>>>>>>>>>;
+            scale_weights<d_model / nb_heads,
+            multm_prev4<hsplit<nb_heads, query<seq_len, d_model, skip2<
+            tag4<transpose<hsplit<nb_heads, key<seq_len, d_model, skip2<
+            tag3<hsplit<nb_heads, value<seq_len, d_model,
+            tag2<hsplit<3, linear_no_bias<d_model * 3,
+            tag1<SUBNET>>>>>>>>>>>>>>>>>>>>>>>>;
 
         template <long d_model, typename SUBNET>
         using feed_forward =
@@ -85,10 +84,10 @@ namespace llm
             linear<d_model, gelu<linear<d_model * 4,
             tag5<SUBNET>>>>>>;
 
-        template <long d_k, long d_v, long d_model, long nb_heads, typename SUBNET>
+        template <long seq_len, long d_model, long nb_heads, typename SUBNET>
         using transformer =
             feed_forward<d_model,
-            multihead_attention<d_k, d_v, d_model, nb_heads,
+            multihead_attention<seq_len, d_model, nb_heads,
             rms_norm<SUBNET>>>;
     }
 
@@ -115,7 +114,7 @@ namespace llm
      * suitable for learning from and generating short texts.
      */    
     template <typename SUBNET>
-    using transformer_block = v1_1_4::transformer<dim_k, dim_v, embedding_size, number_of_heads, SUBNET>;
+    using transformer_block = v1_1_4::transformer<sequence_size, embedding_size, number_of_heads, SUBNET>;
 
     using net_v1_1 = classification_head<vocab_size,
         rms_norm<

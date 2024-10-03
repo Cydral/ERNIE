@@ -1289,10 +1289,10 @@ Be all my sins remembered.)";
 
             // Custom values for the local assessment
             using net_type_a = llm::classification_head<num_classes,
-                llm::v1_1_4::transformer<llm::dim_k, llm::dim_v, llm::embedding_size, llm::number_of_heads,
+                llm::v1_1_4::transformer<llm::sequence_size, llm::embedding_size, llm::number_of_heads,
                 input<matrix<float>>>>;            
             using net_type_b = llm::classification_head<num_classes,
-                llm::v1_1_4::transformer<llm::dim_k, llm::dim_v, llm::embedding_size, llm::number_of_heads,
+                llm::v1_1_4::transformer<llm::sequence_size, llm::embedding_size, llm::number_of_heads,
                 llm::positional_embeddings<num_classes, llm::embedding_size,
                 input<matrix<int, 0, 1>>>>>;            
 
