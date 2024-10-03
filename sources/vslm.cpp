@@ -895,7 +895,7 @@ int main(int argc, char* argv[]) {
     bool do_benchmark = false, text_generation = false;
     bool voc_training = false, model_training = false, model_prompting = false, use_sync_file = false;
     double learning_rate = 1e-3, min_learning_rate = 1e-6, weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999, temperature = 0.9;
-    long mini_batch_size = 64, iterations_without_progress_threshold = 50000, top_k = 3;
+    long mini_batch_size = 32, iterations_without_progress_threshold = 50000, top_k = 3;
     std::vector<int> gpus = { 0 };
     set_dnn_prefer_fastest_algorithms();
        
@@ -1152,7 +1152,7 @@ int main(int argc, char* argv[]) {
                 }
 
                 // Model definition
-                using net_type = tag10<multm_prev1<tag7<softmaxm<llm::scale_weights<1, 3, tag6<multm_prev4<
+                using net_type = tag10<multm_prev1<tag7<softmaxm<llm::scale_weights<3, tag6<multm_prev4<
                     tag3<linear<3, // Q
                     skip5<tag4<transpose<tag2<linear<3, // K
                     skip5<tag1<linear<3, // V
@@ -1289,15 +1289,12 @@ Be all my sins remembered.)";
 
             // Custom values for the local assessment
             using net_type_a = llm::classification_head<num_classes,
-                repeat<1, llm::v1_1_4::transformer_block,
-                llm::comp<1, 1, 1, llm::comp<llm::number_of_heads, 2, 1,
-                input<matrix<float>>>>>>;
-            net_type_a net_a;
+                llm::v1_1_4::transformer<llm::dim_k, llm::dim_v, llm::embedding_size, llm::number_of_heads,
+                input<matrix<float>>>>;            
             using net_type_b = llm::classification_head<num_classes,
-                repeat<1, llm::v1_1_4::transformer_block,
+                llm::v1_1_4::transformer<llm::dim_k, llm::dim_v, llm::embedding_size, llm::number_of_heads,
                 llm::positional_embeddings<num_classes, llm::embedding_size,
-                input<matrix<int, 0, 1>>>>>;
-            net_type_b net_b;
+                input<matrix<int, 0, 1>>>>>;            
 
             // Generate synthetic training data
             dlib::rand rnd(std::rand());
@@ -1333,6 +1330,7 @@ Be all my sins remembered.)";
                 cout << "number of sample batches: " << batches.size() << endl;
                 cout << "number of label batches: " << label_batches.size() << endl;
 
+                net_type_a net_a;
                 dnn_trainer<net_type_a> trainer_b(net_a, sgd(weight_decay, beta1), gpus);
                 trainer_b.set_learning_rate(learning_rate);
                 trainer_b.set_min_learning_rate(min_learning_rate);
@@ -1391,6 +1389,8 @@ Be all my sins remembered.)";
                 cout << "samples used for the training: " << samples_txt.size() << endl;
                 std::vector<unsigned long> labels_txt;
                 for (size_t i = 0; i < samples_txt.size(); ++i) labels_txt.push_back(static_cast<unsigned long>(shakespeare_text[i + llm::sequence_size])); // Next character as label              
+                
+                net_type_b net_b;
                 dnn_trainer<net_type_b> trainer_c(net_b, sgd(weight_decay, beta1), gpus);
                 trainer_c.set_learning_rate(learning_rate);
                 trainer_c.set_min_learning_rate(min_learning_rate);
@@ -1609,7 +1609,7 @@ Be all my sins remembered.)";
                 " --character_coverage=1.0" +
                 " --max_sentence_length=16768" +
                 " --split_by_unicode_script=false" +
-                " --input_sentence_size=3500000" +
+                " --input_sentence_size=4500000" +
                 " --shuffle_input_sentence=true" +
                 " --train_extremely_large_corpus=true" +
                 " --vocab_size=" + to_string(vocab_size);
