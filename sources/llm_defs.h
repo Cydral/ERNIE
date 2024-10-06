@@ -23,11 +23,11 @@ namespace llm
     using namespace dlib;
 
     // Global parameters for the small Transformer network
-    const long vocab_size = 8000;           // Size of the vocabulary
-    const long number_of_blocks = 4;        // Number of transformer blocks
-    const long number_of_heads = 8;         // Number of attention heads
-    const long embedding_size = 256;        // Size of the embedding (d_model)
-    const long sequence_size = 48;          // Maximum length of the input sequence
+    const long vocab_size = 20000;           // Size of the vocabulary
+    const long number_of_blocks = 3;         // Number of transformer blocks
+    const long number_of_heads = 16;         // Number of attention heads
+    const long embedding_size = 256;         // Size of the embedding (d_model)
+    const long sequence_size = 64;           // Maximum length of the input sequence
 
     // Scale Weights Layer
     template <long d_k_>
@@ -44,14 +44,12 @@ namespace llm
     // Positional Embeddings
     template <unsigned long nb_embeddings, unsigned long embedding_length, typename SUBNET>
     using positional_embeddings =
-        dropout_rate<10,
         positional_encodings<
-        htan<
-        embeddings<nb_embeddings, embedding_length, SUBNET>>>>;
+        embeddings<nb_embeddings, embedding_length, SUBNET>>;
 
     // Classification head
     template <long num_logits, typename SUBNET>
-    using classification_head = loss_multiclass_log<fc<num_logits, SUBNET>>;
+    using classification_head = loss_multiclass_log<fc<num_logits, rms_norm<SUBNET>>>;
 
     namespace v1_1_4 {
         template <long seq_len, long d_model, typename SUBNET>
@@ -66,7 +64,7 @@ namespace llm
         template <long seq_len, long d_model, long nb_heads, typename SUBNET>
         using multihead_attention =
             add_prev1<
-            dropout_rate<10, linear<d_model,
+            linear_no_bias<d_model,
             hstack<
             multm_prev3<
             softmaxm<tril_mask<
@@ -75,20 +73,20 @@ namespace llm
             tag4<transpose<hsplit<nb_heads, key<seq_len, d_model, skip2<
             tag3<hsplit<nb_heads, value<seq_len, d_model,
             tag2<hsplit<3, linear_no_bias<d_model * 3,
+            rms_norm<
             tag1<SUBNET>>>>>>>>>>>>>>>>>>>>>>>>;
 
         template <long d_model, typename SUBNET>
         using feed_forward =
-            add_prev5<
-            dropout_rate<10,
-            linear<d_model, gelu<linear<d_model * 4,
-            tag5<SUBNET>>>>>>;
+            add_prev5<            
+            linear<d_model, dropout_rate<10, gelu<linear<d_model * 4,
+            rms_norm<
+            tag5<SUBNET>>>>>>>;
 
         template <long seq_len, long d_model, long nb_heads, typename SUBNET>
         using transformer =
             feed_forward<d_model,
-            multihead_attention<seq_len, d_model, nb_heads,
-            rms_norm<SUBNET>>>;
+            multihead_attention<seq_len, d_model, nb_heads, SUBNET>>;
     }
 
     /**
@@ -116,11 +114,10 @@ namespace llm
     template <typename SUBNET>
     using transformer_block = v1_1_4::transformer<sequence_size, embedding_size, number_of_heads, SUBNET>;
 
-    using net_v1_1 = classification_head<vocab_size,
-        rms_norm<
+    using net_v1_1 = classification_head<vocab_size,        
         repeat<number_of_blocks, transformer_block,
         positional_embeddings<vocab_size, embedding_size,
-        input<matrix<int, 0, 1>>>>>>;
+        input<matrix<int, 0, 1>>>>>;
 }
 
 #endif // LlmNet_H

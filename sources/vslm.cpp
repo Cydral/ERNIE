@@ -246,8 +246,9 @@ private:
 
 class documents {
 public:
-    documents(size_t seq_size = llm::sequence_size, int pad_value = pad_id, bool use_letter_tokenization = false) :
-        sequence_size_(seq_size), pad_value_(pad_value), use_letter_tokenization_(use_letter_tokenization) {
+    documents(size_t seq_size = llm::sequence_size, int pad_value = pad_id,
+        bool use_letter_tokenization = false, size_t token_limit = 50000) :
+        sequence_size_(seq_size), pad_value_(pad_value), use_letter_tokenization_(use_letter_tokenization), token_limit_(token_limit) {
         is_initialized_ = false;
         if (!use_letter_tokenization_) {
             if (fs::exists(vocabulary_prefix + ".model")) {
@@ -263,6 +264,8 @@ public:
         clear_all();
     }
     size_t get_total_tokens(void) { return total_tokens_; }
+    size_t get_total_samples(void) { return total_tokens_ > sequence_size_ ? (total_tokens_ - sequence_size_) : 0; }
+    size_t get_total_presamples(void) { return pre_samples_.size(); }
     void clear_all(void) {        
         source_tokens_.clear();
         pre_samples_.clear();
@@ -278,6 +281,7 @@ public:
             for (const auto& sentence : sentences) {
                 std::vector<int> tokens = preprocess_sentence(sentence);
                 if (tokens.size() != 0) {
+                    if (tokens.size() > token_limit_) tokens.resize(token_limit_);
                     source_tokens_.push_back(tokens);
                     total_tokens_ += tokens.size();
                 }
@@ -285,6 +289,7 @@ public:
         } else {
             std::vector<int> tokens = preprocess_sentence(text);
             if (tokens.size() != 0) {
+                if (tokens.size() > token_limit_) tokens.resize(token_limit_);
                 source_tokens_.push_back(tokens);
                 total_tokens_ += tokens.size();
             }
@@ -350,10 +355,10 @@ public:
                 labels.push_back(label);
             }
         } else {
-            if (pre_samples_.size() == 0) {
-                int i, j;
+            if (pre_samples_.size() == 0) {                
                 for (const auto& sentence : source_tokens_) {                    
-                    if (sentence.size() > (sequence_size_ + 1)) {                        
+                    if (sentence.size() > (sequence_size_ + 1)) {
+                        size_t i, j;
                         for (i = 0; i < (int)(sentence.size()) - (sequence_size_ + 1); ++i) {
                             matrix<int> sample(sequence_size_, 1);
                             for (j = 0; j < (int)sequence_size_; ++j) sample(j, 0) = sentence[i + j];
@@ -383,7 +388,7 @@ private:
     size_t samples_idx_;
 
     sentencepiece::SentencePieceProcessor sp_;
-    size_t total_tokens_;
+    size_t total_tokens_, token_limit_;
     int pad_value_;
     bool use_letter_tokenization_;
     bool is_initialized_;
@@ -399,7 +404,7 @@ private:
         if (!use_letter_tokenization_) {
             sp_.Encode(cleaned_sentence, &tokens);
         } else {
-            for (int i = 0; i < (int)(sentence.size()); ++i) tokens.push_back(static_cast<unsigned char>(sentence[i]));
+            for (size_t i = 0; i < sentence.size(); ++i) tokens.push_back(static_cast<unsigned char>(sentence[i]));
         }        
         if (add_eos_id) tokens.push_back(eos_id);
         return tokens;
@@ -895,7 +900,7 @@ int main(int argc, char* argv[]) {
     bool do_benchmark = false, text_generation = false;
     bool voc_training = false, model_training = false, model_prompting = false, use_sync_file = false;
     double learning_rate = 1e-3, min_learning_rate = 1e-6, weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999, temperature = 0.9;
-    long mini_batch_size = 32, iterations_without_progress_threshold = 50000, top_k = 3;
+    long mini_batch_size = 64, iterations_without_progress_threshold = 50000, top_k = 3;
     std::vector<int> gpus = { 0 };
     set_dnn_prefer_fastest_algorithms();
        
@@ -971,7 +976,7 @@ int main(int argc, char* argv[]) {
             false,      // 8: linear layer         
             true,       // 9: hsplit/hstack layers
             false,      // 10: rms_norm layer
-            true,       // 11: multihead attention model
+            true,      // 11: multihead attention model
             false       // 12: "shakespeare" example
         };
 
@@ -1245,7 +1250,7 @@ int main(int argc, char* argv[]) {
         if (display_debug_info) cout << "\ntest: training attention models\n";
         {
             // Define the network
-            int num_samples = (500 / mini_batch_size) * mini_batch_size;
+            int num_samples = (2500 / mini_batch_size) * mini_batch_size;
             const int num_classes = 256;           
             const int num_epochs = 3000;
 
@@ -1288,7 +1293,7 @@ The fair Ophelia.—Nymph, in thy orisons
 Be all my sins remembered.)";
 
             // Custom values for the local assessment
-            using net_type_a = llm::classification_head<num_classes,
+            using net_type_a = llm::classification_head<num_classes,                
                 llm::v1_1_4::transformer<llm::sequence_size, llm::embedding_size, llm::number_of_heads,
                 input<matrix<float>>>>;            
             using net_type_b = llm::classification_head<num_classes,
@@ -1336,7 +1341,7 @@ Be all my sins remembered.)";
                 trainer_b.set_min_learning_rate(min_learning_rate);
                 trainer_b.set_mini_batch_size(mini_batch_size);
                 trainer_b.be_verbose();
-                trainer_b.set_iterations_without_progress_threshold(50);
+                trainer_b.set_iterations_without_progress_threshold(150);
                 for (int epoch = 0; epoch < num_epochs && trainer_b.get_learning_rate() > trainer_b.get_min_learning_rate() && !g_interrupt_signal_received; ++epoch) {
                     for (size_t i = 0; i < batches.size(); ++i) trainer_b.train_one_step(batches[i], label_batches[i]);
                 }
@@ -1372,9 +1377,9 @@ Be all my sins remembered.)";
                         tokens.push_back(sample);
                     }
                     else {
-                        for (int i = 0; i <= static_cast<int>(text.size()) - sequence_len; ++i) {
+                        for (size_t i = 0; i < static_cast<int>(text.size()) - (sequence_len + 1); ++i) {
                             matrix<int> sample(sequence_len, 1);
-                            for (int j = 0; j < sequence_len; ++j) sample(j, 0) = static_cast<unsigned char>(text[i + j]);
+                            for (size_t j = 0; j < sequence_len; ++j) sample(j, 0) = static_cast<unsigned char>(text[i + j]);
                             tokens.push_back(sample);
                         }
                     }
@@ -1382,24 +1387,32 @@ Be all my sins remembered.)";
                 };
 
                 // Tokenize the Shakespeare text
-                documents data(llm::sequence_size, 0, true);
+                std::vector<matrix<int, 0, 1>> samples;
+                std::vector<unsigned long> labels;
+                documents data(llm::sequence_size, pad_id, true);
                 data.load_text(shakespeare_text, false);
                 std::vector<matrix<int, 0, 1>> samples_txt = tokenize_text(shakespeare_text, llm::sequence_size);
                 cout << "batch size: " << mini_batch_size << endl;
-                cout << "samples used for the training: " << samples_txt.size() << endl;
+                cout << "espected number of samples: " << samples_txt.size() << endl;
+                data.generate_samples(mini_batch_size, samples, labels, false);
+                cout << "number of generated samples: " << data.get_total_presamples() << endl;
+                cout << "number of sample batches: " << (data.get_total_presamples() / mini_batch_size) << endl;
                 std::vector<unsigned long> labels_txt;
-                for (size_t i = 0; i < samples_txt.size(); ++i) labels_txt.push_back(static_cast<unsigned long>(shakespeare_text[i + llm::sequence_size])); // Next character as label              
+                for (size_t i = 0; i < samples_txt.size(); ++i) {
+                    if (i + llm::sequence_size < shakespeare_text.length()) {                        
+                        labels_txt.push_back(static_cast<unsigned long>(shakespeare_text[i + llm::sequence_size])); // Next character as label
+                    }
+                }
                 
                 net_type_b net_b;
-                dnn_trainer<net_type_b> trainer_c(net_b, sgd(weight_decay, beta1), gpus);
+                adam solver(weight_decay, beta1, beta2);
+                dnn_trainer<net_type_b, adam> trainer_c(net_b, solver, gpus);
                 trainer_c.set_learning_rate(learning_rate);
                 trainer_c.set_min_learning_rate(min_learning_rate);
                 trainer_c.set_mini_batch_size(mini_batch_size);
                 trainer_c.be_verbose();
                 trainer_c.set_synchronization_file("llm_shakespeare_model_a.ckp", std::chrono::minutes(5));
-                trainer_c.set_iterations_without_progress_threshold(500);
-                std::vector<matrix<int, 0, 1>> samples;
-                std::vector<unsigned long> labels;
+                trainer_c.set_iterations_without_progress_threshold(2000);
                 if (trainer_c.get_learning_rate() >= trainer_c.get_min_learning_rate()) {
                     while (trainer_c.get_learning_rate() >= trainer_c.get_min_learning_rate() && !g_interrupt_signal_received) {
                         if (data.generate_samples(mini_batch_size, samples, labels, false)) trainer_c.train_one_step(samples, labels);
@@ -1414,20 +1427,21 @@ Be all my sins remembered.)";
 
                     // Test the network with the same data to ensure it has learned something
                     std::vector<unsigned long> predicted_labels_c = net_b(samples_txt);
-                    int num_correct_c = 0;
+                    size_t num_correct_c = 0;
                     for (size_t i = 0; i < labels_txt.size(); ++i) if (predicted_labels_c[i] == labels_txt[i]) ++num_correct_c;
                     double accuracy_c = static_cast<double>(num_correct_c) / labels_txt.size();
-                    DLIB_TEST_MSG(accuracy_c > 0.9, "shakespeare model (accuracy: " + to_string(accuracy_c) + ")");
+                    DLIB_TEST_MSG(accuracy_c > 0.9, "shakespeare model (accuracy: " + to_string(accuracy_c) + ") - right: " +\
+                        to_string(num_correct_c) + " - wrong: " + to_string(labels_txt.size() - num_correct_c));
                 }
                 // Predict the next sequence of characters
-                string input_sequence = "Act Three, Scene One\nTo be or not to be—that is the quest";
+                string input_sequence = "HAMLET By William Shakespeare - Act Three, Scene One\nTo be or not to be—that is the quest";
                 std::vector<matrix<int, 0, 1>> input_tokens = tokenize_text(input_sequence, llm::sequence_size);
                 string start_seq = to_unsigned_char_string(input_tokens.back());
                 size_t pos = input_sequence.find(start_seq);
                 if (pos != string::npos) input_sequence = input_sequence.substr(0, pos + start_seq.length());
                 cout << "input sequence for text generation: <" << start_seq << ">" << endl;
                 matrix<int> next_input(llm::sequence_size, 1);
-                for (int i = 0; i < 430; ++i) {
+                for (int i = 0; i < 450; ++i) {
                     unsigned long next_char = net_b(input_tokens.back());
                     input_sequence += static_cast<unsigned char>(next_char);
 
@@ -1450,7 +1464,7 @@ Be all my sins remembered.)";
                 if (fs::exists(shakespeare_file)) {
                     documents shakespeare_data(llm::sequence_size, 0, true);
                     shakespeare_data.load_documents(shakespeare_file, false);
-                    cout << "loaded " << shakespeare_data.get_total_tokens() << " tokens from " << shakespeare_file << endl;
+                    cout << "loading about " << shakespeare_data.get_total_samples() << " samples from " << shakespeare_file << endl;
 
                     // Reload previous model
                     if (!fs::exists("llm_shakespeare_model_b.ckp")) {
@@ -1477,7 +1491,7 @@ Be all my sins remembered.)";
 
                     // New training loop
                     while (trainer_d.get_learning_rate() >= trainer_d.get_min_learning_rate() && !g_interrupt_signal_received) {
-                        if (shakespeare_data.generate_samples(mini_batch_size, samples, labels)) trainer_d.train_one_step(samples, labels);                        
+                        if (shakespeare_data.generate_samples(mini_batch_size, samples, labels, false)) trainer_d.train_one_step(samples, labels);                        
                         else g_interrupt_signal_received = true;
                     }
                     trainer_d.get_net();
@@ -1631,9 +1645,8 @@ Be all my sins remembered.)";
         
         const string model_sync_filename = fs::current_path().string() + "/ernie_checkpoint.dat";        
         llm::net_v1_1 net;
-        //adam solver(weight_decay, beta1, beta2);
-        //dnn_trainer<llm::net_v1_1, adam> my_trainer(net, solver, gpus);
-        dnn_trainer<llm::net_v1_1> my_trainer(net, sgd(weight_decay, beta1), gpus);
+        adam solver(weight_decay, beta1, beta2);
+        dnn_trainer<llm::net_v1_1, adam> my_trainer(net, solver, gpus);
         my_trainer.set_learning_rate(learning_rate);
         my_trainer.set_min_learning_rate(min_learning_rate);
         my_trainer.set_iterations_without_progress_threshold(iterations_without_progress_threshold);
@@ -1655,7 +1668,7 @@ Be all my sins remembered.)";
             data.load_documents(initial_raw_data);
             fs::remove(initial_raw_data);
         } else data.load_documents(corpus_dir, false);
-        cout << data.get_total_tokens() << " tokens for the training" << endl;
+        cout << "about " << data.get_total_samples() << " samples for the training" << endl;
 
         // Training loop
         while (!g_interrupt_signal_received && my_trainer.get_learning_rate() >= my_trainer.get_min_learning_rate()) {
@@ -1666,7 +1679,6 @@ Be all my sins remembered.)";
         my_trainer.get_net();
         net.clean();
         serialize(language_model) << net;
-        //dlib::net_to_xml(net, "for_debug.xml");
         cout << endl << "language model <" << language_model << "> saved" << endl;
         if (use_sync_file && !g_interrupt_signal_received) {
             fs::remove(model_sync_filename);
