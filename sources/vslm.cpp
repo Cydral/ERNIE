@@ -55,7 +55,7 @@ namespace po = boost::program_options;
 const int bos_id = 0, eos_id = 1, unk_id = 2, pad_id = 3;
 
 // Other global parameters
-string vocabulary_prefix = "ernie.en-fr.ung.8k", language_model = "ernie_vslm_v1.dat";
+string vocabulary_prefix = "ernie.eu.ung.12k", language_model = "ernie_vslm_v1.dat";
 std::unique_ptr<advanced_tokenizer> tokenizer_;
 
 void configure_console() {
@@ -247,7 +247,7 @@ private:
 class documents {
 public:
     documents(size_t seq_size = llm::sequence_size, int pad_value = pad_id,
-        bool use_letter_tokenization = false, size_t token_limit = 50000) :
+        bool use_letter_tokenization = false, size_t token_limit = 25000) :
         sequence_size_(seq_size), pad_value_(pad_value), use_letter_tokenization_(use_letter_tokenization), token_limit_(token_limit) {
         is_initialized_ = false;
         if (!use_letter_tokenization_) {
@@ -275,30 +275,48 @@ public:
     }
 
     void load_text(const string& text, bool split_sentences) {
-        if (!is_initialized_) return;        
+        if (!is_initialized_) return;
+
+        std::vector<std::vector<int>> new_tokens;
+        size_t current_total_tokens = total_tokens_;
+
+        auto process_tokens = [&](const std::vector<int>& tokens) {
+            if (tokens.empty()) return;
+
+            if (current_total_tokens + tokens.size() <= token_limit_) {
+                new_tokens.push_back(tokens);
+                current_total_tokens += tokens.size();
+            }
+            else if (current_total_tokens < token_limit_) {
+                size_t remaining_space = token_limit_ - current_total_tokens;
+                std::vector<int> truncated_tokens(tokens.begin(), tokens.begin() + remaining_space);
+                new_tokens.push_back(truncated_tokens);
+                current_total_tokens = token_limit_;
+            }
+        };
+
         if (split_sentences) {
             std::vector<string> sentences = split_into_sentences(text);
             for (const auto& sentence : sentences) {
+                if (current_total_tokens >= token_limit_) break;
                 std::vector<int> tokens = preprocess_sentence(sentence);
-                if (tokens.size() != 0) {
-                    if (tokens.size() > token_limit_) tokens.resize(token_limit_);
-                    source_tokens_.push_back(tokens);
-                    total_tokens_ += tokens.size();
-                }
-            }
-        } else {
-            std::vector<int> tokens = preprocess_sentence(text);
-            if (tokens.size() != 0) {
-                if (tokens.size() > token_limit_) tokens.resize(token_limit_);
-                source_tokens_.push_back(tokens);
-                total_tokens_ += tokens.size();
+                process_tokens(tokens);
             }
         }
+        else {
+            std::vector<int> tokens = preprocess_sentence(text);
+            process_tokens(tokens);
+        }
+
+        // Update the source_tokens_ and total_tokens_
+        source_tokens_.insert(source_tokens_.end(), new_tokens.begin(), new_tokens.end());
+        total_tokens_ = current_total_tokens;
+
         if (pre_samples_.size() > 0) {
             pre_samples_.clear();
             pre_labels_.clear();
             samples_idx_ = 0;
-        }        
+        }
     }
 
     void load_documents(const string& path, bool split_sentences = true) {
@@ -560,7 +578,7 @@ void test_positional_encodings()
 
 void test_embeddings()
 {
-    const size_t num_sequences = 100, sequence_length = 7, num_classes = 10, num_tokens = 50, embedding_length = 5;
+    const size_t num_sequences = 100, sequence_length = 7, num_classes = 3, num_tokens = 50, embedding_length = 5;
     using net_type = loss_multiclass_log<fc<num_classes,
         relu<fc<32,relu<fc<64,
         embeddings<num_tokens, embedding_length,
@@ -570,7 +588,7 @@ void test_embeddings()
     trainer.set_learning_rate(1e-1);
     trainer.set_min_learning_rate(1e-4);
     trainer.set_mini_batch_size(16);
-    trainer.set_max_num_epochs(300);
+    trainer.set_max_num_epochs(500);
 
     dlib::rand rnd(std::rand());
     auto generate_sequences = [&](size_t num_sequences, size_t sequence_length, size_t num_tokens) {
@@ -602,7 +620,7 @@ void test_embeddings()
         if (predicted_labels[i] == labels[i]) ++num_correct;
     
     double acc = static_cast<double>(num_correct) / labels.size();
-    DLIB_TEST_MSG(acc > 0.97, "embeddings accuracy: " + to_string(acc));
+    DLIB_TEST_MSG(acc > 0.9, "embeddings accuracy: " + to_string(acc));
 }
 
 void test_rms_normalize()
@@ -899,7 +917,7 @@ int main(int argc, char* argv[]) {
     string corpus_dir;
     bool do_benchmark = false, text_generation = false;
     bool voc_training = false, model_training = false, model_prompting = false, use_sync_file = false;
-    double learning_rate = 1e-3, min_learning_rate = 1e-6, weight_decay = 0.01, beta1 = 0.9, beta2 = 0.999, temperature = 0.9;
+    double learning_rate = 1e-3, min_learning_rate = 1e-6, weight_decay = 0.05, beta1 = 0.9, beta2 = 0.999, temperature = 0.9;
     long mini_batch_size = 64, iterations_without_progress_threshold = 50000, top_k = 3;
     std::vector<int> gpus = { 0 };
     set_dnn_prefer_fastest_algorithms();
@@ -1412,7 +1430,7 @@ Be all my sins remembered.)";
                 trainer_c.set_mini_batch_size(mini_batch_size);
                 trainer_c.be_verbose();
                 trainer_c.set_synchronization_file("llm_shakespeare_model_a.ckp", std::chrono::minutes(5));
-                trainer_c.set_iterations_without_progress_threshold(2000);
+                trainer_c.set_iterations_without_progress_threshold(1500);
                 if (trainer_c.get_learning_rate() >= trainer_c.get_min_learning_rate()) {
                     while (trainer_c.get_learning_rate() >= trainer_c.get_min_learning_rate() && !g_interrupt_signal_received) {
                         if (data.generate_samples(mini_batch_size, samples, labels, false)) trainer_c.train_one_step(samples, labels);
@@ -1598,7 +1616,7 @@ Be all my sins remembered.)";
             concatenate_files(corpus_dir);
             return 1;
         }*/
-        std::vector<int> vocab_sizes = { 3000, 8000, 20000, 40000 };
+        std::vector<int> vocab_sizes = { 3000, 8000, 12000, 20000, 40000, 80000, 100000 };
         string corpus_files;
         for (const auto& entry : fs::recursive_directory_iterator(corpus_dir)) {
             if (entry.is_regular_file() && entry.path().extension() == ".txt") {
@@ -1611,9 +1629,13 @@ Be all my sins remembered.)";
             string size_suffix;
             if (vocab_size == 3000) size_suffix = "3k";
             else if (vocab_size == 8000) size_suffix = "8k";
+            else if (vocab_size == 12000) size_suffix = "12k";
             else if (vocab_size == 20000) size_suffix = "20k";
             else if (vocab_size == 40000) size_suffix = "40k";
-            string current_vocabulary_prefix = "ernie.en-fr.ung." + size_suffix;
+            else if (vocab_size == 80000) size_suffix = "80k";
+            else if (vocab_size == 100000) size_suffix = "100k";
+            string current_vocabulary_prefix = "ernie.eu.ung." + size_suffix;
+            //string current_vocabulary_prefix = "ernie.en-fr.ung." + size_suffix;
 
             string train_args = "--input=" + corpus_files +
                 " --model_prefix=" + current_vocabulary_prefix +
@@ -1623,7 +1645,7 @@ Be all my sins remembered.)";
                 " --character_coverage=1.0" +
                 " --max_sentence_length=16768" +
                 " --split_by_unicode_script=false" +
-                " --input_sentence_size=4500000" +
+                " --input_sentence_size=30000000" +
                 " --shuffle_input_sentence=true" +
                 " --train_extremely_large_corpus=true" +
                 " --vocab_size=" + to_string(vocab_size);

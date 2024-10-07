@@ -23,8 +23,8 @@ namespace llm
     using namespace dlib;
 
     // Global parameters for the small Transformer network
-    const long vocab_size = 20000;           // Size of the vocabulary
-    const long number_of_blocks = 3;         // Number of transformer blocks
+    const long vocab_size = 12000;           // Size of the vocabulary
+    const long number_of_blocks = 2;         // Number of transformer blocks
     const long number_of_heads = 16;         // Number of attention heads
     const long embedding_size = 256;         // Size of the embedding (d_model)
     const long sequence_size = 64;           // Maximum length of the input sequence
@@ -49,7 +49,51 @@ namespace llm
 
     // Classification head
     template <long num_logits, typename SUBNET>
-    using classification_head = loss_multiclass_log<fc<num_logits, rms_norm<SUBNET>>>;
+    using classification_head = loss_multiclass_log<fc<num_logits, SUBNET>>;
+
+    /*
+        Selector Layer
+
+        This custom layer, termed "Selector", is designed to enhance the model's ability to capture
+        and process complex relationships between words and their vector representations before
+        the final classification stage. It combines principles from convolutional neural networks (CNNs)
+        and fully connected networks to create a powerful feature extraction and integration mechanism.
+
+        Key components and their rationale:
+        1. Convolutional layers:
+           - Capture local patterns and relationships between adjacent words or features.
+           - Hierarchical feature extraction with increasing number of filters (nb_heads to nb_heads*2).
+        2. Max pooling:
+           - Reduces dimensionality while retaining the most salient features.
+           - Introduces a degree of translational invariance.
+        3. Fully connected layers:
+           - Enable global feature integration and complex non-linear mappings.
+           - Expansion (d_model*4) followed by contraction (d_model*2) allows for rich feature interaction.
+        4. Activation functions (ReLU):
+           - Introduce non-linearity, crucial for learning complex patterns.
+           - Help mitigate the vanishing gradient problem.
+        5. Batch normalization:
+           - Stabilizes learning by normalizing layer inputs.
+           - Can accelerate training and improve generalization.
+
+        This architecture draws inspiration from successful CNN models in computer vision, adapting
+        the concept to NLP tasks. It aims to provide a final layer of abstraction and feature
+        integration before classification, potentially improving the model's ability to discern
+        subtle patterns and relationships in the input data.
+        The "Selector" name aptly describes its function: it selects and emphasizes the most
+        relevant features and relationships for the downstream task, acting as a sophisticated
+        feature selector and integrator.
+    
+        This layer is intended to be used as a termination layer before the final classification
+        in transformer-based or other deep learning models for NLP tasks. It can be particularly
+        useful in scenarios where capturing both local and global relationships between words
+        and their vector representations is crucial for the task at hand.
+    */
+    template <long d_model, long nb_heads, typename SUBNET>
+    using selectors = relu<fc<d_model * 2, relu<bn_fc<fc<d_model * 4,
+        max_pool<2, 2, 2, 2, relu<con<nb_heads * 2, 5, 5, 1, 1,
+        max_pool<3, 3, 2, 2, relu<con<nb_heads, 7, 7, 1, 1,
+        SUBNET>>>>>>>>>>>;
 
     namespace v1_1_4 {
         template <long seq_len, long d_model, typename SUBNET>
@@ -72,21 +116,20 @@ namespace llm
             multm_prev4<hsplit<nb_heads, query<seq_len, d_model, skip2<
             tag4<transpose<hsplit<nb_heads, key<seq_len, d_model, skip2<
             tag3<hsplit<nb_heads, value<seq_len, d_model,
-            tag2<hsplit<3, linear_no_bias<d_model * 3,
-            rms_norm<
-            tag1<SUBNET>>>>>>>>>>>>>>>>>>>>>>>>;
+            tag2<hsplit<3, linear_no_bias<d_model * 3,            
+            tag1<SUBNET>>>>>>>>>>>>>>>>>>>>>>>;
 
         template <long d_model, typename SUBNET>
         using feed_forward =
             add_prev5<            
-            linear<d_model, dropout_rate<10, gelu<linear<d_model * 4,
-            rms_norm<
-            tag5<SUBNET>>>>>>>;
+            linear<d_model, gelu<linear<d_model * 4,            
+            tag5<SUBNET>>>>>;
 
         template <long seq_len, long d_model, long nb_heads, typename SUBNET>
         using transformer =
             feed_forward<d_model,
-            multihead_attention<seq_len, d_model, nb_heads, SUBNET>>;
+            multihead_attention<seq_len, d_model, nb_heads, 
+            rms_norm<SUBNET>>>;
     }
 
     /**
@@ -115,9 +158,10 @@ namespace llm
     using transformer_block = v1_1_4::transformer<sequence_size, embedding_size, number_of_heads, SUBNET>;
 
     using net_v1_1 = classification_head<vocab_size,        
+        selectors<embedding_size, number_of_heads,
         repeat<number_of_blocks, transformer_block,
         positional_embeddings<vocab_size, embedding_size,
-        input<matrix<int, 0, 1>>>>>;
+        input<matrix<int, 0, 1>>>>>>;
 }
 
 #endif // LlmNet_H
