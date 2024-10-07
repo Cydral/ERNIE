@@ -137,9 +137,11 @@ Shakespeare Test
 The Shakespeare test initially demonstrates ERNIE's ability to memorize and reproduce text from William Shakespeare's works. Here's a sample output:
 
 ```mizar
-Input: "To be or not to be—that is the ques"
+Input: "eare - Act Three, Scene One
+To be or not to be—that is the que"
 
-Generated text: "To be or not to be—that is the question:
+Generated text: "HAMLET By William Shakespeare - Act Three, Scene One
+To be or not to be—that is the question:
 Whether ’tis nobler in the mind to suffer
 The slings and arrows of outrageous fortune,
 Or to take arms against a sea of troubles
@@ -148,7 +150,8 @@ No more—and by a sleep to say we end
 The heartache and the thousand natural shocks
 That flesh is heir to—’tis a consummation
 Devoutly to be wished. To die, to sleep—
-To sleep, perchance to dream. Ay, there (...)"
+To sleep, perchance to dream. Ay, there’s the rub,
+For in that sleep of death what dream (...)"
 ```
 It's important to note that this example primarily showcases ERNIE's capacity for memorization rather than true creative generation. The model has essentially learned to recite a well-known passage from Shakespeare's "Hamlet" verbatim when given the beginning of the famous soliloquy.
 While this demonstrates the network's ability to learn and reproduce complex text patterns, it does not necessarily indicate an understanding of Shakespeare's writing style or an ability to generate original content in that style.
