@@ -1,5 +1,6 @@
 # ERNIE
 <p><i>This README provides a comprehensive overview of the ERNIE project, including its background, key features, installation instructions, usage examples, and acknowledgments. It highlights the custom layers developed for the project and emphasizes its role in extending Dlib's capabilities for NLP tasks. The content is structured to be informative and engaging for potential users and contributors on GitHub.</i></p>
+
 <p align="center"><img src="https://github.com/Cydral/ERNIE/blob/main/ERNIE_logo.png" alt=""></p>
 
 ## Introduction
@@ -153,6 +154,21 @@ It's important to note that this example primarily showcases ERNIE's capacity fo
 While this demonstrates the network's ability to learn and reproduce complex text patterns, it does not necessarily indicate an understanding of Shakespeare's writing style or an ability to generate original content in that style.
 
 For a more comprehensive test of ERNIE's creative capabilities, we subsequently train the model on Shakespeare's complete works and challenge it to generate a new sonnet from an original starting line.
+
+## Key Changes in Source Code
+The main modifications made to the source code include:
+1. Addition of custom layers for NLP tasks, such as embedding_, positional_encoding_, linear_, masked_attention_, softmaxm_, and scale_weights_.
+2. Implementation of a complete transformer block using the custom layers.
+3. Development of a comprehensive training pipeline for the language model.
+4. Integration of text generation capabilities and a chat mode for interactive use.
+5. Creation of a benchmarking suite to test the model's performance and individual Dlib functions.
+6. Enhancements to tokenization and data preprocessing, including support for the SentencePiece library.
+7. Improvements to the model architecture, such as the addition of a "Selector" layer for enhanced feature extraction and integration.
+8. Optimization of matrix operations and integration with Dlib's BLAS interface for improved performance.
+9. Addition of command-line options for configuring model training, text generation, and benchmarking.
+10. Refinements to the Shakespeare test and inclusion of a more advanced test that generates original sonnets.
+
+These modifications extend Dlib's functionality for NLP tasks, provide a complete example of training and using a transformer-based language model, and showcase the model's text generation capabilities. The updated source code serves as a foundation for further experimentation and development in the field of natural language processing using Dlib.
 
 ## Acknowledgements
 This project would not have been possible without the incredible work of the Dlib community.
