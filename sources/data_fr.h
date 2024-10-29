@@ -21,6 +21,70 @@
 
 using namespace std;
 
+const string shakespeare_test = R"(HAMLET By William Shakespeare
+(...)
+I'll tent him to the quick: if he but blench,
+I know my course. The spirit that I have seen
+May be the devil: and the devil hath power
+To assume a pleasing shape; yea, and perhaps
+Out of my weakness and my melancholy,
+As he is very potent with such spirits,
+Abuses me to damn me: I'll have grounds
+More relative than this: the play's the thing
+Wherein I'll catch the conscience of the king.
+
+- Act Three, Scene One
+To be or not to be-that is the quest)";
+
+const string shakespeare_text = R"(HAMLET By William Shakespeare
+(...)
+I'll tent him to the quick: if he but blench,
+I know my course. The spirit that I have seen
+May be the devil: and the devil hath power
+To assume a pleasing shape; yea, and perhaps
+Out of my weakness and my melancholy,
+As he is very potent with such spirits,
+Abuses me to damn me: I'll have grounds
+More relative than this: the play's the thing
+Wherein I'll catch the conscience of the king.
+
+- Act Three, Scene One
+To be or not to be-that is the question:
+Whether 'tis nobler in the mind to suffer
+The slings and arrows of outrageous fortune,
+Or to take arms against a sea of troubles
+And, by opposing, end them. To die, to sleep-
+No more-and by a sleep to say we end
+The heartache and the thousand natural shocks
+That flesh is heir to-'tis a consummation
+Devoutly to be wished. To die, to sleep-
+To sleep, perchance to dream. Ay, there's the rub,
+For in that sleep of death what dreams may come,
+When we have shuffled off this mortal coil,
+Must give us pause. There's the respect
+That makes calamity of so long life.
+For who would bear the whips and scorns of time,
+Th' oppressor's wrong, the proud man's contumely,
+The pangs of despised love, the law's delay,
+The insolence of office, and the spurns
+That patient merit of the unworthy takes,
+When he himself might his quietus make
+With a bare bodkin? Who would fardels bear,
+To grunt and sweat under a weary life,
+But that the dread of something after death,
+The undiscovered country from whose bourn
+No traveler returns, puzzles the will
+And makes us rather bear those ills we have
+Than fly to others that we know not of?
+Thus conscience does make cowards of us all,
+And thus the native hue of resolution
+Is sicklied o’er with the pale cast of thought,
+And enterprises of great pith and moment
+With this regard their currents turn awry
+And lose the name of action.-Soft you now,
+The fair Ophelia.-Nymph, in thy orisons
+Be all my sins remembered.)";
+
 std::vector<string> raw_data = {
 R"(La Terre est la troisième planète du système solaire, orbitant autour du Soleil à une distance moyenne de 149,6 millions de kilomètres. Elle est la plus grande des quatre planètes telluriques et la cinquième plus grande planète du système solaire. La Terre s'est formée il y a environ 4,54 milliards d'années par accrétion à partir du disque protoplanétaire qui entourait le jeune Soleil. Sa surface est composée de plusieurs plaques tectoniques qui se déplacent lentement au fil du temps, entraînant la formation de montagnes, de volcans et de tremblements de terre. L'atmosphère de la Terre se compose principalement d'azote (78 %) et d'oxygène (21 %), avec de petites quantités d'autres gaz tels que l'argon et le dioxyde de carbone. Cette atmosphère protège la surface de la Terre des rayonnements solaires nocifs et permet de maintenir une température moyenne d'environ 15 °C, propice à la vie. La Terre possède également un champ magnétique généré par les mouvements de convection dans son noyau externe liquide, composé principalement de fer et de nickel. Ce champ magnétique forme une magnétosphère qui dévie le vent solaire et protège la surface de la Terre des particules chargées.)",
 R"(Les êtres humains, appartenant à l'espèce Homo sapiens, sont des mammifères primates de la famille des hominidés. Ils se caractérisent par un cerveau volumineux, une posture verticale, une bipédie exclusive et des mains préhensiles capables de manipuler des outils. Les humains ont une capacité cognitive avancée qui leur permet de communiquer de manière complexe, principalement par le langage, mais aussi par l'art, la musique et l'écriture. Cette capacité cognitive a permis aux humains de développer des sociétés complexes, des cultures diversifiées et des technologies sophistiquées. Les humains sont originaires d'Afrique, où ils sont apparus il y a environ 300 000 ans. Au fil du temps, ils ont migré et se sont adaptés à presque tous les environnements de la planète, des forêts tropicales aux régions polaires en passant par les déserts. Les humains sont des êtres sociaux qui vivent généralement en groupes familiaux et en communautés plus larges. Ils ont développé des systèmes politiques, économiques et religieux variés pour organiser leur vie en société. Les humains ont un impact significatif sur leur environnement, modifiant les écosystèmes par l'agriculture, l'urbanisation et l'industrialisation. Ils font face à des défis mondiaux tels que le changement climatique, la perte de biodiversité et les inégalités socio-économiques, qui nécessitent une coopération et une action collective à l'échelle mondiale.)",

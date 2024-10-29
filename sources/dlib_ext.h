@@ -132,6 +132,71 @@ void DBG_INFO(std::string dbg_msg, const tensor& t, const bool display_t = false
     }
 }
 
+namespace resnet34 {
+    using namespace dlib;
+    template <template <typename> class BN = bn_con, template <typename> class ACT = relu>
+    struct def {
+        template <long N, int K, int S, typename SUBNET>
+        using conv = add_layer<con_<N, K, K, S, S, K / 2, K / 2>, SUBNET>;
+
+        template <typename INPUT>
+        using stem = add_layer<max_pool_<3, 3, 2, 2, 1, 1>, ACT<BN<conv<64, 7, 2, INPUT>>>>;
+
+        template <long N, int S, typename SUBNET>
+        using basicblock = BN<conv<N, 3, 1, ACT<BN<conv<N, 3, S, SUBNET>>>>>;
+
+        template <template <long, int, typename> class BLOCK, long N, typename SUBNET>
+        using residual = ACT<add_prev1<BLOCK<N, 1, tag1<SUBNET>>>>;
+
+        template <template <long, int, typename> class BLOCK, long N, long F, long S, typename SUBNET>
+        using transition = ACT<add_prev2<BN<conv<N* F, 1, S, skip1<tag2<BLOCK<N, S, tag1<SUBNET>>>>>>>>;
+
+        template <typename SUBNET> using resbasicblock_512 = residual<basicblock, 512, SUBNET>;
+        template <typename SUBNET> using resbasicblock_256 = residual<basicblock, 256, SUBNET>;
+        template <typename SUBNET> using resbasicblock_128 = residual<basicblock, 128, SUBNET>;
+        template <typename SUBNET> using resbasicblock_64 = residual<basicblock, 64, SUBNET>;
+
+        template <long N512, long N256, long N128, long N64, typename INPUT>
+        using backbone_basicblock = repeat<N512, resbasicblock_512, transition<basicblock, 512, 1, 2,
+            repeat<N256, resbasicblock_256, transition<basicblock, 256, 1, 2,
+            repeat<N128, resbasicblock_128, transition<basicblock, 128, 1, 2,
+            repeat<N64, resbasicblock_64, transition<basicblock, 64, 1, 1,
+            stem<INPUT>>>>>>>>>;
+
+        template <typename INPUT> using backbone = backbone_basicblock<2, 5, 3, 2, INPUT>;
+    };
+}
+
+namespace densenet
+{
+    using namespace dlib;
+    // ACT can be any activation layer, BN must be bn_con or affine layer and k is the growth rate
+    template <template <typename> class ACT, template <typename> class BN, long k>
+    struct def {
+        template <long num_filters, long ks, int s, typename SUBNET>
+        using conp = add_layer<con_<num_filters, ks, ks, s, s, ks / 2, ks / 2>, SUBNET>;
+
+        template <typename INPUT>
+        using stem = add_layer<max_pool_<3, 3, 2, 2, 1, 1>, ACT<BN<conp<2 * k, 7, 2, INPUT>>>>;
+
+        template <long num_filters, typename SUBNET>
+        using transition = avg_pool<2, 2, 2, 2, con<num_filters, 1, 1, 1, 1, ACT<BN<SUBNET>>>>;
+
+        template <typename SUBNET>
+        using dense_layer = concat2<tag1, tag2,
+            tag2<conp<k, 3, 1,
+            ACT<BN<conp<4 * k, 1, 1,
+            ACT<BN<tag1<SUBNET>>>>>>>>>;
+
+        template <size_t n4, size_t n3, size_t n2, size_t n1, typename INPUT>
+        using backbone = ACT<BN<
+            repeat<n4, dense_layer, transition<k* (2 + n1 + 2 * n2 + 4 * n3) / 8,
+            repeat<n3, dense_layer, transition<k* (2 + n1 + 2 * n2) / 4,
+            repeat<n2, dense_layer, transition<k* (2 + n1) / 2,
+            repeat<n1, dense_layer, stem<INPUT>>>>>>>>>>;
+    };
+}
+
 namespace dlib {
     namespace cpu {
         /* TO BE ADDED TO <cpu_dlib.cpp> */
@@ -1813,8 +1878,8 @@ namespace dlib {
         void setup(const SUBNET& /*sub*/)
         {
             embs.set_size(num_embeddings, embedding_dim);
-            dlib::rand rnd(std::rand());
-            randomize_parameters(embs, num_embeddings + embedding_dim, rnd);
+            tt::tensor_rand rnd(std::rand());
+            rnd.fill_gaussian(embs);
         }
 
         template <typename SUBNET>
@@ -2076,14 +2141,14 @@ namespace dlib {
         {
             const auto& prev_output = sub.get_output();
             DLIB_CASSERT((long)num_inputs == sub.get_output().nc(),
-                "The size of the input tensor to this fc layer doesn't match the size the fc layer was trained with.");
+                "The size of the input tensor to this linear layer doesn't match the size the linear layer was trained with.");
             output.set_size(prev_output.num_samples(), prev_output.k(), prev_output.nr(), num_outputs);
             
             auto o = alias_tensor(output.num_samples() * output.k() * output.nr(), num_outputs)(output, 0);
             auto so = alias_tensor(prev_output.num_samples() * prev_output.k() * prev_output.nr(), num_inputs)(prev_output, 0);
 
             auto w = weights(params, 0);
-            tt::gemm(0, (tensor&)o, 1, so, false, w, false, tt::CHANNEL_WISE);
+            tt::gemm(0, (tensor&)o, 1, so, false, w, false, tt::gemm_mode::CHANNEL_WISE);
             
             if (bias_mode == LINEAR_HAS_BIAS)
             {
@@ -2101,7 +2166,7 @@ namespace dlib {
                 const auto& prev_output = sub.get_output();
                 auto pw = weights(params_grad, 0);
                 auto so = alias_tensor(prev_output.num_samples() * prev_output.k() * prev_output.nr(), num_inputs)(prev_output, 0);
-                tt::gemm(0, pw, learning_rate_multiplier, so, true, gi, false, tt::CHANNEL_WISE);
+                tt::gemm(0, pw, learning_rate_multiplier, so, true, gi, false, tt::gemm_mode::CHANNEL_WISE);
 
                 if (bias_mode == LINEAR_HAS_BIAS)
                 {
@@ -2113,7 +2178,7 @@ namespace dlib {
             const auto& prev_gradient = sub.get_gradient_input();
             auto w = weights(params, 0);
             auto sgi = alias_tensor(prev_gradient.num_samples() * prev_gradient.k() * prev_gradient.nr(), num_inputs)(prev_gradient, 0);
-            tt::gemm(1, (tensor&)sgi, 1, gi, false, w, true, tt::CHANNEL_WISE);
+            tt::gemm(1, (tensor&)sgi, 1, gi, false, w, true, tt::gemm_mode::CHANNEL_WISE);
         }
 
         alias_tensor_instance get_weights() { return weights(params, 0); }
@@ -2227,6 +2292,7 @@ namespace dlib {
             output.set_size(prev.num_samples(), prev.k() * num_heads, prev.nr(), prev.nc() / num_heads);
 
             tt::reorg2(false, output, 1, num_heads, prev);
+            //tt::split_columns(false, output, prev, num_heads);
         }
 
         template <typename SUBNET>
@@ -2235,6 +2301,7 @@ namespace dlib {
             auto& grad = sub.get_gradient_input();
 
             tt::reorg_gradient2(true, grad, 1, num_heads, gradient_input);
+            //tt::merge_columns(true, grad, gradient_input);
         }
 
         const tensor& get_layer_params() const { return params; }
@@ -2287,6 +2354,7 @@ namespace dlib {
             output.set_size(prev.num_samples(), 1, prev.nr(), prev.nc() * prev.k());
 
             tt::reorg_gradient2(false, output, 1, prev.k(), prev);
+            //tt::merge_columns(false, output, prev);
         }
         template <typename SUBNET>
         void backward(const tensor& gradient_input, SUBNET& sub, tensor& /*params_grad*/)
@@ -2294,6 +2362,7 @@ namespace dlib {
             auto& grad = sub.get_gradient_input();
 
             tt::reorg2(true, grad, 1, grad.k(), gradient_input);
+            //tt::split_columns(true, grad, gradient_input, grad.k());
         }
 
         const tensor& get_layer_params() const { return params; }
@@ -2664,6 +2733,327 @@ namespace dlib {
 
     template <typename SUBNET>
     using softmaxm = add_layer<softmax2_<PLANE_WISE>, SUBNET>;
+
+// ----------------------------------------------------------------------------------------
+    /* TO BE ADDED TO <loss.h> */
+    class loss_crossentropy_
+    {
+    public:
+
+        typedef unsigned long training_label_type;
+        typedef unsigned long output_label_type;
+
+        template <
+            typename SUB_TYPE,
+            typename label_iterator
+        >
+        void to_label(
+            const tensor& input_tensor,
+            const SUB_TYPE& sub,
+            label_iterator iter
+        ) const
+        {
+            const tensor& output_tensor = sub.get_output();
+            DLIB_CASSERT(sub.sample_expansion_factor() == 1);
+            DLIB_CASSERT(input_tensor.num_samples() == output_tensor.num_samples());
+
+            const size_t num_channels = output_tensor.k();
+            const size_t plane_size = output_tensor.nr() * output_tensor.nc();
+            matrix<float> sums;
+            sums.set_size(1, output_tensor.nc());
+            for (long n = 0; n < output_tensor.num_samples(); ++n)
+            {
+                sums = 0.0f;
+                for (long k = 0; k < output_tensor.k(); ++k)
+                {
+                    auto slice = alias_tensor(output_tensor.nr(), output_tensor.nc())(output_tensor, (n * num_channels + k) * plane_size);
+                    sums += sum_rows(mat(slice));
+                }
+                // The index of the largest output for this sample is the label
+                *iter++ = index_of_max(sums);
+            }
+        }
+
+        template <
+            typename const_label_iterator,
+            typename SUBNET
+        >
+        double compute_loss_value_and_gradient(
+            const tensor& input_tensor,
+            const_label_iterator truth,
+            SUBNET& sub
+        ) const
+        {
+            const tensor& output_tensor = sub.get_output();
+            tensor& grad = sub.get_gradient_input();
+
+            DLIB_CASSERT(sub.sample_expansion_factor() == 1);
+            DLIB_CASSERT(input_tensor.num_samples() != 0);
+            DLIB_CASSERT(input_tensor.num_samples() % sub.sample_expansion_factor() == 0);
+            DLIB_CASSERT(input_tensor.num_samples() == grad.num_samples());
+            DLIB_CASSERT(input_tensor.num_samples() == output_tensor.num_samples());
+            DLIB_CASSERT(have_same_dimensions(output_tensor, grad));
+
+            tt::softmax(grad, output_tensor, softmax_mode::PLANE_WISE);
+
+            double loss = 0;
+            const size_t plane_size = output_tensor.nr() * output_tensor.nc();
+            const float scale = 1.0f / output_tensor.num_samples();
+
+            for (long n = 0; n < output_tensor.num_samples(); ++n)
+            {
+                const long y = (long)*truth++;
+                DLIB_CASSERT(y < output_tensor.nc());                
+
+                float total_prob = 0.0f;
+                for (long k = 0; k < output_tensor.k(); ++k)
+                {
+                    auto grad_plane = alias_tensor(output_tensor.nr(), output_tensor.nc())(grad, (n * output_tensor.k() + k) * plane_size);
+                    for (long r = 0; r < output_tensor.nr(); ++r)
+                    {
+                        const long idx = r * output_tensor.nc() + y;
+                        total_prob += grad_plane.host()[idx];
+
+                        for (long c = 0; c < output_tensor.nc(); ++c)
+                        {
+                            const long idx = r * output_tensor.nc() + c;
+                            const float prob = grad_plane.host()[idx];
+                            grad_plane.host()[idx] = scale * (prob - (c == y ? 1.0f : 0.0f));                           
+                        }
+                    }
+                }
+                loss -= scale * safe_log(total_prob / (output_tensor.k() * output_tensor.nr()));
+            }
+
+            return loss;
+        }
+
+        friend void serialize(const loss_crossentropy_&, std::ostream& out)
+        {
+            serialize("loss_crossentropy_", out);
+        }
+
+        friend void deserialize(loss_crossentropy_&, std::istream& in)
+        {
+            std::string version;
+            deserialize(version, in);
+            if (version != "loss_crossentropy_")
+                throw serialization_error("Unexpected version found while deserializing dlib::loss_crossentropy_.");
+        }
+
+        friend std::ostream& operator<<(std::ostream& out, const loss_crossentropy_&)
+        {
+            out << "loss_crossentropy";
+            return out;
+        }
+
+        friend void to_xml(const loss_crossentropy_& /*item*/, std::ostream& out)
+        {
+            out << "<loss_crossentropy />";
+        }
+
+    };
+
+    template <typename SUBNET>
+    using loss_crossentropy = add_loss_layer<loss_crossentropy_, SUBNET>;
+
+    /* TO BE ADDED TO <input_abstract.h> */
+// ----------------------------------------------------------------------------------------
+
+    //template <typename T, size_t vocab_size_>
+    //class one_hot_
+    //{
+        /*!
+            WHAT THIS OBJECT REPRESENTS
+                This is a custom input layer that converts an integer stream into a one-hot tensor.
+
+            THREAD SAFETY
+                to_tensor() must be thread safe.  That is, multiple threads must be able to
+                make calls to to_tensor() on a single instance of this object at the same
+                time.
+        !*/
+    //public:
+    //    typedef matrix<int, 0, 1> input_type;
+
+    //    one_hot_(
+    //    );
+        /*!
+            ensures
+                - Default constructs this object. This function is not required to do
+                  anything in particular but it must exist, that is, it is required that
+                  layer objects be default constructable.
+        !*/
+
+    //    template <typename forward_iterator>
+    //    void to_tensor(
+    //        forward_iterator ibegin,
+    //        forward_iterator iend,
+    //        resizable_tensor& data
+    //    ) const;
+        /*!
+            requires
+                - [ibegin, iend) is an iterator range over input_type objects.
+                - std::distance(ibegin,iend) > 0
+                - The input range should contain matrices that all have the same
+                  dimensions.
+            ensures
+                - Converts the iterator range into a one-hot tensor and stores it into #data.
+                - #data.num_samples() == std::distance(ibegin,iend)
+                - #data.k() == 1
+                - #data.nr() == nr
+                - #data.nc() == vocab_size_
+                  where nr is the number of rows in the input matrices.
+        !*/
+
+    //    friend void serialize(const one_hot_& item, std::ostream& out);
+    //    friend void deserialize(one_hot_& item, std::istream& in);
+        /*!
+            provides serialization support
+        !*/
+
+    //    friend std::ostream& operator<<(std::ostream& out, const one_hot_& item);
+        /*!
+            print a string describing this layer.
+        !*/
+
+    //   friend void to_xml(const one_hot_& item, std::ostream& out);
+        /*!
+            This function is optional, but required if you want to print your networks with
+            net_to_xml().  Therefore, to_xml() prints a layer as XML.
+        !*/
+    //};*/
+
+    // ----------------------------------------------------------------------------------------
+
+    template <typename T, size_t VOCAB_SIZE>
+    class one_hot
+    {
+    public:
+        typedef matrix<int, 0, 1> input_type;
+
+        one_hot() {}        
+
+        template <typename forward_iterator>
+        void to_tensor(
+            forward_iterator ibegin,
+            forward_iterator iend,
+            resizable_tensor& data
+        ) const
+        {
+            DLIB_CASSERT(std::distance(ibegin, iend) > 0);
+            const auto nr = ibegin->nr();
+            const auto nc = ibegin->nc();
+            DLIB_CASSERT(nr > 0);
+            DLIB_CASSERT(nc == 1);
+
+            data.set_size(std::distance(ibegin, iend), 1, nr, VOCAB_SIZE);
+            data = 0.0f;
+
+            for (auto s = ibegin; s != iend; ++s)
+            {
+                for (long r = 0; r < nr; ++r)
+                {
+                    const long c = (*s)(r, 0);
+                    data.host()[tensor_index(data, s - ibegin, 0, r, c)] = 1.0f;
+                }
+            }
+        }
+
+        friend void serialize(const one_hot& item, std::ostream& out)
+        {
+            serialize("one_hot", out);
+        }
+
+        friend void deserialize(one_hot& item, std::istream& in)
+        {
+            std::string version;
+            deserialize(version, in);
+            if (version != "one_hot_")
+                throw serialization_error("Unexpected version found while deserializing dlib::one_hot.");
+        }
+
+        friend std::ostream& operator<<(std::ostream& out, const one_hot& item)
+        {
+            out << "one_hot";
+            return out;
+        }
+
+        friend void to_xml(const one_hot& item, std::ostream& out)
+        {
+            out << "<one_hot/>";
+        }
+    };
+
+    template <typename T, size_t VOCAB_SIZE, size_t EMB_SIZE>
+    class static_embeddings
+    {
+    public:
+        typedef matrix<int, 0, 1> input_type;
+
+        static_embeddings()
+        {
+            embeddings_.set_size(VOCAB_SIZE, EMB_SIZE);
+            tt::tensor_rand rnd(std::rand());
+            rnd.fill_gaussian(embeddings_);
+        }
+
+        template <typename forward_iterator>
+        void to_tensor(
+            forward_iterator ibegin,
+            forward_iterator iend,
+            resizable_tensor& data
+        ) const
+        {
+            DLIB_CASSERT(std::distance(ibegin, iend) > 0);
+            const auto nr = ibegin->nr();
+            const auto nc = ibegin->nc();
+            DLIB_CASSERT(nr > 0);
+            DLIB_CASSERT(nc == 1);
+
+            data.set_size(std::distance(ibegin, iend), 1, nr, EMB_SIZE);
+
+            for (auto s = ibegin; s != iend; ++s)
+            {
+                for (long r = 0; r < nr; ++r)
+                {
+                    const long idx = (*s)(r, 0);
+                    for (long c = 0; c < EMB_SIZE; ++c)
+                    {
+                        data.host()[tensor_index(data, s - ibegin, 0, r, c)] = embeddings_.host()[tensor_index(embeddings_, idx, c, 0, 0)];
+                    }
+                }
+            }
+        }
+
+        friend void serialize(const static_embeddings& item, std::ostream& out)
+        {
+            serialize("static_embeddings", out);
+            serialize(item.embeddings_, out);
+        }
+
+        friend void deserialize(static_embeddings& item, std::istream& in)
+        {
+            std::string version;
+            deserialize(version, in);
+            if (version != "static_embeddings")
+                throw serialization_error("Unexpected version found while deserializing dlib::static_embeddings.");
+            deserialize(item.embeddings_, in);
+        }
+
+        friend std::ostream& operator<<(std::ostream& out, const static_embeddings& item)
+        {
+            out << "static_embeddings";
+            return out;
+        }
+
+        friend void to_xml(const static_embeddings& item, std::ostream& out)
+        {
+            out << "<static_embeddings/>";
+        }
+
+    private:
+        resizable_tensor embeddings_;
+    };
 }
 
 #endif // DlibExt

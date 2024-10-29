@@ -53,16 +53,20 @@ namespace fs = std::filesystem;
 namespace po = boost::program_options;
 
 const int bos_id = 0, eos_id = 1, unk_id = 2, pad_id = 3;
+struct a_training {
+    std::vector<matrix<int, 0, 1>> samples;
+    std::vector<unsigned long> labels;
+};
 
 // Other global parameters
-string vocabulary_prefix = "ernie.eu.ung.12k", language_model = "ernie_vslm_v1.dat";
+string vocabulary_prefix = "ernie.en-fr.ung.100k", language_model = "ernie_vslm_v1.dat";
 std::unique_ptr<advanced_tokenizer> tokenizer_;
 
 void configure_console() {
     SetConsoleOutputCP(CP_UTF8);
     int res = _setmode(_fileno(stdout), _O_TEXT);
     if (res == -1) cerr << "Cannot set mode" << endl;
-    cout.imbue(std::locale("en_US.UTF-8"));    
+    std::cout.imbue(std::locale("en_US.UTF-8"));    
 }
 
 namespace utils {
@@ -169,7 +173,7 @@ namespace utils {
                     cerr << "Error opening input file: " << entry.path() << endl;
                     continue;
                 }
-                cout << "parsing file: " << entry.path().string() << endl;
+                std::cout << "parsing file: " << entry.path().string() << endl;
                 output << input.rdbuf() << "\n";
             }
         }
@@ -247,21 +251,34 @@ private:
 class documents {
 public:
     documents(size_t seq_size = llm::sequence_size, int pad_value = pad_id,
-        bool use_letter_tokenization = false, size_t token_limit = 25000) :
-        sequence_size_(seq_size), pad_value_(pad_value), use_letter_tokenization_(use_letter_tokenization), token_limit_(token_limit) {
+        bool use_letter_tokenization = false, long token_limit = -1) :
+        sequence_size_(seq_size), pad_value_(pad_value),
+        use_letter_tokenization_(use_letter_tokenization), token_limit_(token_limit) {
         is_initialized_ = false;
         if (!use_letter_tokenization_) {
             if (fs::exists(vocabulary_prefix + ".model")) {
                 auto status = sp_.Load(vocabulary_prefix + ".model");
                 if (!status.ok()) cerr << "error loading SentencePiece model: " << status.ToString() << endl;
-                else is_initialized_ = true;
-            } else {
-                cerr << "vocabulary file not found! (<" << (vocabulary_prefix + ".model|.vocab") << ">)" << endl;
-            }
-        } else {         
-            is_initialized_ = true;
-        }
+                else is_initialized_ = true;                
+            } else cerr << "vocabulary file not found! (<" << (vocabulary_prefix + ".model|.vocab") << ">)" << endl;
+        } else is_initialized_ = true;
         clear_all();
+    }
+    
+    void set_use_letter_tokenization(bool use_letter_tokenization) {
+        if (use_letter_tokenization_ != use_letter_tokenization) {            
+            is_initialized_ = false;
+            use_letter_tokenization_ = use_letter_tokenization;
+            if (!use_letter_tokenization_) {
+                if (fs::exists(vocabulary_prefix + ".model")) {
+                    auto status = sp_.Load(vocabulary_prefix + ".model");
+                    if (!status.ok()) cerr << "error loading SentencePiece model: " << status.ToString() << endl;
+                    else is_initialized_ = true;
+                }
+                else cerr << "vocabulary file not found! (<" << (vocabulary_prefix + ".model|.vocab") << ">)" << endl;
+            } else is_initialized_ = true;
+            clear_all();
+        }
     }
     size_t get_total_tokens(void) { return total_tokens_; }
     size_t get_total_samples(void) { return total_tokens_ > sequence_size_ ? (total_tokens_ - sequence_size_) : 0; }
@@ -283,27 +300,27 @@ public:
         auto process_tokens = [&](const std::vector<int>& tokens) {
             if (tokens.empty()) return;
 
-            if (current_total_tokens + tokens.size() <= token_limit_) {
+            if (token_limit_ == -1 || (current_total_tokens + tokens.size()) < token_limit_) {
                 new_tokens.push_back(tokens);
                 current_total_tokens += tokens.size();
-            }
-            else if (current_total_tokens < token_limit_) {
+            } else {
                 size_t remaining_space = token_limit_ - current_total_tokens;
-                std::vector<int> truncated_tokens(tokens.begin(), tokens.begin() + remaining_space);
-                new_tokens.push_back(truncated_tokens);
-                current_total_tokens = token_limit_;
+                if (remaining_space > 0) {
+                    std::vector<int> truncated_tokens(tokens.begin(), tokens.begin() + remaining_space);
+                    new_tokens.push_back(truncated_tokens);
+                    current_total_tokens = token_limit_;
+                }
             }
         };
 
         if (split_sentences) {
             std::vector<string> sentences = split_into_sentences(text);
             for (const auto& sentence : sentences) {
-                if (current_total_tokens >= token_limit_) break;
+                if (token_limit_ != -1 && current_total_tokens >= token_limit_) break;
                 std::vector<int> tokens = preprocess_sentence(sentence);
                 process_tokens(tokens);
             }
-        }
-        else {
+        } else {
             std::vector<int> tokens = preprocess_sentence(text);
             process_tokens(tokens);
         }
@@ -324,18 +341,18 @@ public:
         fs::path fs_path = fs::path(path);
         try {
             if (fs::is_regular_file(fs_path) && fs_path.extension() == ".txt") {
-                cout << "loading file: " << fs_path.string() << endl;
+                std::cout << "loading file: " << fs_path.string() << endl;
                 std::ifstream file(fs_path, std::ios::binary);
                 string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-                if (!is_utf8(content)) cout << "warning - file <" << fs_path.string() << "> seems not to be UTF-8 encoded" << endl;
+                if (!is_utf8(content)) std::cout << "warning - file <" << fs_path.string() << "> seems not to be UTF-8 encoded" << endl;
                 load_text(content, split_sentences);
             } else if (fs::is_directory(fs_path)) {
                 for (const auto& entry : fs::recursive_directory_iterator(fs_path)) {
                     if (entry.is_regular_file() && entry.path().extension() == ".txt") {
-                        cout << "loading file: " << entry.path().string() << endl;
+                        std::cout << "loading file: " << entry.path().string() << endl;
                         std::ifstream file(entry.path(), std::ios::binary);
                         string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-                        if (!is_utf8(content)) cout << "warning - file <" << entry.path().string() << "> seems not to be UTF-8 encoded" << endl;
+                        if (!is_utf8(content)) std::cout << "warning - file <" << entry.path().string() << "> seems not to be UTF-8 encoded" << endl;
                         load_text(content, split_sentences);
                     }
                 }
@@ -352,11 +369,10 @@ public:
         labels.clear();
         if (!is_initialized_ || source_tokens_.empty()) return false;
 
+        static std::random_device rd;
+        static std::mt19937 gen(rd());
         if (select_randomly) {
-            static std::random_device rd;
-            static std::mt19937 gen(rd());
             std::uniform_int_distribution<size_t> dist_sentence(0, source_tokens_.size() - 1);
-
             while (samples.size() < num_samples) {
                 size_t sentence_idx = dist_sentence(gen);
                 const std::vector<int>& sentence = source_tokens_[sentence_idx];
@@ -373,6 +389,7 @@ public:
                 labels.push_back(label);
             }
         } else {
+            const std::lock_guard<std::mutex> lock(g_mutex_);
             if (pre_samples_.size() == 0) {                
                 for (const auto& sentence : source_tokens_) {                    
                     if (sentence.size() > (sequence_size_ + 1)) {
@@ -381,7 +398,7 @@ public:
                             matrix<int> sample(sequence_size_, 1);
                             for (j = 0; j < (int)sequence_size_; ++j) sample(j, 0) = sentence[i + j];
                             pre_samples_.push_back(sample);
-                            pre_labels_.push_back(static_cast<unsigned long>(sentence[i + j]));
+                            pre_labels_.push_back(sentence[i + j]);
                         }
                     }                    
                 }
@@ -398,15 +415,46 @@ public:
         return (samples.size() > 0);
     }
 
+    string to_unsigned_char_string(const std::vector<int>& ints) const {
+        string result;
+        if (use_letter_tokenization_) {
+            for (int v = 0; v < ints.size(); ++v) result += static_cast<unsigned char>(ints[v]);
+        } else {
+            sp_.Decode(ints, &result);
+        }
+        return result;
+    }
+    string to_unsigned_char_string(const matrix<int, 0, 1>& ints) const {        
+        string result;
+        if (use_letter_tokenization_) {
+            for (int v = 0; v < ints.nr(); ++v) result += static_cast<unsigned char>(ints(v, 0));
+        } else {
+            std::vector<int> tokens(ints.nr());
+            for (long i = 0; i < ints.nr(); ++i) tokens[i] = ints(i, 0);
+            sp_.Decode(tokens, &result);            
+        }
+        return result;
+    }
+    string to_unsigned_char_string(unsigned long value) const {
+        if (use_letter_tokenization_) {
+            return string(1, static_cast<unsigned char>(value));
+        } else {
+            string result;
+            sp_.Decode({ static_cast<int>(value) }, &result);
+            return result;
+        }
+    }
+
 private:
     size_t sequence_size_;
     std::vector<std::vector<int>> source_tokens_;
     std::vector<matrix<int, 0, 1>> pre_samples_;
     std::vector<unsigned long> pre_labels_;
     size_t samples_idx_;
+    std::mutex g_mutex_;
 
     sentencepiece::SentencePieceProcessor sp_;
-    size_t total_tokens_, token_limit_;
+    long total_tokens_, token_limit_;
     int pad_value_;
     bool use_letter_tokenization_;
     bool is_initialized_;
@@ -419,10 +467,10 @@ private:
     std::vector<int> preprocess_sentence(const string& sentence, bool add_eos_id = false) {
         string cleaned_sentence = dlib::trim(replace_html_entities(std::regex_replace(sentence, std::regex("(.)\\1{4,}"), "$1$1$1$1")));
         std::vector<int> tokens;
-        if (!use_letter_tokenization_) {
+        if (!use_letter_tokenization_) {            
             sp_.Encode(cleaned_sentence, &tokens);
         } else {
-            for (size_t i = 0; i < sentence.size(); ++i) tokens.push_back(static_cast<unsigned char>(sentence[i]));
+            for (size_t i = 0; i < cleaned_sentence.size(); ++i) tokens.push_back(static_cast<unsigned char>(cleaned_sentence.at(i)));
         }        
         if (add_eos_id) tokens.push_back(eos_id);
         return tokens;
@@ -468,7 +516,7 @@ void test_hsplit_hstack() {
     const long input_nr = 8;
     const long input_nc = 12;
 
-    using net_type = tag1<hstack<hsplit<num_heads, input<matrix<float>>>>>;
+    using net_type = tag1<hstack<hsplit<num_heads, dlib::input<matrix<float>>>>>;
     net_type net;
 
     resizable_tensor input_tensor;
@@ -917,20 +965,20 @@ int main(int argc, char* argv[]) {
     string corpus_dir;
     bool do_benchmark = false, text_generation = false;
     bool voc_training = false, model_training = false, model_prompting = false, use_sync_file = false;
-    double learning_rate = 1e-3, min_learning_rate = 1e-6, weight_decay = 0.05, beta1 = 0.9, beta2 = 0.999, temperature = 0.9;
-    long mini_batch_size = 64, iterations_without_progress_threshold = 50000, top_k = 3;
+    double learning_rate = 1e-3, min_learning_rate = 1e-6, weight_decay = 0.004, beta1 = 0.9, beta2 = 0.999, temperature = 0.9;
+    long mini_batch_size = 256, iterations_without_progress_threshold = 50000, top_k = 3;
     std::vector<int> gpus = { 0 };
     set_dnn_prefer_fastest_algorithms();
        
     configure_console();
-    cout << endl <<
+    std::cout << endl <<
         "███████╗██████╗ ███╗   ██╗██╗███████╗\n"
         "██╔════╝██╔══██╗████╗  ██║██║██╔════╝\n"
         "█████╗  ██████╔╝██╔██╗ ██║██║█████╗  \n"
         "██╔══╝  ██╔══██╗██║╚██╗██║██║██╔══╝  \n"
         "███████╗██║  ██║██║ ╚████║██║███████╗\n"
         "╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝╚══════╝\n"
-        "Welcome to the ERNIE generative AI program! (version 1.1.4)\n\n";
+        "Welcome to the ERNIE generative AI program! (version 1.1.6)\n\n";
     try {
         string msg_learning_rate = string("Initial learning rate for training (") + std::format("{:g}", learning_rate) + string(")"),
             msg_min_learning_rate = string("Minimum learning rate (") + std::format("{:g}", min_learning_rate) + string(")"),
@@ -967,7 +1015,7 @@ int main(int argc, char* argv[]) {
         if (vm.count("help")) {
             std::ostringstream oss;
             oss << desc;
-            cout << oss.str() << endl;
+            std::cout << oss.str() << endl;
             return 0;
         }
         po::notify(vm);
@@ -983,27 +1031,28 @@ int main(int argc, char* argv[]) {
     if (do_benchmark) {
         const bool display_debug_info = false;
         const bool skip_tests[] = {
-            false,      // 0: strings & tokenization
-            false,      // 1: transpose layer
-            false,      // 2: tril layer
-            false,      // 3: positional_encodings layer
-            false,      // 4: embeddings layer
-            false,      // 5: multm_prev layer
-            false,      // 6: softmax layer
-            false,      // 7: attention mechanism
-            false,      // 8: linear layer         
-            true,       // 9: hsplit/hstack layers
-            false,      // 10: rms_norm layer
-            true,      // 11: multihead attention model
-            false       // 12: "shakespeare" example
+            true,      // 0: strings & tokenization
+            true,      // 1: documents class
+            true,      // 2: transpose layer
+            true,      // 3: tril layer
+            true,      // 4: positional_encodings layer
+            true,      // 5: embeddings layer
+            true,      // 6: multm_prev layer
+            true,      // 7: softmax layer
+            true,      // 8: attention mechanism
+            true,      // 9: linear layer       
+            true,      // 10: hsplit/hstack layers
+            true,      // 11: rms_norm layer
+            true,      // 12: multihead attention model
+            false       // 13: "shakespeare" example
         };
 
         // test: tokenization
         if (!skip_tests[0]) {
-            if (display_debug_info) cout << "test: strings & tokenization\n";
+            if (display_debug_info) std::cout << "test: strings & tokenization\n";
             string sentence = "  &nbsp;&lt;p&gt;Hellooooooo     frieeeends !!!!!! This is sooooooo coooool &amp; awesoooooome !&lt;/p&gt;  ";
             string cleaned_sentence = dlib::trim(replace_html_entities(std::regex_replace(sentence, std::regex("(.)\\1{4,}"), "$1$1$1$1")));
-            cout << "string normalisation: [" << sentence << "] => [" << cleaned_sentence << "]" << endl;
+            std::cout << "string normalisation: [" << sentence << "] => [" << cleaned_sentence << "]" << endl;
 
             if (fs::exists(vocabulary_prefix + ".model")) status = sp.Load(vocabulary_prefix + ".model");
             else {
@@ -1019,22 +1068,86 @@ int main(int argc, char* argv[]) {
             for (const auto& sentence : test_sentences) {
                 std::vector<string> tokens;
                 sp.Encode(sentence, &tokens);
-                cout << "sentence: " << sentence << endl << "Tokens: ";
-                for (const auto& token : tokens) cout << token << " ";
+                std::cout << "sentence: " << sentence << endl << "Tokens: ";
+                for (const auto& token : tokens) std::cout << token << " ";
 
                 std::vector<int> ids;
                 sp.Encode(sentence, &ids);
-                cout << endl << "token IDs: ";
-                for (const auto& id : ids) cout << id << " ";
+                std::cout << endl << "token IDs: ";
+                for (const auto& id : ids) std::cout << id << " ";
 
                 string recovered_text;
                 sp.Decode(ids, &recovered_text);
-                cout << endl << "original sentence : " << recovered_text << endl << endl;
+                std::cout << endl << "original sentence : " << recovered_text << endl << endl;
+            }
+        }
+
+        // test: documents
+        if (!skip_tests[1]) {
+            if (display_debug_info) std::cout << "test: documents class\n";
+            {                
+                string shakespeare_file = "shakespeare.txt", combined_str;
+                if (fs::exists(shakespeare_file)) {
+                    std::ifstream file(shakespeare_file);
+                    string source_text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+
+                    long found_count = 0, total_tests = 100;
+                    std::vector<matrix<int, 0, 1>> samples;
+                    std::vector<unsigned long> labels;
+                    documents data(15, pad_id, true);
+                    data.load_documents(shakespeare_file, false);
+                    for (int i = 0; i < total_tests; ++i) {
+                        data.generate_samples(1, samples, labels);
+                        if (!samples.empty() && !labels.empty()) {
+                            std::vector<int> tokens(samples[0].nr() + 1);
+                            for (long i = 0; i < samples[0].nr(); ++i) tokens[i] = samples[0](i, 0);
+                            tokens[tokens.size() - 1] = labels[0];
+                            combined_str = data.to_unsigned_char_string(tokens);
+                            if (source_text.find(combined_str) != string::npos) {
+                                if (display_debug_info && found_count < 5) std::cout << "(" << combined_str << ")" << endl;
+                                found_count++;
+                            } else {
+                                if (display_debug_info) std::cout << "error: (" << combined_str << ")" << endl;
+                            }
+                        }
+                        samples.clear();
+                        labels.clear();
+                    }
+                    std::cout << "sequences found in source text: " << found_count << " out of " << total_tests << endl;
+                    DLIB_TEST_MSG(static_cast<double>(found_count) / total_tests > 0.9, "documents class test_0");
+                    data.clear_all();
+
+                    data.set_use_letter_tokenization(false);
+                    data.load_documents(shakespeare_file, false);
+                    source_text = std::regex_replace(source_text, std::regex("\n{2,}"), "\n");
+                    source_text = std::regex_replace(source_text, std::regex("\n"), " ");
+                    found_count = 0;
+                    for (int i = 0; i < total_tests; ++i) {
+                        data.generate_samples(1, samples, labels);
+                        if (!samples.empty() && !labels.empty()) {
+                            std::vector<int> tokens(samples[0].nr() + 1);
+                            for (long i = 0; i < samples[0].nr(); ++i) tokens[i] = samples[0](i, 0);
+                            tokens[tokens.size() - 1] = labels[0];
+                            combined_str = data.to_unsigned_char_string(tokens);
+                            if (source_text.find(combined_str) != string::npos) {
+                                if (display_debug_info && found_count < 5) std::cout << "(" << combined_str << ")" << endl;
+                                found_count++;
+                            } else {
+                                if (display_debug_info) std::cout << "error: (" << combined_str << ")" << endl;
+                            }
+                        }
+                        samples.clear();
+                        labels.clear();
+                    }
+                    std::cout << "sequences found in source text: " << found_count << " out of " << total_tests << endl;
+                    DLIB_TEST_MSG(static_cast<double>(found_count) / total_tests > 0.9, "documents class test_1");
+                    data.clear_all();
+                }
             }
         }
 
         // test: transpose layer
-        if (!skip_tests[1]) {
+        if (!skip_tests[2]) {
             if (display_debug_info) cout << "test: transpose layer\n";
             test_transpose();
             {
@@ -1045,7 +1158,7 @@ int main(int argc, char* argv[]) {
         }        
 
         // test: tril layer
-        if (!skip_tests[2]) {
+        if (!skip_tests[3]) {
             if (display_debug_info) cout << "\ntest: tril layer\n";
             test_tril();
             {
@@ -1066,7 +1179,7 @@ int main(int argc, char* argv[]) {
         }
 
         // test: positional_encodings layer
-        if (!skip_tests[3]) {
+        if (!skip_tests[4]) {
             if (display_debug_info) cout << "test: positional_encodings layer\n";
             test_positional_encodings();
             {
@@ -1077,7 +1190,7 @@ int main(int argc, char* argv[]) {
         }
 
         // test: embeddings layer
-        if (!skip_tests[4]) {
+        if (!skip_tests[5]) {
             if (display_debug_info) cout << "test: embeddings layer\n";
             test_embeddings();
             {
@@ -1088,13 +1201,13 @@ int main(int argc, char* argv[]) {
         }
 
         // test: multm_prev layer
-        if (!skip_tests[5]) {
+        if (!skip_tests[6]) {
             if (display_debug_info) cout << "test: multm_prev layer\n";
             test_multm_prev();            
         }
 
         // test: softmax layer
-        if (!skip_tests[6]) {
+        if (!skip_tests[7]) {
             if (display_debug_info) cout << "\ntest: softmax layer\n";
             test_softmaxm();
             {
@@ -1110,7 +1223,7 @@ int main(int argc, char* argv[]) {
         }
 
         // test: attention mechanism
-        if (!skip_tests[7]) {
+        if (!skip_tests[8]) {
             if (display_debug_info) cout << "\ntest: attention mechanism\n";
             {
                 matrix<float> X(4, 3), WQ(3, 3), WK(3, 3), WV(3, 3);
@@ -1225,7 +1338,7 @@ int main(int argc, char* argv[]) {
         }
 
         // test: linear layer
-        if (!skip_tests[8]) {
+        if (!skip_tests[9]) {
             if (display_debug_info) cout << "\ntest: linear layer\n";
             test_linear();
             {
@@ -1241,7 +1354,7 @@ int main(int argc, char* argv[]) {
         }
 
         // test: hsplit/hstack layers
-        if (!skip_tests[9]) {
+        if (!skip_tests[10]) {
             if (display_debug_info) cout << "\ntest: hsplit/hstack layers\n";                            
             test_hsplit_hstack();
             {
@@ -1252,7 +1365,7 @@ int main(int argc, char* argv[]) {
         }
 
         // test: rms_norm layer
-        if (!skip_tests[10]) {
+        if (!skip_tests[11]) {
             if (display_debug_info) cout << "\ntest: rms_norm layer\n";
             {
                 test_rms_normalize();
@@ -1264,60 +1377,12 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // test: training using a attention mask block
-        if (display_debug_info) cout << "\ntest: training attention models\n";
-        {
-            // Define the network
-            int num_samples = (2500 / mini_batch_size) * mini_batch_size;
-            const int num_classes = 256;           
-            const int num_epochs = 3000;
-
-            // Shakespeare's text sample
-            const string shakespeare_text = R"(HAMLET By William Shakespeare - Act Three, Scene One
-To be or not to be—that is the question:
-Whether ’tis nobler in the mind to suffer
-The slings and arrows of outrageous fortune,
-Or to take arms against a sea of troubles
-And, by opposing, end them. To die, to sleep—
-No more—and by a sleep to say we end
-The heartache and the thousand natural shocks
-That flesh is heir to—’tis a consummation
-Devoutly to be wished. To die, to sleep—
-To sleep, perchance to dream. Ay, there’s the rub,
-For in that sleep of death what dreams may come,
-When we have shuffled off this mortal coil,
-Must give us pause. There’s the respect
-That makes calamity of so long life.
-For who would bear the whips and scorns of time,
-Th’ oppressor’s wrong, the proud man’s contumely,
-The pangs of despised love, the law’s delay,
-The insolence of office, and the spurns
-That patient merit of the unworthy takes,
-When he himself might his quietus make
-With a bare bodkin? Who would fardels bear,
-To grunt and sweat under a weary life,
-But that the dread of something after death,
-The undiscovered country from whose bourn
-No traveler returns, puzzles the will
-And makes us rather bear those ills we have
-Than fly to others that we know not of?
-Thus conscience does make cowards of us all,
-And thus the native hue of resolution
-Is sicklied o’er with the pale cast of thought,
-And enterprises of great pith and moment
-With this regard their currents turn awry
-And lose the name of action.—Soft you now,
-The fair Ophelia.—Nymph, in thy orisons
-Be all my sins remembered.)";
-
-            // Custom values for the local assessment
-            using net_type_a = llm::classification_head<num_classes,                
-                llm::v1_1_4::transformer<llm::sequence_size, llm::embedding_size, llm::number_of_heads,
-                input<matrix<float>>>>;            
-            using net_type_b = llm::classification_head<num_classes,
-                llm::v1_1_4::transformer<llm::sequence_size, llm::embedding_size, llm::number_of_heads,
-                llm::positional_embeddings<num_classes, llm::embedding_size,
-                input<matrix<int, 0, 1>>>>>;            
+        // test: multihead attention model
+        if (!skip_tests[12]) {
+            mini_batch_size = 20;
+            if (display_debug_info) cout << "\ntest: multihead attention model\n";
+            const long num_classes = 256, num_epochs = 3000;
+            long num_samples = (800 / mini_batch_size) * mini_batch_size;
 
             // Generate synthetic training data
             dlib::rand rnd(std::rand());
@@ -1329,7 +1394,7 @@ Be all my sins remembered.)";
                     for (int c = 0; c < llm::embedding_size; ++c) sample(r, c) = rnd.get_random_float() * 2.0f - 1.0f;
                 }
                 samples.push_back(sample);
-                labels.push_back(rnd.get_random_32bit_number() % num_classes);
+                labels.push_back(rnd.get_random_32bit_number() % (num_classes / 10));
             }
             auto count_unique_classes = [&labels]() {
                 std::unordered_set<unsigned long> unique_classes(labels.begin(), labels.end());
@@ -1345,173 +1410,199 @@ Be all my sins remembered.)";
                 batches.push_back(batch_samples);
                 label_batches.push_back(batch_labels);
             }
-           
-            // Train multihead attention model
-            if (!skip_tests[11]) {
-                cout << "number of samples: " << samples.size() << endl;
-                cout << "number of classes: " << count_unique_classes() << std::endl;
-                cout << "number of sample batches: " << batches.size() << endl;
-                cout << "number of label batches: " << label_batches.size() << endl;
 
-                net_type_a net_a;
-                dnn_trainer<net_type_a> trainer_b(net_a, sgd(weight_decay, beta1), gpus);
-                trainer_b.set_learning_rate(learning_rate);
-                trainer_b.set_min_learning_rate(min_learning_rate);
-                trainer_b.set_mini_batch_size(mini_batch_size);
-                trainer_b.be_verbose();
-                trainer_b.set_iterations_without_progress_threshold(150);
-                for (int epoch = 0; epoch < num_epochs && trainer_b.get_learning_rate() > trainer_b.get_min_learning_rate() && !g_interrupt_signal_received; ++epoch) {
-                    for (size_t i = 0; i < batches.size(); ++i) trainer_b.train_one_step(batches[i], label_batches[i]);
-                }
-                trainer_b.get_net();
-                net_a.clean();
-                cout << "multihead attention model parameters: " << count_parameters(net_a) << endl;
-                g_interrupt_signal_received = false;
-                std::vector<unsigned long> predicted_labels_b = net_a(samples);
-                int num_correct_b = 0;
-                for (size_t i = 0; i < labels.size(); ++i) if (predicted_labels_b[i] == labels[i]) ++num_correct_b;
-                double accuracy_b = static_cast<double>(num_correct_b) / labels.size();
-                DLIB_TEST_MSG(accuracy_b > 0.8, "multihead attention model (accuracy: " + to_string(accuracy_b) + ")");
+            using net_type_a = llm::classification_head<num_classes,                
+                llm::v1_1_4::feed_forward<llm::embedding_size,
+                llm::v1_1_4::multihead_attention<llm::sequence_size, llm::embedding_size, llm::number_of_heads,
+                input<matrix<float>>>>>;
+            using net_type_a_i = llm::classification_head<num_classes,
+                llm::v1_1_4::feed_forward_i<llm::embedding_size,
+                llm::v1_1_4::multihead_attention_i<llm::sequence_size, llm::embedding_size, llm::number_of_heads,
+                input<matrix<float>>>>>;
+
+            cout << "number of samples: " << samples.size() << endl;
+            cout << "number of classes: " << count_unique_classes() << std::endl;
+            cout << "number of sample batches: " << batches.size() << endl;
+            cout << "number of label batches: " << label_batches.size() << endl;
+
+            net_type_a net_a;
+            net_type_a_i net_a_i;
+            dnn_trainer<net_type_a> trainer_b(net_a, sgd(weight_decay, beta1), gpus);
+            trainer_b.set_learning_rate(learning_rate);
+            trainer_b.set_min_learning_rate(min_learning_rate);
+            trainer_b.set_mini_batch_size(mini_batch_size);
+            trainer_b.be_verbose();
+            trainer_b.set_iterations_without_progress_threshold(350);
+            for (int epoch = 0; epoch < num_epochs && trainer_b.get_learning_rate() > trainer_b.get_min_learning_rate() && !g_interrupt_signal_received; ++epoch) {
+                for (size_t i = 0; i < batches.size(); ++i) trainer_b.train_one_step(batches[i], label_batches[i]);
             }
+            trainer_b.get_net();
+            net_a.clean();
+            cout << "multihead attention model parameters: " << count_parameters(net_a) << endl;
+            g_interrupt_signal_received = false;
+            net_a_i = net_a;
+            std::vector<unsigned long> predicted_labels_b = net_a_i(samples);
+            int num_correct_b = 0;
+            for (size_t i = 0; i < labels.size(); ++i) if (predicted_labels_b[i] == labels[i]) ++num_correct_b;
+            double accuracy_b = static_cast<double>(num_correct_b) / labels.size();
+            DLIB_TEST_MSG(accuracy_b > 0.9, "multihead attention model (accuracy: " + to_string(accuracy_b) + ")");
+        }
 
-            // "shakespeare" example
-            if (!skip_tests[12]) {
-                // Lambda function to convert a vector of integers to a string of unsigned chars
-                auto to_unsigned_char_string = [](const matrix<int, 0, 1>& ints) -> string {
-                    string result;
-                    for (int v = 0; v < ints.nr(); ++v) result += static_cast<unsigned char>(ints(v, 0));
-                    return result;
-                };
-
-                // Lambda function for tokenizing text
-                auto tokenize_text = [](const string& text, int sequence_len, char padding_char = pad_id) -> std::vector<matrix<int, 0, 1>> {
-                    std::vector<matrix<int, 0, 1>> tokens;
-                    if (text.empty()) return tokens;
-
-                    if (text.size() <= sequence_len) {
-                        matrix<int> sample(sequence_len, 1);
-                        sample = static_cast<int>(padding_char);
-                        for (size_t i = 0; i < text.size(); ++i) sample(i, 0) = static_cast<unsigned char>(text[i]);
-                        tokens.push_back(sample);
-                    }
-                    else {
-                        for (size_t i = 0; i < static_cast<int>(text.size()) - (sequence_len + 1); ++i) {
-                            matrix<int> sample(sequence_len, 1);
-                            for (size_t j = 0; j < sequence_len; ++j) sample(j, 0) = static_cast<unsigned char>(text[i + j]);
-                            tokens.push_back(sample);
-                        }
-                    }
-                    return tokens;
-                };
+        // test: "shakespeare" example
+        if (!skip_tests[13])        
+        {
+            if (display_debug_info) cout << "\ntest: test: \"shakespeare\" example\n";                        
+            {
+                mini_batch_size = 48;
+                const long num_classes = 256;
+                using net_type_b = llm::classification_head<num_classes,
+                    repeat<2, llm::transformer_block,
+                    llm::positional_embeddings<num_classes, llm::embedding_size,
+                    input<matrix<int, 0, 1>>>>>;
+                using net_type_b_i = llm::classification_head<num_classes,
+                    repeat<2, llm::transformer_block_i,
+                    llm::positional_embeddings<num_classes, llm::embedding_size,
+                    input<matrix<int, 0, 1>>>>>;
 
                 // Tokenize the Shakespeare text
+                string input_sequence = shakespeare_test;
                 std::vector<matrix<int, 0, 1>> samples;
                 std::vector<unsigned long> labels;
-                documents data(llm::sequence_size, pad_id, true);
-                data.load_text(shakespeare_text, false);
-                std::vector<matrix<int, 0, 1>> samples_txt = tokenize_text(shakespeare_text, llm::sequence_size);
+                documents data_c(llm::sequence_size, pad_id, true);
+                data_c.load_text(shakespeare_text, false);
                 cout << "batch size: " << mini_batch_size << endl;
-                cout << "espected number of samples: " << samples_txt.size() << endl;
-                data.generate_samples(mini_batch_size, samples, labels, false);
-                cout << "number of generated samples: " << data.get_total_presamples() << endl;
-                cout << "number of sample batches: " << (data.get_total_presamples() / mini_batch_size) << endl;
-                std::vector<unsigned long> labels_txt;
-                for (size_t i = 0; i < samples_txt.size(); ++i) {
-                    if (i + llm::sequence_size < shakespeare_text.length()) {                        
-                        labels_txt.push_back(static_cast<unsigned long>(shakespeare_text[i + llm::sequence_size])); // Next character as label
+                data_c.generate_samples(1, samples, labels, false);
+                cout << "number of generated samples: " << data_c.get_total_presamples() << endl;
+                cout << "number of sample batches: " << (data_c.get_total_presamples() / mini_batch_size) << endl;                
+
+                // Use some threads to preload samples                                
+                auto f = [&, mini_batch_size](documents& docs, dlib::pipe<a_training>& data, bool select_randomly) {
+                    a_training temp;
+                    while (data.is_enabled()) {
+                        if (docs.generate_samples(mini_batch_size, temp.samples, temp.labels, select_randomly)) data.enqueue(temp);
                     }
-                }
-                
+                };
+
                 net_type_b net_b;
-                adam solver(weight_decay, beta1, beta2);
-                dnn_trainer<net_type_b, adam> trainer_c(net_b, solver, gpus);
+                net_type_b_i net_b_i;
+                dnn_trainer<net_type_b> trainer_c(net_b, sgd(weight_decay, beta1), gpus);
                 trainer_c.set_learning_rate(learning_rate);
                 trainer_c.set_min_learning_rate(min_learning_rate);
+                trainer_c.set_learning_rate_shrink_factor(0.1);
                 trainer_c.set_mini_batch_size(mini_batch_size);
                 trainer_c.be_verbose();
-                trainer_c.set_synchronization_file("llm_shakespeare_model_a.ckp", std::chrono::minutes(5));
-                trainer_c.set_iterations_without_progress_threshold(1500);
-                if (trainer_c.get_learning_rate() >= trainer_c.get_min_learning_rate()) {
+                trainer_c.set_iterations_without_progress_threshold(5000);
+                a_training a_training_sample;
+                if (!fs::exists("llm_shakespeare_model_a.dat") && trainer_c.get_learning_rate() >= trainer_c.get_min_learning_rate()) {                    
+                    dlib::pipe<a_training> p_data(10);
+                    std::thread data_loader1([&data_c, &p_data, f]() { f(data_c, p_data, false); });
+                    std::thread data_loader2([&data_c, &p_data, f]() { f(data_c, p_data, false); });
+                    cout << "waiting for the initial pipe loading... ";
+                    while (p_data.size() < 10) std::this_thread::sleep_for(std::chrono::seconds(1));
+                    cout << "done" << endl;
+                    
                     while (trainer_c.get_learning_rate() >= trainer_c.get_min_learning_rate() && !g_interrupt_signal_received) {
-                        if (data.generate_samples(mini_batch_size, samples, labels, false)) trainer_c.train_one_step(samples, labels);
-                        else g_interrupt_signal_received = true;
+                        p_data.dequeue(a_training_sample);
+                        trainer_c.train_one_step(a_training_sample.samples, a_training_sample.labels);
                     }
+                    p_data.disable();
+                    data_loader1.join();
+                    data_loader2.join();
+
                     trainer_c.get_net();
                     net_b.clean();
                     dlib::serialize("llm_shakespeare_model_a.dat") << net_b;
                     cout << "shakespeare model saved: llm_shakespeare_model_a.dat" << endl;
                     cout << "shakespeare model parameters: " << count_parameters(net_b) << endl;
-                    g_interrupt_signal_received = false;
 
-                    // Test the network with the same data to ensure it has learned something
-                    std::vector<unsigned long> predicted_labels_c = net_b(samples_txt);
+                    deserialize("llm_shakespeare_model_a.dat") >> net_b_i;
                     size_t num_correct_c = 0;
-                    for (size_t i = 0; i < labels_txt.size(); ++i) if (predicted_labels_c[i] == labels_txt[i]) ++num_correct_c;
-                    double accuracy_c = static_cast<double>(num_correct_c) / labels_txt.size();
-                    DLIB_TEST_MSG(accuracy_c > 0.9, "shakespeare model (accuracy: " + to_string(accuracy_c) + ") - right: " +\
-                        to_string(num_correct_c) + " - wrong: " + to_string(labels_txt.size() - num_correct_c));
+                    data_c.generate_samples(data_c.get_total_presamples(), samples, labels, false);
+                    for (size_t i = 0; i < samples.size(); ++i) {
+                        unsigned long p_label = net_b_i(samples[i]);
+                        if (p_label == labels[i]) ++num_correct_c;
+                    }
+                    double accuracy_c = static_cast<double>(num_correct_c) / labels.size();
+                    DLIB_TEST_MSG(accuracy_c > 0.9, "shakespeare model (accuracy: " + to_string(accuracy_c) + ") - right: " + \
+                        to_string(num_correct_c) + " - wrong: " + to_string(labels.size() - num_correct_c));
                 }
-                // Predict the next sequence of characters
-                string input_sequence = "HAMLET By William Shakespeare - Act Three, Scene One\nTo be or not to be—that is the quest";
-                std::vector<matrix<int, 0, 1>> input_tokens = tokenize_text(input_sequence, llm::sequence_size);
-                string start_seq = to_unsigned_char_string(input_tokens.back());
-                size_t pos = input_sequence.find(start_seq);
-                if (pos != string::npos) input_sequence = input_sequence.substr(0, pos + start_seq.length());
-                cout << "input sequence for text generation: <" << start_seq << ">" << endl;
-                matrix<int> next_input(llm::sequence_size, 1);
-                for (int i = 0; i < 450; ++i) {
-                    unsigned long next_char = net_b(input_tokens.back());
-                    input_sequence += static_cast<unsigned char>(next_char);
 
-                    for (int j = 0; j < (llm::sequence_size - 1); ++j) next_input(j, 0) = input_tokens.back()(j + 1, 0);
+                // Predict the next sequence of characters
+                if (fs::exists("llm_shakespeare_model_a.dat")) deserialize("llm_shakespeare_model_a.dat") >> net_b_i;
+                size_t sequence_len = llm::sequence_size;
+                sequence_len = std::min(sequence_len, input_sequence.length());
+                std::string extracted_sequence = input_sequence.substr(input_sequence.length() - sequence_len);
+                dlib::matrix<int, 0, 1> input_tokens;
+                input_tokens.set_size(sequence_len);
+                for (size_t i = 0; i < sequence_len; ++i) input_tokens(i, 0) = static_cast<unsigned char>(extracted_sequence[i]);
+
+                string start_seq = data_c.to_unsigned_char_string(input_tokens);
+                cout << "input sequence for text generation: <" << start_seq << "> (size: " << start_seq.length() << ")" << endl;
+                string generated_sonnet;                
+                for (int i = 0; i < 450; ++i) {
+                    samples.clear();
+                    samples.push_back(input_tokens);
+                    samples.push_back(input_tokens);
+                    std::vector<unsigned long> next_char = net_b_i(samples);
+                    if (next_char[0] < num_classes) generated_sonnet += data_c.to_unsigned_char_string(next_char[0]);
+                    else cerr << "error during next token generation: " << next_char[0] << endl;
+
+                    for (int j = 0; j < (llm::sequence_size - 1); ++j) input_tokens(j, 0) = input_tokens(j + 1, 0);
                     int insert_pos = std::distance(
-                        input_tokens.back().begin(),
-                        std::find_if(input_tokens.back().begin(), input_tokens.back().end(),
+                        input_tokens.begin(),
+                        std::find_if(input_tokens.begin(), input_tokens.end(),
                             [&](const auto& element) { return element == pad_id; })
                     );
                     if (insert_pos == llm::sequence_size) insert_pos = llm::sequence_size - 1;
-                    next_input(insert_pos, 0) = static_cast<int>(next_char);
-
-                    input_tokens.clear();
-                    input_tokens.push_back(next_input);
+                    input_tokens(insert_pos, 0) = static_cast<int>(next_char[0]);
                 }
+                input_sequence += generated_sonnet;
                 cout << "generated text:\n\n" << input_sequence << " (...)\n\n";
 
                 // Loading now the complete Shakespeare file
                 string shakespeare_file = "shakespeare.txt";
                 if (fs::exists(shakespeare_file)) {
-                    documents shakespeare_data(llm::sequence_size, 0, true);
-                    shakespeare_data.load_documents(shakespeare_file, false);
-                    cout << "loading about " << shakespeare_data.get_total_samples() << " samples from " << shakespeare_file << endl;
+                    documents data_d(llm::sequence_size, pad_id, true);
+                    data_d.load_documents(shakespeare_file, false);
+                    cout << "loading " << data_d.get_total_samples() << " samples from " << shakespeare_file << endl;
 
                     // Reload previous model
-                    if (!fs::exists("llm_shakespeare_model_b.ckp")) {
-                        if (!fs::exists("llm_shakespeare_model_b.dat") && fs::exists("llm_shakespeare_model_a.dat")) {
-                            deserialize("llm_shakespeare_model_a.dat") >> net_b;
-                            cout << "shakespeare model loaded (source template): llm_shakespeare_model_a.dat" << endl;
-                        } else if (fs::exists("llm_shakespeare_model_b.dat")) {
-                            deserialize("llm_shakespeare_model_b.dat") >> net_b;
-                            cout << "shakespeare model loaded: llm_shakespeare_model_b.dat" << endl;
-                        } else {
-                            cout << "no previous model found, starting from scratch" << endl;
-                        }
-                    } else {
-                        cout << "restarting from the last checkpoint" << endl;
+                    if (!fs::exists("llm_shakespeare_model_b.dat") && fs::exists("llm_shakespeare_model_a.dat")) {
+                        deserialize("llm_shakespeare_model_a.dat") >> net_b;
+                        cout << "shakespeare model loaded (source template): llm_shakespeare_model_a.dat" << endl;
+                    }
+                    else if (fs::exists("llm_shakespeare_model_b.dat")) {
+                        deserialize("llm_shakespeare_model_b.dat") >> net_b;
+                        cout << "shakespeare model loaded: llm_shakespeare_model_b.dat" << endl;
+                    }
+                    else {
+                        cout << "no previous model found, starting from scratch" << endl;
                     }
 
-                    dnn_trainer<net_type_b> trainer_d(net_b, sgd(weight_decay, beta1), gpus);
+                    mini_batch_size = 256;
+                    dnn_trainer<net_type_b, adam> trainer_d(net_b, adam(weight_decay, beta1, beta2), gpus);
                     trainer_d.set_learning_rate(learning_rate);
                     trainer_d.set_min_learning_rate(min_learning_rate);
                     trainer_d.set_mini_batch_size(mini_batch_size);
-                    trainer_d.be_verbose();                    
-                    trainer_d.set_synchronization_file("llm_shakespeare_model_b.ckp", std::chrono::minutes(5));
-                    trainer_d.set_iterations_without_progress_threshold(iterations_without_progress_threshold);
+                    trainer_d.be_verbose();
+                    trainer_d.set_iterations_without_progress_threshold(15000);
 
                     // New training loop
+                    dlib::pipe<a_training> p_data(20);
+                    std::thread data_loader1([&data_d, &p_data, f]() { f(data_d, p_data, true); });
+                    std::thread data_loader2([&data_d, &p_data, f]() { f(data_d, p_data, true); });
+                    cout << "waiting for the initial pipe loading... ";
+                    while (p_data.size() < 20) std::this_thread::sleep_for(std::chrono::seconds(1));
+                    cout << "done" << endl;
+
                     while (trainer_d.get_learning_rate() >= trainer_d.get_min_learning_rate() && !g_interrupt_signal_received) {
-                        if (shakespeare_data.generate_samples(mini_batch_size, samples, labels, false)) trainer_d.train_one_step(samples, labels);                        
-                        else g_interrupt_signal_received = true;
+                        p_data.dequeue(a_training_sample);
+                        trainer_d.train_one_step(a_training_sample.samples, a_training_sample.labels);
                     }
+                    p_data.disable();
+                    data_loader1.join();
+                    data_loader2.join();
+
                     trainer_d.get_net();
                     net_b.clean();
                     serialize("llm_shakespeare_model_b.dat") << net_b;
@@ -1519,57 +1610,56 @@ Be all my sins remembered.)";
                     cout << "advanced shakespeare model parameters: " << count_parameters(net_b) << endl;
 
                     // Attempting to generate a new sonnet
+                    deserialize("llm_shakespeare_model_b.dat") >> net_b_i;
                     string sonnet_start = "Shall I compare thee to a winter's night?\nThy beauty warms the frost - bitten bough.\nIn darkness, thou art my guiding light,\nA beacon of hope 'midst winter's vow.";
-                    std::vector<matrix<int, 0, 1>> input_tokens = tokenize_text(sonnet_start+"\n", llm::sequence_size);
-                    if (!input_tokens.empty()) {
-                        string generated_sonnet;
-                        matrix<int> next_input(llm::sequence_size, 1);
+                    sequence_len = std::min((size_t)llm::sequence_size, sonnet_start.length());
+                    std::string extracted_sequence = sonnet_start.substr(sonnet_start.length() - sequence_len);
+                    dlib::matrix<int, 0, 1> input_tokens;
+                    input_tokens.set_size(sequence_len, 1);
+                    for (size_t i = 0; i < sequence_len; ++i) input_tokens(i, 0) = static_cast<unsigned char>(extracted_sequence[i]);
+                    
+                    cout << "generated sonnet:\n\n";
+                    string generated_sonnet;
+                    for (int i = 0; i < 450; ++i) {
+                        unsigned long next_char = net_b_i(input_tokens);
+                        if (next_char < num_classes) generated_sonnet += data_d.to_unsigned_char_string(next_char);
+                        else cerr << "error during next token generation: " << next_char << endl;
 
-                        cout << "generated sonnet:\n\n";
-                        for (int i = 0; i < 700 && !input_tokens.empty(); ++i) {
-                            unsigned long next_char = net_b(input_tokens.back());
-                            unsigned char c = static_cast<unsigned char>(next_char);
-                            generated_sonnet += c;
+                        // Stop after generating what looks like a complete sonnet
+                        if (generated_sonnet.find("END") != string::npos || generated_sonnet.find("\n\n") != string::npos) break;
 
-                            for (int j = 0; j < (llm::sequence_size - 1); ++j) next_input(j, 0) = input_tokens.back()(j + 1, 0);
-                            int insert_pos = std::distance(
-                                input_tokens.back().begin(),
-                                std::find_if(input_tokens.back().begin(), input_tokens.back().end(),
-                                    [&](const auto& element) { return element == pad_id; })
-                            );
-                            if (insert_pos == llm::sequence_size) insert_pos = llm::sequence_size - 1;
-                            next_input(insert_pos, 0) = static_cast<int>(next_char);
-
-                            input_tokens.clear();
-                            input_tokens.push_back(next_input);
-
-                            // Stop after generating what looks like a complete sonnet
-                            if (generated_sonnet.find("END") != string::npos || generated_sonnet.find("\n\n") != string::npos) break;
-                        }
-                        cout << sonnet_start << "\n" << generated_sonnet << "\n";
-
-                        // Basic relevance test
-                        std::vector<string> keywords = {
-                            "thou", "thy", "thee", "love", "beauty", "time", "death", "life",
-                            "king", "lord", "heart", "good", "night", "day", "man", "great",
-                            "eyes", "sweet", "fair", "world", "hand", "heaven", "father", "blood",
-                            "mind", "know", "make", "god", "son", "well", "long", "come",
-                            "hand", "art", "young", "dear", "true", "friend", "honour", "bear",
-                            "give", "lady", "sir", "queen", "speak", "face", "court", "live",
-                            "say", "soul", "leave", "heart", "grace", "power", "nature", "truth",
-                            "fear", "noble", "crown", "sword", "head", "hear", "stand", "tongue",
-                            "never", "light", "name", "peace", "hell", "spirit", "body", "master",
-                            "word", "poor", "prince", "fortune", "hope", "virtue", "law", "tale"
-                        };                        int keyword_count = 0;
-                        for (const auto& keyword : keywords) {
-                            if (generated_sonnet.find(keyword) != string::npos) keyword_count++;
-                        }
-                        double relevance_score = static_cast<double>(keyword_count) / keywords.size();
-                        DLIB_TEST_MSG(relevance_score > 0.3, "shakespeare model relevance (score: " + to_string(relevance_score) + ")");
-                    } else {
-                        cout << "error: unable to tokenize sonnet start" << endl;
+                        for (int j = 0; j < (llm::sequence_size - 1); ++j) input_tokens(j, 0) = input_tokens(j + 1, 0);
+                        int insert_pos = std::distance(
+                            input_tokens.begin(),
+                            std::find_if(input_tokens.begin(), input_tokens.end(),
+                                [&](const auto& element) { return element == pad_id; })
+                        );
+                        if (insert_pos == llm::sequence_size) insert_pos = llm::sequence_size - 1;
+                        input_tokens(insert_pos, 0) = static_cast<int>(next_char);
                     }
-                } else {
+                    cout << sonnet_start << "\n" << generated_sonnet << "\n";
+
+                    // Basic relevance test
+                    std::vector<string> keywords = {
+                        "thou", "thy", "thee", "love", "beauty", "time", "death", "life",
+                        "king", "lord", "heart", "good", "night", "day", "man", "great",
+                        "eyes", "sweet", "fair", "world", "hand", "heaven", "father", "blood",
+                        "mind", "know", "make", "god", "son", "well", "long", "come",
+                        "hand", "art", "young", "dear", "true", "friend", "honour", "bear",
+                        "give", "lady", "sir", "queen", "speak", "face", "court", "live",
+                        "say", "soul", "leave", "heart", "grace", "power", "nature", "truth",
+                        "fear", "noble", "crown", "sword", "head", "hear", "stand", "tongue",
+                        "never", "light", "name", "peace", "hell", "spirit", "body", "master",
+                        "word", "poor", "prince", "fortune", "hope", "virtue", "law", "tale"
+                    };
+                    int keyword_count = 0;
+                    for (const auto& keyword : keywords) {
+                        if (generated_sonnet.find(keyword) != string::npos) keyword_count++;
+                    }
+                    double relevance_score = static_cast<double>(keyword_count) / keywords.size();
+                    DLIB_TEST_MSG(relevance_score > 0.3, "shakespeare model relevance (score: " + to_string(relevance_score) + ")");
+                }
+                else {
                     cout << "error: shakespeare.txt file not found in the current directory" << endl;
                 }
             }
@@ -1580,8 +1670,8 @@ Be all my sins remembered.)";
             cerr << "vocabulary file not found! (<" << (vocabulary_prefix + ".model|.vocab") << ">)" << endl;
             return 1;
         }
-        llm::net_v1_1 net;
-        softmax<multiply<llm::net_v1_1::subnet_type>> generator(multiply_(1.0 / temperature));
+        llm::net_v1_1_inf net;
+        softmax<multiply<llm::net_v1_1_inf::subnet_type>> generator(multiply_(1.0 / temperature));
         if (fs::exists(language_model)) deserialize(language_model) >> net;
         else {
             cerr << "language model not found! (<" << language_model << ">)" << endl;
@@ -1618,6 +1708,7 @@ Be all my sins remembered.)";
         }*/
         std::vector<int> vocab_sizes = { 3000, 8000, 12000, 20000, 40000, 80000, 100000 };
         string corpus_files;
+
         for (const auto& entry : fs::recursive_directory_iterator(corpus_dir)) {
             if (entry.is_regular_file() && entry.path().extension() == ".txt") {
                 corpus_files += "\"" + entry.path().string() + "\",";
@@ -1641,11 +1732,12 @@ Be all my sins remembered.)";
                 " --model_prefix=" + current_vocabulary_prefix +
                 " --bos_id=" + to_string(bos_id) + " --eos_id=" + to_string(eos_id) +
                 " --unk_id=" + to_string(unk_id) + " --pad_id=" + to_string(pad_id) +
+                " --user_defined_symbols=\"<rn>\"" +
                 " --model_type=unigram" +
                 " --character_coverage=1.0" +
                 " --max_sentence_length=16768" +
                 " --split_by_unicode_script=false" +
-                " --input_sentence_size=30000000" +
+                " --input_sentence_size=10000000" +
                 " --shuffle_input_sentence=true" +
                 " --train_extremely_large_corpus=true" +
                 " --vocab_size=" + to_string(vocab_size);
@@ -1666,9 +1758,8 @@ Be all my sins remembered.)";
         }
         
         const string model_sync_filename = fs::current_path().string() + "/ernie_checkpoint.dat";        
-        llm::net_v1_1 net;
-        adam solver(weight_decay, beta1, beta2);
-        dnn_trainer<llm::net_v1_1, adam> my_trainer(net, solver, gpus);
+        llm::net_v1_1_train net;
+        dnn_trainer<llm::net_v1_1_train, adam> my_trainer(net, adam(weight_decay, beta1, beta2), gpus);
         my_trainer.set_learning_rate(learning_rate);
         my_trainer.set_min_learning_rate(min_learning_rate);
         my_trainer.set_iterations_without_progress_threshold(iterations_without_progress_threshold);
@@ -1692,14 +1783,33 @@ Be all my sins remembered.)";
         } else data.load_documents(corpus_dir, false);
         cout << "about " << data.get_total_samples() << " samples for the training" << endl;
 
+        // Use some threads to preload samples
+        dlib::pipe<a_training> p_data(50);                          
+        auto f = [&, mini_batch_size](documents& docs, dlib::pipe<a_training>& data, bool select_randomly) {
+            a_training temp;
+            while (data.is_enabled()) {
+                if (docs.generate_samples(mini_batch_size, temp.samples, temp.labels, select_randomly)) data.enqueue(temp);
+            }
+        };       
+        std::thread data_loader1([&data, &p_data, f]() { f(data, p_data, true); });
+        std::thread data_loader2([&data, &p_data, f]() { f(data, p_data, true); });
+        cout << "waiting for the initial pipe loading... ";
+        while (p_data.size() < 50) std::this_thread::sleep_for(std::chrono::seconds(1));
+        cout << "done" << endl;
+
         // Training loop
+        a_training a_training_sample;
         while (!g_interrupt_signal_received && my_trainer.get_learning_rate() >= my_trainer.get_min_learning_rate()) {
-            if (data.generate_samples(mini_batch_size, samples, labels)) my_trainer.train_one_step(samples, labels);
-            else g_interrupt_signal_received = true;            
+            p_data.dequeue(a_training_sample);
+            my_trainer.train_one_step(a_training_sample.samples, a_training_sample.labels);
         }
         cout << "stopping the training process" << endl;
+        p_data.disable();
+        data_loader1.join();
+        data_loader2.join();
         my_trainer.get_net();
         net.clean();
+        cout << "model parameters: " << count_parameters(net) << endl;
         serialize(language_model) << net;
         cout << endl << "language model <" << language_model << "> saved" << endl;
         if (use_sync_file && !g_interrupt_signal_received) {
@@ -1735,8 +1845,8 @@ Be all my sins remembered.)";
             cerr << "vocabulary file not found! (<" << (vocabulary_prefix + ".model|.vocab") << ">)" << endl;
             return 1;
         }
-        llm::net_v1_1 net;
-        softmax<multiply<llm::net_v1_1::subnet_type>> generator(multiply_(1.0 / temperature));
+        llm::net_v1_1_inf net;
+        softmax<multiply<llm::net_v1_1_inf::subnet_type>> generator(multiply_(1.0 / temperature));
         if (fs::exists(language_model)) deserialize(language_model) >> net;
         else {
             cerr << "language model not found! (<" << language_model << ">)" << endl;
