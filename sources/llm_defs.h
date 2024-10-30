@@ -26,8 +26,8 @@ namespace llm
     const long vocab_size = 100000;          // Size of the vocabulary
     const long number_of_blocks = 8;         // Number of transformer blocks - Default: 8
     const long number_of_heads = 4;          // Number of attention heads - Default: 4
-    const long embedding_size = 64;          // Size of the embedding (d_model) - Default: 64
-    const long sequence_size = 24;           // Maximum length of the input sequence - Default: 24
+    const long embedding_size = 128;          // Size of the embedding (d_model) - Default: 128
+    const long sequence_size = 32;           // Maximum length of the input sequence - Default: 32
 
     // Scale Weights Layer
     template <long d_k_>
@@ -47,7 +47,7 @@ namespace llm
     // Classification head
     template <long num_logits, typename SUBNET>
     //using classification_head = loss_multiclass_log<fc<num_logits, SUBNET>>;
-    using classification_head = loss_crossentropy<linear<num_logits, SUBNET>>;
+    using classification_head = loss_cross_entropy<linear<num_logits, SUBNET>>;
 
     namespace v1_1_4 {
         template <long seq_len, long d_model, typename SUBNET>
@@ -62,29 +62,29 @@ namespace llm
         template <long seq_len, long d_model, long nb_heads, typename SUBNET>
         using multihead_attention =
             add_prev1<
-            dropout_rate<10, linear<d_model,
+            linear<d_model,
             hstack<
             multm_prev3<
-            dropout_rate<10, softmaxm<tril_mask<
+            softmaxm<tril_mask<
             scale_weights<d_model / nb_heads,
             multm_prev4<hsplit<nb_heads, query<seq_len, d_model, skip2<
             tag4<transpose<hsplit<nb_heads, key<seq_len, d_model, skip2<
             tag3<hsplit<nb_heads, value<seq_len, d_model,
             tag2<hsplit<3, linear_no_bias<d_model * 3, rms_norm<
-            tag1<SUBNET>>>>>>>>>>>>>>>>>>>>>>>>>>;
+            tag1<SUBNET>>>>>>>>>>>>>>>>>>>>>>>>;
         template <long seq_len, long d_model, long nb_heads, typename SUBNET>
         using multihead_attention_i =
             add_prev1<
-            multiply<linear<d_model,
+            linear<d_model,
             hstack<
             multm_prev3<
-            multiply<softmaxm<tril_mask<
+            softmaxm<tril_mask<
             scale_weights<d_model / nb_heads,
             multm_prev4<hsplit<nb_heads, query<seq_len, d_model, skip2<
             tag4<transpose<hsplit<nb_heads, key<seq_len, d_model, skip2<
             tag3<hsplit<nb_heads, value<seq_len, d_model,
             tag2<hsplit<3, linear_no_bias<d_model * 3, rms_norm<
-            tag1<SUBNET>>>>>>>>>>>>>>>>>>>>>>>>>>;
+            tag1<SUBNET>>>>>>>>>>>>>>>>>>>>>>>>;
 
         template <long d_model, typename SUBNET>
         using feed_forward_fc =

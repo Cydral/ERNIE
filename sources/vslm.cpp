@@ -1379,7 +1379,7 @@ int main(int argc, char* argv[]) {
 
         // test: multihead attention model
         if (!skip_tests[12]) {
-            mini_batch_size = 20;
+            mini_batch_size = 32;
             if (display_debug_info) cout << "\ntest: multihead attention model\n";
             const long num_classes = 256, num_epochs = 3000;
             long num_samples = (800 / mini_batch_size) * mini_batch_size;
@@ -1453,14 +1453,14 @@ int main(int argc, char* argv[]) {
         {
             if (display_debug_info) cout << "\ntest: test: \"shakespeare\" example\n";                        
             {
-                mini_batch_size = 48;
+                mini_batch_size = 64;
                 const long num_classes = 256;
                 using net_type_b = llm::classification_head<num_classes,
-                    repeat<2, llm::transformer_block,
+                    repeat<4, llm::transformer_block,
                     llm::positional_embeddings<num_classes, llm::embedding_size,
                     input<matrix<int, 0, 1>>>>>;
                 using net_type_b_i = llm::classification_head<num_classes,
-                    repeat<2, llm::transformer_block_i,
+                    repeat<4, llm::transformer_block_i,
                     llm::positional_embeddings<num_classes, llm::embedding_size,
                     input<matrix<int, 0, 1>>>>>;
 

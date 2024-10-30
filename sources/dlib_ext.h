@@ -2736,7 +2736,7 @@ namespace dlib {
 
 // ----------------------------------------------------------------------------------------
     /* TO BE ADDED TO <loss.h> */
-    class loss_crossentropy_
+    class loss_cross_entropy_
     {
     public:
 
@@ -2769,7 +2769,6 @@ namespace dlib {
                     auto slice = alias_tensor(output_tensor.nr(), output_tensor.nc())(output_tensor, (n * num_channels + k) * plane_size);
                     sums += sum_rows(mat(slice));
                 }
-                // The index of the largest output for this sample is the label
                 *iter++ = index_of_max(sums);
             }
         }
@@ -2803,16 +2802,16 @@ namespace dlib {
             for (long n = 0; n < output_tensor.num_samples(); ++n)
             {
                 const long y = (long)*truth++;
-                DLIB_CASSERT(y < output_tensor.nc());                
+                DLIB_CASSERT(y < output_tensor.nc());
 
-                float total_prob = 0.0f;
+                float prob_y = 0.0f;
                 for (long k = 0; k < output_tensor.k(); ++k)
                 {
-                    auto grad_plane = alias_tensor(output_tensor.nr(), output_tensor.nc())(grad, (n * output_tensor.k() + k) * plane_size);
+                    auto grad_plane = alias_tensor(grad.nr(), grad.nc())(grad, (n * grad.k() + k) * plane_size);
                     for (long r = 0; r < output_tensor.nr(); ++r)
                     {
-                        const long idx = r * output_tensor.nc() + y;
-                        total_prob += grad_plane.host()[idx];
+                        const long idx_y = r * output_tensor.nc() + y;
+                        prob_y += grad_plane.host()[idx_y];
 
                         for (long c = 0; c < output_tensor.nc(); ++c)
                         {
@@ -2822,40 +2821,40 @@ namespace dlib {
                         }
                     }
                 }
-                loss -= scale * safe_log(total_prob / (output_tensor.k() * output_tensor.nr()));
+                loss -= scale * safe_log(prob_y / (output_tensor.k() * output_tensor.nr()));
             }
 
             return loss;
         }
 
-        friend void serialize(const loss_crossentropy_&, std::ostream& out)
+        friend void serialize(const loss_cross_entropy_&, std::ostream& out)
         {
-            serialize("loss_crossentropy_", out);
+            serialize("loss_cross_entropy_", out);
         }
 
-        friend void deserialize(loss_crossentropy_&, std::istream& in)
+        friend void deserialize(loss_cross_entropy_&, std::istream& in)
         {
             std::string version;
             deserialize(version, in);
-            if (version != "loss_crossentropy_")
-                throw serialization_error("Unexpected version found while deserializing dlib::loss_crossentropy_.");
+            if (version != "loss_cross_entropy_")
+                throw serialization_error("Unexpected version found while deserializing dlib::loss_cross_entropy_.");
         }
 
-        friend std::ostream& operator<<(std::ostream& out, const loss_crossentropy_&)
+        friend std::ostream& operator<<(std::ostream& out, const loss_cross_entropy_&)
         {
-            out << "loss_crossentropy";
+            out << "loss_cross_entropy";
             return out;
         }
 
-        friend void to_xml(const loss_crossentropy_& /*item*/, std::ostream& out)
+        friend void to_xml(const loss_cross_entropy_& /*item*/, std::ostream& out)
         {
-            out << "<loss_crossentropy />";
+            out << "<loss_cross_entropy />";
         }
 
     };
 
     template <typename SUBNET>
-    using loss_crossentropy = add_loss_layer<loss_crossentropy_, SUBNET>;
+    using loss_cross_entropy = add_loss_layer<loss_cross_entropy_, SUBNET>;
 
     /* TO BE ADDED TO <input_abstract.h> */
 // ----------------------------------------------------------------------------------------
