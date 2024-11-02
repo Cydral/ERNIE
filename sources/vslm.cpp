@@ -965,7 +965,7 @@ int main(int argc, char* argv[]) {
     string corpus_dir;
     bool do_benchmark = false, text_generation = false;
     bool voc_training = false, model_training = false, model_prompting = false, use_sync_file = false;
-    double learning_rate = 1e-3, min_learning_rate = 1e-6, weight_decay = 0.004, beta1 = 0.9, beta2 = 0.999, temperature = 0.9;
+    double learning_rate = 1e-3, min_learning_rate = 1e-6, weight_decay = 0.05, beta1 = 0.9, beta2 = 0.999, temperature = 0.9;
     long mini_batch_size = 256, iterations_without_progress_threshold = 50000, top_k = 3;
     std::vector<int> gpus = { 0 };
     set_dnn_prefer_fastest_algorithms();
@@ -1044,7 +1044,7 @@ int main(int argc, char* argv[]) {
             true,      // 10: hsplit/hstack layers
             true,      // 11: rms_norm layer
             true,      // 12: multihead attention model
-            false       // 13: "shakespeare" example
+            false      // 13: "shakespeare" example
         };
 
         // test: tokenization
@@ -1381,20 +1381,18 @@ int main(int argc, char* argv[]) {
         if (!skip_tests[12]) {
             mini_batch_size = 32;
             if (display_debug_info) cout << "\ntest: multihead attention model\n";
-            const long num_classes = 256, num_epochs = 3000;
-            long num_samples = (800 / mini_batch_size) * mini_batch_size;
+            const long num_classes = 256, num_epochs = 5000;
+            long num_samples = (1000 / mini_batch_size) * mini_batch_size;
 
             // Generate synthetic training data
             dlib::rand rnd(std::rand());
-            std::vector<matrix<float>> samples;
+            std::vector<matrix<int, 0, 1>> samples;
             std::vector<unsigned long> labels;
             for (int i = 0; i < num_samples; ++i) {
-                matrix<float> sample(llm::sequence_size, llm::embedding_size);
-                for (int r = 0; r < llm::sequence_size; ++r) {
-                    for (int c = 0; c < llm::embedding_size; ++c) sample(r, c) = rnd.get_random_float() * 2.0f - 1.0f;
-                }
+                matrix<int> sample(llm::sequence_size, 1);
+                for (int r = 0; r < llm::sequence_size; ++r) sample(r, 0) = rnd.get_random_32bit_number() % num_classes;
                 samples.push_back(sample);
-                labels.push_back(rnd.get_random_32bit_number() % (num_classes / 10));
+                labels.push_back(rnd.get_random_32bit_number() % num_classes);
             }
             auto count_unique_classes = [&labels]() {
                 std::unordered_set<unsigned long> unique_classes(labels.begin(), labels.end());
@@ -1402,50 +1400,47 @@ int main(int argc, char* argv[]) {
             };
 
             // Split data into batches
-            std::vector<std::vector<matrix<float>>> batches;
+            std::vector<std::vector<matrix<int, 0, 1>>> batches;
             std::vector<std::vector<unsigned long>> label_batches;
             for (int i = 0; i < num_samples; i += mini_batch_size) {
-                std::vector<matrix<float>> batch_samples(samples.begin() + i, samples.begin() + i + mini_batch_size);
+                std::vector<matrix<int, 0, 1>> batch_samples(samples.begin() + i, samples.begin() + i + mini_batch_size);
                 std::vector<unsigned long> batch_labels(labels.begin() + i, labels.begin() + i + mini_batch_size);
                 batches.push_back(batch_samples);
                 label_batches.push_back(batch_labels);
             }
 
-            using net_type_a = llm::classification_head<num_classes,                
-                llm::v1_1_4::feed_forward<llm::embedding_size,
-                llm::v1_1_4::multihead_attention<llm::sequence_size, llm::embedding_size, llm::number_of_heads,
-                input<matrix<float>>>>>;
-            using net_type_a_i = llm::classification_head<num_classes,
-                llm::v1_1_4::feed_forward_i<llm::embedding_size,
-                llm::v1_1_4::multihead_attention_i<llm::sequence_size, llm::embedding_size, llm::number_of_heads,
-                input<matrix<float>>>>>;
+            using net_type_a = llm::classification_head<num_classes,
+                llm::transformer_block<
+                llm::positional_embeddings<llm::sequence_size, llm::embedding_size,
+                input<matrix<int, 0, 1>>>>>;
 
+            cout << "batch size: " << mini_batch_size << endl;
             cout << "number of samples: " << samples.size() << endl;
-            cout << "number of classes: " << count_unique_classes() << std::endl;
-            cout << "number of sample batches: " << batches.size() << endl;
-            cout << "number of label batches: " << label_batches.size() << endl;
+            cout << "number of unique classes: " << count_unique_classes() << std::endl;
+            cout << "number of batches: " << batches.size() << "/" << label_batches.size() << endl;
 
             net_type_a net_a;
-            net_type_a_i net_a_i;
-            dnn_trainer<net_type_a> trainer_b(net_a, sgd(weight_decay, beta1), gpus);
-            trainer_b.set_learning_rate(learning_rate);
-            trainer_b.set_min_learning_rate(min_learning_rate);
-            trainer_b.set_mini_batch_size(mini_batch_size);
-            trainer_b.be_verbose();
-            trainer_b.set_iterations_without_progress_threshold(350);
-            for (int epoch = 0; epoch < num_epochs && trainer_b.get_learning_rate() > trainer_b.get_min_learning_rate() && !g_interrupt_signal_received; ++epoch) {
-                for (size_t i = 0; i < batches.size(); ++i) trainer_b.train_one_step(batches[i], label_batches[i]);
+            dnn_trainer<net_type_a> trainer_a(net_a, sgd(weight_decay, beta1), gpus);
+            trainer_a.set_learning_rate(learning_rate);
+            trainer_a.set_mini_batch_size(mini_batch_size);
+            trainer_a.set_learning_rate_shrink_factor(0.1);
+            trainer_a.set_iterations_without_progress_threshold(5000);
+            for (int epoch = 0; epoch < num_epochs /* && trainer_a.get_learning_rate() >= trainer_a.get_min_learning_rate() */ && !g_interrupt_signal_received; ++epoch) {
+                for (size_t i = 0; i < batches.size(); ++i) trainer_a.train_one_step(batches[i], label_batches[i]);
+                if (epoch % 100 == 0) cout << "epoch#: " << epoch << "[" << num_epochs << "] learning rate: " <<
+                    trainer_a.get_learning_rate() << " average loss: " <<
+                    trainer_a.get_average_loss() << " steps without progress: " <<
+                    trainer_a.get_steps_without_progress() << endl;
             }
-            trainer_b.get_net();
+            trainer_a.get_net();
             net_a.clean();
             cout << "multihead attention model parameters: " << count_parameters(net_a) << endl;
-            g_interrupt_signal_received = false;
-            net_a_i = net_a;
-            std::vector<unsigned long> predicted_labels_b = net_a_i(samples);
-            int num_correct_b = 0;
-            for (size_t i = 0; i < labels.size(); ++i) if (predicted_labels_b[i] == labels[i]) ++num_correct_b;
-            double accuracy_b = static_cast<double>(num_correct_b) / labels.size();
-            DLIB_TEST_MSG(accuracy_b > 0.9, "multihead attention model (accuracy: " + to_string(accuracy_b) + ")");
+            std::vector<unsigned long> predicted_labels_a = net_a(samples);
+            int num_correct_a = 0;
+            for (size_t i = 0; i < labels.size(); ++i) if (predicted_labels_a[i] == labels[i]) ++num_correct_a;
+            double accuracy_a = static_cast<double>(num_correct_a) / labels.size();
+            cout << "correct matches: " << num_correct_a << "/" << labels.size() << endl;
+            DLIB_TEST_MSG(accuracy_a > 0.9, "multihead attention model (accuracy: " + to_string(accuracy_a) + ")");
         }
 
         // test: "shakespeare" example
@@ -1459,21 +1454,17 @@ int main(int argc, char* argv[]) {
                     repeat<4, llm::transformer_block,
                     llm::positional_embeddings<num_classes, llm::embedding_size,
                     input<matrix<int, 0, 1>>>>>;
-                using net_type_b_i = llm::classification_head<num_classes,
-                    repeat<4, llm::transformer_block_i,
-                    llm::positional_embeddings<num_classes, llm::embedding_size,
-                    input<matrix<int, 0, 1>>>>>;
 
                 // Tokenize the Shakespeare text
                 string input_sequence = shakespeare_test;
                 std::vector<matrix<int, 0, 1>> samples;
                 std::vector<unsigned long> labels;
-                documents data_c(llm::sequence_size, pad_id, true);
-                data_c.load_text(shakespeare_text, false);
+                documents data_b(llm::sequence_size, pad_id, true);
+                data_b.load_text(shakespeare_text, false);
                 cout << "batch size: " << mini_batch_size << endl;
-                data_c.generate_samples(1, samples, labels, false);
-                cout << "number of generated samples: " << data_c.get_total_presamples() << endl;
-                cout << "number of sample batches: " << (data_c.get_total_presamples() / mini_batch_size) << endl;                
+                data_b.generate_samples(1, samples, labels, false);
+                cout << "number of generated samples: " << data_b.get_total_presamples() << endl;
+                cout << "number of sample batches: " << (data_b.get_total_presamples() / mini_batch_size) << endl;                
 
                 // Use some threads to preload samples                                
                 auto f = [&, mini_batch_size](documents& docs, dlib::pipe<a_training>& data, bool select_randomly) {
@@ -1484,51 +1475,49 @@ int main(int argc, char* argv[]) {
                 };
 
                 net_type_b net_b;
-                net_type_b_i net_b_i;
-                dnn_trainer<net_type_b> trainer_c(net_b, sgd(weight_decay, beta1), gpus);
-                trainer_c.set_learning_rate(learning_rate);
-                trainer_c.set_min_learning_rate(min_learning_rate);
-                trainer_c.set_learning_rate_shrink_factor(0.1);
-                trainer_c.set_mini_batch_size(mini_batch_size);
-                trainer_c.be_verbose();
-                trainer_c.set_iterations_without_progress_threshold(5000);
+                dnn_trainer<net_type_b> trainer_b(net_b, sgd(weight_decay, beta1), gpus);
+                trainer_b.set_learning_rate(learning_rate);
+                trainer_b.set_min_learning_rate(min_learning_rate);
+                trainer_b.set_learning_rate_shrink_factor(0.1);
+                trainer_b.set_mini_batch_size(mini_batch_size);
+                trainer_b.be_verbose();
+                trainer_b.set_iterations_without_progress_threshold(25000);
                 a_training a_training_sample;
-                if (!fs::exists("llm_shakespeare_model_a.dat") && trainer_c.get_learning_rate() >= trainer_c.get_min_learning_rate()) {                    
+                if (!fs::exists("llm_shakespeare_model_a.dat") && trainer_b.get_learning_rate() >= trainer_b.get_min_learning_rate()) {                    
                     dlib::pipe<a_training> p_data(10);
-                    std::thread data_loader1([&data_c, &p_data, f]() { f(data_c, p_data, false); });
-                    std::thread data_loader2([&data_c, &p_data, f]() { f(data_c, p_data, false); });
+                    std::thread data_loader1([&data_b, &p_data, f]() { f(data_b, p_data, false); });
+                    std::thread data_loader2([&data_b, &p_data, f]() { f(data_b, p_data, false); });
                     cout << "waiting for the initial pipe loading... ";
                     while (p_data.size() < 10) std::this_thread::sleep_for(std::chrono::seconds(1));
                     cout << "done" << endl;
                     
-                    while (trainer_c.get_learning_rate() >= trainer_c.get_min_learning_rate() && !g_interrupt_signal_received) {
+                    while (trainer_b.get_learning_rate() >= trainer_b.get_min_learning_rate() && !g_interrupt_signal_received) {
                         p_data.dequeue(a_training_sample);
-                        trainer_c.train_one_step(a_training_sample.samples, a_training_sample.labels);
+                        trainer_b.train_one_step(a_training_sample.samples, a_training_sample.labels);
                     }
                     p_data.disable();
                     data_loader1.join();
                     data_loader2.join();
 
-                    trainer_c.get_net();
+                    trainer_b.get_net();
                     net_b.clean();
                     dlib::serialize("llm_shakespeare_model_a.dat") << net_b;
                     cout << "shakespeare model saved: llm_shakespeare_model_a.dat" << endl;
                     cout << "shakespeare model parameters: " << count_parameters(net_b) << endl;
 
-                    deserialize("llm_shakespeare_model_a.dat") >> net_b_i;
-                    size_t num_correct_c = 0;
-                    data_c.generate_samples(data_c.get_total_presamples(), samples, labels, false);
+                    deserialize("llm_shakespeare_model_a.dat") >> net_b;
+                    size_t num_correct_b = 0;
+                    data_b.generate_samples(data_b.get_total_presamples(), samples, labels, false);
                     for (size_t i = 0; i < samples.size(); ++i) {
-                        unsigned long p_label = net_b_i(samples[i]);
-                        if (p_label == labels[i]) ++num_correct_c;
+                        if (net_b(samples[i]) == labels[i]) ++num_correct_b;
                     }
-                    double accuracy_c = static_cast<double>(num_correct_c) / labels.size();
-                    DLIB_TEST_MSG(accuracy_c > 0.9, "shakespeare model (accuracy: " + to_string(accuracy_c) + ") - right: " + \
-                        to_string(num_correct_c) + " - wrong: " + to_string(labels.size() - num_correct_c));
+                    double accuracy_b = static_cast<double>(num_correct_b) / labels.size();
+                    DLIB_TEST_MSG(accuracy_b > 0.9, "shakespeare model (accuracy: " + to_string(accuracy_b) + ") - right: " + \
+                        to_string(num_correct_b) + " - wrong: " + to_string(labels.size() - num_correct_b));
                 }
 
                 // Predict the next sequence of characters
-                if (fs::exists("llm_shakespeare_model_a.dat")) deserialize("llm_shakespeare_model_a.dat") >> net_b_i;
+                if (fs::exists("llm_shakespeare_model_a.dat")) deserialize("llm_shakespeare_model_a.dat") >> net_b;
                 size_t sequence_len = llm::sequence_size;
                 sequence_len = std::min(sequence_len, input_sequence.length());
                 std::string extracted_sequence = input_sequence.substr(input_sequence.length() - sequence_len);
@@ -1536,16 +1525,13 @@ int main(int argc, char* argv[]) {
                 input_tokens.set_size(sequence_len);
                 for (size_t i = 0; i < sequence_len; ++i) input_tokens(i, 0) = static_cast<unsigned char>(extracted_sequence[i]);
 
-                string start_seq = data_c.to_unsigned_char_string(input_tokens);
+                string start_seq = data_b.to_unsigned_char_string(input_tokens);
                 cout << "input sequence for text generation: <" << start_seq << "> (size: " << start_seq.length() << ")" << endl;
                 string generated_sonnet;                
                 for (int i = 0; i < 450; ++i) {
-                    samples.clear();
-                    samples.push_back(input_tokens);
-                    samples.push_back(input_tokens);
-                    std::vector<unsigned long> next_char = net_b_i(samples);
-                    if (next_char[0] < num_classes) generated_sonnet += data_c.to_unsigned_char_string(next_char[0]);
-                    else cerr << "error during next token generation: " << next_char[0] << endl;
+                    unsigned long next_char = net_b(input_tokens);
+                    if (next_char < num_classes) generated_sonnet += data_b.to_unsigned_char_string(next_char);
+                    else cerr << "error during next token generation: " << next_char << endl;
 
                     for (int j = 0; j < (llm::sequence_size - 1); ++j) input_tokens(j, 0) = input_tokens(j + 1, 0);
                     int insert_pos = std::distance(
@@ -1554,7 +1540,7 @@ int main(int argc, char* argv[]) {
                             [&](const auto& element) { return element == pad_id; })
                     );
                     if (insert_pos == llm::sequence_size) insert_pos = llm::sequence_size - 1;
-                    input_tokens(insert_pos, 0) = static_cast<int>(next_char[0]);
+                    input_tokens(insert_pos, 0) = static_cast<int>(next_char);
                 }
                 input_sequence += generated_sonnet;
                 cout << "generated text:\n\n" << input_sequence << " (...)\n\n";
@@ -1562,9 +1548,9 @@ int main(int argc, char* argv[]) {
                 // Loading now the complete Shakespeare file
                 string shakespeare_file = "shakespeare.txt";
                 if (fs::exists(shakespeare_file)) {
-                    documents data_d(llm::sequence_size, pad_id, true);
-                    data_d.load_documents(shakespeare_file, false);
-                    cout << "loading " << data_d.get_total_samples() << " samples from " << shakespeare_file << endl;
+                    documents data_c(llm::sequence_size, pad_id, true);
+                    data_c.load_documents(shakespeare_file, false);
+                    cout << "loading " << data_c.get_total_samples() << " samples from " << shakespeare_file << endl;
 
                     // Reload previous model
                     if (!fs::exists("llm_shakespeare_model_b.dat") && fs::exists("llm_shakespeare_model_a.dat")) {
@@ -1580,37 +1566,37 @@ int main(int argc, char* argv[]) {
                     }
 
                     mini_batch_size = 256;
-                    dnn_trainer<net_type_b, adam> trainer_d(net_b, adam(weight_decay, beta1, beta2), gpus);
-                    trainer_d.set_learning_rate(learning_rate);
-                    trainer_d.set_min_learning_rate(min_learning_rate);
-                    trainer_d.set_mini_batch_size(mini_batch_size);
-                    trainer_d.be_verbose();
-                    trainer_d.set_iterations_without_progress_threshold(15000);
+                    dnn_trainer<net_type_b, adam> trainer_c(net_b, adam(weight_decay, beta1, beta2), gpus);
+                    trainer_c.set_learning_rate(learning_rate);
+                    trainer_c.set_min_learning_rate(min_learning_rate);
+                    trainer_c.set_mini_batch_size(mini_batch_size);
+                    trainer_c.be_verbose();
+                    trainer_c.set_iterations_without_progress_threshold(25000);
 
                     // New training loop
-                    dlib::pipe<a_training> p_data(20);
-                    std::thread data_loader1([&data_d, &p_data, f]() { f(data_d, p_data, true); });
-                    std::thread data_loader2([&data_d, &p_data, f]() { f(data_d, p_data, true); });
+                    dlib::pipe<a_training> p_data(10);
+                    std::thread data_loader1([&data_c, &p_data, f]() { f(data_c, p_data, true); });
+                    std::thread data_loader2([&data_c, &p_data, f]() { f(data_c, p_data, true); });
                     cout << "waiting for the initial pipe loading... ";
-                    while (p_data.size() < 20) std::this_thread::sleep_for(std::chrono::seconds(1));
+                    while (p_data.size() < 10) std::this_thread::sleep_for(std::chrono::seconds(1));
                     cout << "done" << endl;
 
-                    while (trainer_d.get_learning_rate() >= trainer_d.get_min_learning_rate() && !g_interrupt_signal_received) {
+                    while (trainer_c.get_learning_rate() >= trainer_c.get_min_learning_rate() && !g_interrupt_signal_received) {
                         p_data.dequeue(a_training_sample);
-                        trainer_d.train_one_step(a_training_sample.samples, a_training_sample.labels);
+                        trainer_c.train_one_step(a_training_sample.samples, a_training_sample.labels);
                     }
                     p_data.disable();
                     data_loader1.join();
                     data_loader2.join();
 
-                    trainer_d.get_net();
+                    trainer_c.get_net();
                     net_b.clean();
                     serialize("llm_shakespeare_model_b.dat") << net_b;
                     cout << "advanced shakespeare model saved: llm_shakespeare_model_b.dat" << endl;
                     cout << "advanced shakespeare model parameters: " << count_parameters(net_b) << endl;
 
                     // Attempting to generate a new sonnet
-                    deserialize("llm_shakespeare_model_b.dat") >> net_b_i;
+                    deserialize("llm_shakespeare_model_b.dat") >> net_b;
                     string sonnet_start = "Shall I compare thee to a winter's night?\nThy beauty warms the frost - bitten bough.\nIn darkness, thou art my guiding light,\nA beacon of hope 'midst winter's vow.";
                     sequence_len = std::min((size_t)llm::sequence_size, sonnet_start.length());
                     std::string extracted_sequence = sonnet_start.substr(sonnet_start.length() - sequence_len);
@@ -1621,8 +1607,8 @@ int main(int argc, char* argv[]) {
                     cout << "generated sonnet:\n\n";
                     string generated_sonnet;
                     for (int i = 0; i < 450; ++i) {
-                        unsigned long next_char = net_b_i(input_tokens);
-                        if (next_char < num_classes) generated_sonnet += data_d.to_unsigned_char_string(next_char);
+                        unsigned long next_char = net_b(input_tokens);
+                        if (next_char < num_classes) generated_sonnet += data_c.to_unsigned_char_string(next_char);
                         else cerr << "error during next token generation: " << next_char << endl;
 
                         // Stop after generating what looks like a complete sonnet
@@ -1670,8 +1656,8 @@ int main(int argc, char* argv[]) {
             cerr << "vocabulary file not found! (<" << (vocabulary_prefix + ".model|.vocab") << ">)" << endl;
             return 1;
         }
-        llm::net_v1_1_inf net;
-        softmax<multiply<llm::net_v1_1_inf::subnet_type>> generator(multiply_(1.0 / temperature));
+        llm::net_v1_1 net;
+        softmaxm<multiply<llm::net_v1_1::subnet_type>> generator(multiply_(1.0 / temperature));
         if (fs::exists(language_model)) deserialize(language_model) >> net;
         else {
             cerr << "language model not found! (<" << language_model << ">)" << endl;
@@ -1690,8 +1676,8 @@ int main(int argc, char* argv[]) {
         matrix<int, 0, 1> padded_window;
         for (int i = 0; i < 100; ++i) {
             if (prompt.get_padded_window(padded_window)) {
-                matrix<float, llm::vocab_size, 1> logits = mat(generator(padded_window));
-                int predicted_label = index_of_max(logits);
+                matrix<float, llm::sequence_size, llm::vocab_size> logits = mat(generator(padded_window));
+                int predicted_label = index_of_max(sum_rows(logits));
                 prompt.add_output(predicted_label);
                 response_ids.push_back(predicted_label);
             }
@@ -1758,8 +1744,8 @@ int main(int argc, char* argv[]) {
         }
         
         const string model_sync_filename = fs::current_path().string() + "/ernie_checkpoint.dat";        
-        llm::net_v1_1_train net;
-        dnn_trainer<llm::net_v1_1_train, adam> my_trainer(net, adam(weight_decay, beta1, beta2), gpus);
+        llm::net_v1_1 net;
+        dnn_trainer<llm::net_v1_1, adam> my_trainer(net, adam(weight_decay, beta1, beta2), gpus);
         my_trainer.set_learning_rate(learning_rate);
         my_trainer.set_min_learning_rate(min_learning_rate);
         my_trainer.set_iterations_without_progress_threshold(iterations_without_progress_threshold);
@@ -1784,7 +1770,7 @@ int main(int argc, char* argv[]) {
         cout << "about " << data.get_total_samples() << " samples for the training" << endl;
 
         // Use some threads to preload samples
-        dlib::pipe<a_training> p_data(50);                          
+        dlib::pipe<a_training> p_data(10);                          
         auto f = [&, mini_batch_size](documents& docs, dlib::pipe<a_training>& data, bool select_randomly) {
             a_training temp;
             while (data.is_enabled()) {
@@ -1794,7 +1780,7 @@ int main(int argc, char* argv[]) {
         std::thread data_loader1([&data, &p_data, f]() { f(data, p_data, true); });
         std::thread data_loader2([&data, &p_data, f]() { f(data, p_data, true); });
         cout << "waiting for the initial pipe loading... ";
-        while (p_data.size() < 50) std::this_thread::sleep_for(std::chrono::seconds(1));
+        while (p_data.size() < 10) std::this_thread::sleep_for(std::chrono::seconds(1));
         cout << "done" << endl;
 
         // Training loop
@@ -1845,8 +1831,8 @@ int main(int argc, char* argv[]) {
             cerr << "vocabulary file not found! (<" << (vocabulary_prefix + ".model|.vocab") << ">)" << endl;
             return 1;
         }
-        llm::net_v1_1_inf net;
-        softmax<multiply<llm::net_v1_1_inf::subnet_type>> generator(multiply_(1.0 / temperature));
+        llm::net_v1_1 net;
+        softmaxm<multiply<llm::net_v1_1::subnet_type>> generator(multiply_(1.0 / temperature));
         if (fs::exists(language_model)) deserialize(language_model) >> net;
         else {
             cerr << "language model not found! (<" << language_model << ">)" << endl;
@@ -1879,7 +1865,9 @@ int main(int argc, char* argv[]) {
                 for (int i = 0; i < total_steps; ++i) {                    
                     if (prompt.get_padded_window(padded_window)) {
                         //cout << padded_window << endl;
-                        matrix<float, llm::vocab_size, 1> logits = mat(generator(padded_window));
+                        //matrix<float, llm::vocab_size, 1> logits = sum_rows(mat(generator(padded_window)));
+                        matrix<float, llm::sequence_size, llm::vocab_size> output = mat(generator(padded_window));
+                        matrix<float, 1, llm::vocab_size> logits = sum_rows(output);
                         //cout << "logits.nr()=" << logits.nr() << " - logits.nc()=" << logits.nc() << endl;
                         if (cur_top_k <= 1) {
                             predicted_label = index_of_max(logits);

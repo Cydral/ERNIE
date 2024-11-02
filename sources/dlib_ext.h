@@ -1010,20 +1010,20 @@ namespace dlib {
                     adjust(dest);
                 }
 
-                long lhs_rows = (lhs_is_matrix && lhs.num_samples() > 1) ? lhs.num_samples() : lhs.nr();
-                long lhs_cols = (lhs_is_matrix && lhs.k() > 1) ? lhs.k() : lhs.nc();
-                long rhs_rows = (rhs_is_matrix && rhs.num_samples() > 1) ? rhs.num_samples() : rhs.nr();
-                long rhs_cols = (rhs_is_matrix && rhs.k() > 1) ? rhs.k() : rhs.nc();
-                long dest_rows = (dest_is_matrix && dest.num_samples() > 1) ? dest.num_samples() : dest.nr();
-                long dest_cols = (dest_is_matrix && dest.k() > 1) ? dest.k() : dest.nc();
+                size_t lhs_rows = (lhs_is_matrix && lhs.num_samples() > 1) ? lhs.num_samples() : lhs.nr();
+                size_t lhs_cols = (lhs_is_matrix && lhs.k() > 1) ? lhs.k() : lhs.nc();
+                size_t rhs_rows = (rhs_is_matrix && rhs.num_samples() > 1) ? rhs.num_samples() : rhs.nr();
+                size_t rhs_cols = (rhs_is_matrix && rhs.k() > 1) ? rhs.k() : rhs.nc();
+                size_t dest_rows = (dest_is_matrix && dest.num_samples() > 1) ? dest.num_samples() : dest.nr();
+                size_t dest_cols = (dest_is_matrix && dest.k() > 1) ? dest.k() : dest.nc();
 
                 const size_t lhs_plane_size = lhs_rows * lhs_cols;
                 const size_t rhs_plane_size = rhs_rows * rhs_cols;
                 const size_t dest_plane_size = dest_rows * dest_cols;
 
-                for (long b = 0; b < num_samples; ++b)
+                for (size_t b = 0; b < num_samples; ++b)
                 {
-                    for (long c = 0; c < num_channels; ++c)
+                    for (size_t c = 0; c < num_channels; ++c)
                     {
                         auto lhs_slice = lhs_is_matrix ? lhs.device() :
                             lhs.device() + (b * num_channels + c) * lhs_plane_size;
@@ -1070,13 +1070,13 @@ namespace dlib {
             }
             else if (mode == 1)
             {
-                const long num_samples = src.num_samples();
-                const long num_channels = src.k();
+                const size_t num_samples = src.num_samples();
+                const size_t num_channels = src.k();
                 const size_t plane_size = src.nr() * src.nc();
 
-                for (long s = 0; s < num_samples; ++s)
+                for (size_t s = 0; s < num_samples; ++s)
                 {
-                    for (long k = 0; k < num_channels; ++k)
+                    for (size_t k = 0; k < num_channels; ++k)
                     {
                         auto src_slice = src.device() + (s * num_channels + k) * plane_size;
                         auto dest_slice = dest.device() + (s * num_channels + k) * plane_size;
@@ -1129,13 +1129,13 @@ namespace dlib {
             }
             else if (mode == 1)
             {
-                const long num_samples = output.num_samples();
-                const long num_channels = output.k();
+                const size_t num_samples = output.num_samples();
+                const size_t num_channels = output.k();
                 const size_t plane_size = output.nr() * output.nc();
 
-                for (long s = 0; s < num_samples; ++s)
+                for (size_t s = 0; s < num_samples; ++s)
                 {
-                    for (long k = 0; k < num_channels; ++k)
+                    for (size_t k = 0; k < num_channels; ++k)
                     {
                         auto output_slice = output.device() + (s * num_channels + k) * plane_size;
                         auto gi_slice = gradient_input.device() + (s * num_channels + k) * plane_size;
@@ -1467,8 +1467,8 @@ namespace dlib {
                         (tensor.nr() == 1 && tensor.nc() == 1);
                     };
 
-                long num_samples = std::max({ lhs.num_samples(), rhs.num_samples(), dest.num_samples() });
-                long num_channels = std::max({ lhs.k(), rhs.k(), dest.k() });
+                size_t num_samples = std::max({ lhs.num_samples(), rhs.num_samples(), dest.num_samples() });
+                size_t num_channels = std::max({ lhs.k(), rhs.k(), dest.k() });
                 const bool lhs_is_matrix = is_matrix(lhs), rhs_is_matrix = is_matrix(rhs), dest_is_matrix = is_matrix(dest);
 
                 if (lhs_is_matrix && rhs_is_matrix && dest_is_matrix) {
@@ -1487,20 +1487,20 @@ namespace dlib {
                     adjust(dest);
                 }
 
-                long lhs_rows = (lhs_is_matrix && lhs.num_samples() > 1) ? lhs.num_samples() : lhs.nr();
-                long lhs_cols = (lhs_is_matrix && lhs.k() > 1) ? lhs.k() : lhs.nc();
-                long rhs_rows = (rhs_is_matrix && rhs.num_samples() > 1) ? rhs.num_samples() : rhs.nr();
-                long rhs_cols = (rhs_is_matrix && rhs.k() > 1) ? rhs.k() : rhs.nc();
-                long dest_rows = (dest_is_matrix && dest.num_samples() > 1) ? dest.num_samples() : dest.nr();
-                long dest_cols = (dest_is_matrix && dest.k() > 1) ? dest.k() : dest.nc();
+                size_t lhs_rows = (lhs_is_matrix && lhs.num_samples() > 1) ? lhs.num_samples() : lhs.nr();
+                size_t lhs_cols = (lhs_is_matrix && lhs.k() > 1) ? lhs.k() : lhs.nc();
+                size_t rhs_rows = (rhs_is_matrix && rhs.num_samples() > 1) ? rhs.num_samples() : rhs.nr();
+                size_t rhs_cols = (rhs_is_matrix && rhs.k() > 1) ? rhs.k() : rhs.nc();
+                size_t dest_rows = (dest_is_matrix && dest.num_samples() > 1) ? dest.num_samples() : dest.nr();
+                size_t dest_cols = (dest_is_matrix && dest.k() > 1) ? dest.k() : dest.nc();
 
                 const size_t lhs_plane_size = lhs_rows * lhs_cols;
                 const size_t rhs_plane_size = rhs_rows * rhs_cols;
                 const size_t dest_plane_size = dest_rows * dest_cols;
 
-                for (long b = 0; b < num_samples; ++b)
+                for (size_t b = 0; b < num_samples; ++b)
                 {
-                    for (long c = 0; c < num_channels; ++c)
+                    for (size_t c = 0; c < num_channels; ++c)
                     {
                         auto lhs_slice = lhs_is_matrix ? alias_tensor(lhs_rows, lhs_cols)(lhs, 0) :
                             alias_tensor(lhs_rows, lhs_cols)(lhs, (b * num_channels + c) * lhs_plane_size);
@@ -2032,10 +2032,9 @@ namespace dlib {
 
         template <typename SUBNET>
         void forward(const SUBNET& sub, resizable_tensor& output)
-        {
+        {            
             const auto& prev_output = sub.get_output();
-            if (!have_same_dimensions(pe, prev_output)) setup(sub);
-
+            if (!have_same_dimensions(prev_output, pe)) setup(sub);
             output.set_size(prev_output.num_samples(), prev_output.k(), sequence_dim, embedding_dim);
             tt::add(output, prev_output, pe);
         }
@@ -2053,11 +2052,11 @@ namespace dlib {
         const tensor& get_positional_encodings() const { return pe; }
         tensor& get_positional_encodings() { return pe; }
 
-        friend void serialize(const positional_encodings_& /*item*/, std::ostream& out)
+        friend void serialize(const positional_encodings_& /* item */, std::ostream& out)
         {
             serialize("positional_encodings_", out);
         }
-        friend void deserialize(positional_encodings_& /*item*/, std::istream& in)
+        friend void deserialize(positional_encodings_& /* item */, std::istream& in)
         {
             std::string version;
             deserialize(version, in);
@@ -2757,19 +2756,19 @@ namespace dlib {
             DLIB_CASSERT(sub.sample_expansion_factor() == 1);
             DLIB_CASSERT(input_tensor.num_samples() == output_tensor.num_samples());
 
+            const size_t num_samples = output_tensor.num_samples();
             const size_t num_channels = output_tensor.k();
             const size_t plane_size = output_tensor.nr() * output_tensor.nc();
-            matrix<float> sums;
-            sums.set_size(1, output_tensor.nc());
-            for (long n = 0; n < output_tensor.num_samples(); ++n)
+            matrix<float> sums(output_tensor.nr(), output_tensor.nc());
+            for (size_t s = 0; s < num_samples; ++s)
             {
                 sums = 0.0f;
-                for (long k = 0; k < output_tensor.k(); ++k)
+                for (size_t k = 0; k < num_channels; ++k)
                 {
-                    auto slice = alias_tensor(output_tensor.nr(), output_tensor.nc())(output_tensor, (n * num_channels + k) * plane_size);
-                    sums += sum_rows(mat(slice));
+                    auto o_plane = alias_tensor(output_tensor.nr(), output_tensor.nc())(output_tensor, (s * num_channels + k) * plane_size);
+                    sums += mat(o_plane);
                 }
-                *iter++ = index_of_max(sums);
+                *iter++ = index_of_max(sum_rows(sums));
             }
         }
 
@@ -2795,33 +2794,39 @@ namespace dlib {
 
             tt::softmax(grad, output_tensor, softmax_mode::PLANE_WISE);
 
-            double loss = 0;
-            const size_t plane_size = output_tensor.nr() * output_tensor.nc();
-            const float scale = 1.0f / output_tensor.num_samples();
+            double loss = 0.0;
+            const size_t plane_size = grad.nr() * grad.nc();
+            const float scale = 1.0f / grad.num_samples();
+            const size_t ns = grad.num_samples(), nk = grad.k(), nr = grad.nr(), nc = grad.nc();
 
-            for (long n = 0; n < output_tensor.num_samples(); ++n)
+            for (size_t s = 0; s < ns; ++s)
             {
                 const long y = (long)*truth++;
-                DLIB_CASSERT(y < output_tensor.nc());
-
-                float prob_y = 0.0f;
-                for (long k = 0; k < output_tensor.k(); ++k)
-                {
-                    auto grad_plane = alias_tensor(grad.nr(), grad.nc())(grad, (n * grad.k() + k) * plane_size);
-                    for (long r = 0; r < output_tensor.nr(); ++r)
+                DLIB_CASSERT(y < nc);
+                                
+                for (size_t k = 0; k < nk; ++k)
+                {                    
+                    auto grad_plane = alias_tensor(nr, nc)(grad, (s * nk + k) * plane_size);
+                    float prob_y = 0.0f;
+                    for (size_t r = 0; r < nr; ++r)
                     {
-                        const long idx_y = r * output_tensor.nc() + y;
-                        prob_y += grad_plane.host()[idx_y];
-
-                        for (long c = 0; c < output_tensor.nc(); ++c)
+                        for (size_t c = 0; c < nc; ++c)
                         {
-                            const long idx = r * output_tensor.nc() + c;
+                            const long idx = r * nc + c;
                             const float prob = grad_plane.host()[idx];
-                            grad_plane.host()[idx] = scale * (prob - (c == y ? 1.0f : 0.0f));                           
+                            if (c == y)
+                            {
+                                prob_y += prob;
+                                grad_plane.host()[idx] = scale * (prob - 1.0f);
+                            }
+                            else
+                            {
+                                grad_plane.host()[idx] = scale * prob;
+                            }
                         }
                     }
-                }
-                loss -= scale * safe_log(prob_y / (output_tensor.k() * output_tensor.nr()));
+                    loss += scale * -safe_log(prob_y / nr);
+                }                
             }
 
             return loss;
