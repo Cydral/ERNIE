@@ -23,11 +23,11 @@ namespace llm
     using namespace dlib;
 
     // Global parameters for the small Transformer network
-    const long vocab_size = 100000;          // Size of the vocabulary
-    const long number_of_blocks = 6;         // Number of transformer blocks - Default: 6
-    const long number_of_heads = 4;          // Number of attention heads - Default: 4
-    const long embedding_size = 64;          // Size of the embedding (d_model) - Default: 64
-    const long sequence_size = 16;           // Maximum length of the input sequence - Default: 16
+    const long vocab_size = 80000;           // Size of the vocabulary - Default: en-fr.80k
+    const long number_of_blocks = 4;         // Number of transformer blocks - Default: 4
+    const long number_of_heads = 8;          // Number of attention heads - Default: 8
+    const long embedding_size = 256;         // Size of the embedding (d_model) - Default: 256
+    const long sequence_size = 32;           // Maximum length of the input sequence - Default: 32
 
     // Scale Weights Layer
     template <long d_k_>
@@ -42,7 +42,7 @@ namespace llm
     // Positional Embeddings
     template <unsigned long nb_embeddings, unsigned long embedding_length, typename SUBNET>
     using positional_embeddings =
-        positional_encodings<embeddings<nb_embeddings, embedding_length, SUBNET>>;
+        htan<positional_encodings<embeddings<nb_embeddings, embedding_length, SUBNET>>>;
 
     // Learned Positional Embeddings
     template <unsigned long nb_embeddings, unsigned long embedding_length, typename SUBNET>
@@ -53,7 +53,6 @@ namespace llm
     // Classification head
     template <long num_logits, typename SUBNET>
     using classification_head = loss_cross_entropy<linear<num_logits, SUBNET>>;
-    //using classification_head = loss_multiclass_log<fc<num_logits, SUBNET>>;
 
     namespace v1_1_4 {
         template <long seq_len, long d_model, typename SUBNET>
@@ -66,12 +65,25 @@ namespace llm
         using value = extract<(seq_len * d_model) * 2, 1, seq_len, d_model, SUBNET>;
 
         template <long seq_len, long d_model, long nb_heads, typename SUBNET>
-        using multihead_attention =
+        using t_multihead_attention =
             add_prev1<
             dropout_rate<10, linear<d_model,
             hstack<
             multm_prev3<
-            dropout_rate<7, softmaxm<tril_mask<
+            dropout_rate<5, softmaxm<tril_mask<
+            scale_weights<d_model / nb_heads,
+            multm_prev4<hsplit<nb_heads, query<seq_len, d_model, skip2<
+            tag4<transpose<hsplit<nb_heads, key<seq_len, d_model, skip2<
+            tag3<hsplit<nb_heads, value<seq_len, d_model,
+            tag2<hsplit<3, linear_no_bias<d_model * 3, rms_norm<
+            tag1<SUBNET>>>>>>>>>>>>>>>>>>>>>>>>>>;
+        template <long seq_len, long d_model, long nb_heads, typename SUBNET>
+        using i_multihead_attention =
+            add_prev1<
+            multiply<linear<d_model,
+            hstack<
+            multm_prev3<
+            multiply<softmaxm<tril_mask<
             scale_weights<d_model / nb_heads,
             multm_prev4<hsplit<nb_heads, query<seq_len, d_model, skip2<
             tag4<transpose<hsplit<nb_heads, key<seq_len, d_model, skip2<
@@ -80,15 +92,24 @@ namespace llm
             tag1<SUBNET>>>>>>>>>>>>>>>>>>>>>>>>>>;
 
         template <long d_model, typename SUBNET>
-        using feed_forward =
+        using t_feed_forward =
             add_prev5<            
             dropout_rate<10, linear<d_model, gelu<linear<d_model * 4, rms_norm<
             tag5<SUBNET>>>>>>>;
+        template <long d_model, typename SUBNET>
+        using i_feed_forward =
+            add_prev5<
+            multiply<linear<d_model, gelu<linear<d_model * 4, rms_norm<
+            tag5<SUBNET>>>>>>>;
 
         template <long seq_len, long d_model, long nb_heads, typename SUBNET>
-        using transformer =
-            feed_forward<d_model,
-            multihead_attention<seq_len, d_model, nb_heads, SUBNET>>;
+        using t_transformer =
+            t_feed_forward<d_model,
+            t_multihead_attention<seq_len, d_model, nb_heads, SUBNET>>;
+        template <long seq_len, long d_model, long nb_heads, typename SUBNET>
+        using i_transformer =
+            i_feed_forward<d_model,
+            i_multihead_attention<seq_len, d_model, nb_heads, SUBNET>>;
     }
 
     /**
@@ -113,10 +134,16 @@ namespace llm
      * suitable for learning from and generating short texts.
      */    
     template <typename SUBNET>
-    using transformer_block = v1_1_4::transformer<sequence_size, embedding_size, number_of_heads, SUBNET>;
+    using t_transformer_block = v1_1_4::t_transformer<sequence_size, embedding_size, number_of_heads, SUBNET>;
+    template <typename SUBNET>
+    using i_transformer_block = v1_1_4::i_transformer<sequence_size, embedding_size, number_of_heads, SUBNET>;
 
-    using net_v1_1 = classification_head<vocab_size,        
-        repeat<number_of_blocks, transformer_block,
+    using trn_net_v1_1 = classification_head<vocab_size,        
+        repeat<number_of_blocks, t_transformer_block,
+        positional_embeddings<vocab_size, embedding_size,
+        input<matrix<int, 0, 1>>>>>;
+    using inf_net_v1_1 = classification_head<vocab_size,
+        repeat<number_of_blocks, i_transformer_block,
         positional_embeddings<vocab_size, embedding_size,
         input<matrix<int, 0, 1>>>>>;
 }
