@@ -23,11 +23,11 @@ namespace llm
     using namespace dlib;
 
     // Global parameters for the small Transformer network
-    const long vocab_size = 80000;           // Size of the vocabulary - Default: en-fr.80k
+    const long vocab_size = 80000;           // Size of the vocabulary - Default: en-fr.40k
     const long number_of_blocks = 4;         // Number of transformer blocks - Default: 4
     const long number_of_heads = 8;          // Number of attention heads - Default: 8
-    const long embedding_size = 256;         // Size of the embedding (d_model) - Default: 256
-    const long sequence_size = 32;           // Maximum length of the input sequence - Default: 32
+    const long embedding_size = 64;         // Size of the embedding (d_model) - Default: 64
+    const long sequence_size = 24;           // Maximum length of the input sequence - Default: 24
 
     // Scale Weights Layer
     template <long d_k_>
@@ -40,19 +40,20 @@ namespace llm
     using scale_weights = add_layer<scale_weights_<d_k>, SUBNET>;
 
     // Positional Embeddings
-    template <unsigned long nb_embeddings, unsigned long embedding_length, typename SUBNET>
+    template <long nb_embeddings, long embedding_length, typename SUBNET>
     using positional_embeddings =
-        htan<positional_encodings<embeddings<nb_embeddings, embedding_length, SUBNET>>>;
+        multiply<positional_encodings<htan<embeddings<nb_embeddings, embedding_length, SUBNET>>>>;
 
     // Learned Positional Embeddings
-    template <unsigned long nb_embeddings, unsigned long embedding_length, typename SUBNET>
+    template <long nb_embeddings, long embedding_length, typename SUBNET>
     using learned_positional_embeddings =
         htan<add_prev9<linear<embedding_length, skip10<
         tag9<embeddings<nb_embeddings, embedding_length, tag10<SUBNET>>>>>>>;
 
     // Classification head
     template <long num_logits, typename SUBNET>
-    using classification_head = loss_cross_entropy<linear<num_logits, SUBNET>>;
+    using classification_head = loss_multiclass_log<fc<num_logits, SUBNET>>;
+    //using classification_head = loss_cross_entropy<linear<num_logits, SUBNET>>;
 
     namespace v1_1_4 {
         template <long seq_len, long d_model, typename SUBNET>
