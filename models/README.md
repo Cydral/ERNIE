@@ -46,6 +46,17 @@ It's worth noting that ERNIE's ability to accurately recite the learned text dep
   - Attempt to create new sonnets or monologues
   - Explore ERNIE's understanding of Shakespeare's writing style
 
+```mizar
+Input text:
+Shall I compare thee to a winter's night?
+Thy beauty warms the frost - bitten bough.
+In darkness, thou art my guiding light,
+A beacon of hope 'midst winter's vow.
+
+Output text:
+
+```
+
   > 🔬 While this model aims to capture Shakespeare's style, its output may vary in quality and authenticity. It represents an exciting step towards more sophisticated text generation!
 
 📊 Performance Metrics:
