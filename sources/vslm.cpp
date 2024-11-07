@@ -44,7 +44,7 @@
 
 #include "llm_defs.h"
 #include "advanced_tokenizer.hpp"
-#include "data_fr.h"
+#include "data.h"
 
 #include <sentencepiece_trainer.h>
 #include <sentencepiece_processor.h>
@@ -1426,13 +1426,15 @@ int main(int argc, char* argv[]) {
             }
 
             using net_type_a = llm::classification_head<num_classes,
+                llm::latent_space<llm::embedding_size,
                 repeat<1, llm::t_transformer_block,
                 llm::positional_embeddings<num_classes, llm::embedding_size,
-                input<matrix<int, 0, 1>>>>>;
+                input<matrix<int, 0, 1>>>>>>;
             using inf_type_a = llm::classification_head<num_classes,
+                llm::latent_space<llm::embedding_size,
                 repeat<1, llm::i_transformer_block,
                 llm::positional_embeddings<num_classes, llm::embedding_size,
-                input<matrix<int, 0, 1>>>>>;
+                input<matrix<int, 0, 1>>>>>>;
 
             cout << "sequence size: " << llm::sequence_size << endl;
             cout << "embedding size: " << llm::embedding_size << endl;
@@ -1481,11 +1483,11 @@ int main(int argc, char* argv[]) {
                 mini_batch_size = 48;
                 const long num_classes = 256;
                 using net_type_b = llm::classification_head<num_classes,
-                    repeat<1, llm::t_transformer_block,
+                    repeat<2, llm::t_transformer_block,
                     llm::positional_embeddings<num_classes, llm::embedding_size,
                     input<matrix<int, 0, 1>>>>>;
                 using inf_type_b = llm::classification_head<num_classes,
-                    repeat<1, llm::i_transformer_block,
+                    repeat<2, llm::i_transformer_block,
                     llm::positional_embeddings<num_classes, llm::embedding_size,
                     input<matrix<int, 0, 1>>>>>;
 
@@ -1530,7 +1532,7 @@ int main(int argc, char* argv[]) {
                     trainer_b.set_min_learning_rate(min_learning_rate);
                     trainer_b.set_learning_rate_shrink_factor(0.1);
                     trainer_b.set_mini_batch_size(mini_batch_size);
-                    trainer_b.set_iterations_without_progress_threshold(1500);                    
+                    trainer_b.set_iterations_without_progress_threshold(5000);                    
 
                     dlib::pipe<a_training> p_data(10);
                     data_b.set_samples_idx(0);
@@ -1540,7 +1542,7 @@ int main(int argc, char* argv[]) {
                     while (p_data.size() < 10) std::this_thread::sleep_for(std::chrono::seconds(1));
                     cout << "done" << endl;
                     
-                    size_t num_epochs = 800, epoch, b;
+                    size_t num_epochs = 1500, epoch, b;
                     dlib::rand rnd(std::rand());
                     for (epoch = 0; epoch < num_epochs && !g_interrupt_signal_received; ++epoch) {
                         for (b = 0; b < num_batches; ++b) {
@@ -1552,10 +1554,11 @@ int main(int argc, char* argv[]) {
                             size_t idx = rnd.get_random_32bit_number() % num_batches;                           
                             trainer_b.test_one_step(batches[idx], label_batches[idx]);
                             cout << "epoch[MAX]#: " << epoch << "[" << num_epochs << "] step#: " <<
-                                step << " learning rate : " <<
-                                trainer_b.get_learning_rate() << " average loss: " <<
-                                trainer_b.get_average_loss() << " average test loss: " <<
-                                trainer_b.get_average_test_loss() << endl;
+                                step << " learning rate: " <<
+                                trainer_b.get_learning_rate() << " train loss: " <<
+                                trainer_b.get_average_loss() << " test loss: " <<
+                                trainer_b.get_average_test_loss() << " w/o progress: " <<
+                                trainer_b.get_steps_without_progress() << endl;
                             if (trainer_b.get_learning_rate() < trainer_b.get_min_learning_rate()) break;
                         }
                     }
@@ -1636,7 +1639,7 @@ int main(int argc, char* argv[]) {
                     trainer_c.set_min_learning_rate(min_learning_rate);
                     trainer_c.set_learning_rate_shrink_factor(0.1);
                     trainer_c.set_mini_batch_size(mini_batch_size);
-                    trainer_c.set_iterations_without_progress_threshold(15000);
+                    trainer_c.set_iterations_without_progress_threshold(25000);
 
                     // Reload previous model                    
                     if (!fs::exists("llm_shakespeare_model_b.dat") && fs::exists("llm_shakespeare_model_a.dat")) {
@@ -1674,7 +1677,7 @@ int main(int argc, char* argv[]) {
                     }
 
                     // New training loop
-                    size_t num_epochs = 5000, epoch, b;
+                    size_t num_epochs = 3000, epoch, b;
                     dlib::rand rnd(std::rand());
                     dlib::pipe<a_training> p_data(10);
                     std::thread data_loader1([&data_c, &p_data, f]() { f(data_c, p_data, true); });
@@ -1692,10 +1695,11 @@ int main(int argc, char* argv[]) {
                             size_t idx = rnd.get_random_32bit_number() % num_batches;
                             trainer_c.test_one_step(batches[idx], label_batches[idx]);
                             cout << "epoch[MAX]#: " << epoch << "[" << num_epochs << "] step#: " <<
-                                step << " learning rate : " <<
-                                trainer_c.get_learning_rate() << " average loss: " <<
-                                trainer_c.get_average_loss() << " average test loss: " <<
-                                trainer_c.get_average_test_loss() << endl;
+                                step << " learning rate: " <<
+                                trainer_c.get_learning_rate() << " train loss: " <<
+                                trainer_c.get_average_loss() << " test loss: " <<
+                                trainer_c.get_average_test_loss() << " w/o progress: " <<
+                                trainer_c.get_steps_without_progress() << endl;
                             if (trainer_c.get_learning_rate() < trainer_c.get_min_learning_rate()) break;
                         }
                     }
@@ -1712,7 +1716,7 @@ int main(int argc, char* argv[]) {
                     deserialize("llm_shakespeare_model_b.dat") >> inf_net_b;
 
                     // Test partially the new model
-                    if (samples.size() > 10000) samples.resize(5000);
+                    if (samples.size() > 5000) samples.resize(5000);
                     std::vector<unsigned long> predicted_labels = inf_net_b(samples);
                     std::vector<size_t> error_indices;
                     size_t num_correct_b = 0;
@@ -1725,7 +1729,7 @@ int main(int argc, char* argv[]) {
                         to_string(num_correct_b) + " - wrong: " + to_string(predicted_labels.size() - num_correct_b));
 
                     // Attempting to generate a new sonnet                    
-                    string sonnet_start = "Shall I compare thee to a winter's night?\nThy beauty warms the frost - bitten bough.\nIn darkness, thou art my guiding light,\nA beacon of hope 'midst winter's vow.";
+                    string sonnet_start = "Shall I compare thee to a winter's night?\nThy beauty warms the frost-bitten bough.\nIn darkness, thou art my guiding light,\nA beacon of hope 'midst winter's vow.";
                     size_t sequence_len = std::min((size_t)llm::sequence_size, sonnet_start.length());
                     std::string extracted_sequence = sonnet_start.substr(sonnet_start.length() - sequence_len);
                     std::vector<matrix<int, 0, 1>> single_prediction;
@@ -1788,29 +1792,30 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         llm::inf_net_v1_1 net;
-        softmaxm<multiply<llm::inf_net_v1_1::subnet_type>> generator(multiply_(1.0 / temperature));
         if (fs::exists(language_model)) deserialize(language_model) >> net;
         else {
             cerr << "language model not found! (<" << language_model << ">)" << endl;
             return 1;
         }
-        generator.subnet().subnet() = net.subnet();
-        cout << "number of model parameters: " << count_parameters(generator) << endl << endl;
+        cout << "number of model parameters: " << count_parameters(net) << endl << endl;
         context_window prompt(llm::sequence_size);
-        string input = "The salesperson", output = "";
-        cout << "Input prompt: " << input << " (...)" << endl;
-        cout << "Generated text: " << input << " ";
+        string output = "";
+        cout << "input prompt: (...) " << raw_data_test << " (...)" << endl;
+        cout << "generated text: " << raw_data_test;
 
         std::vector<int> prompt_ids, endings = { eos_id, pad_id }, response_ids;
-        sp.Encode(dlib::trim(input), &prompt_ids);
+        sp.Encode(dlib::trim(raw_data_test), &prompt_ids);
         prompt.add_input(prompt_ids);
         matrix<int, 0, 1> padded_window;
-        for (int i = 0; i < 100; ++i) {
+        std::vector<matrix<int, 0, 1>> single_prediction;
+        for (int i = 0; i < 150; ++i) {
             if (prompt.get_padded_window(padded_window)) {
-                matrix<float, llm::sequence_size, llm::vocab_size> logits = mat(generator(padded_window));
-                int predicted_label = index_of_max(sum_rows(logits));
-                prompt.add_output(predicted_label);
-                response_ids.push_back(predicted_label);
+                if (single_prediction.empty()) single_prediction.push_back(padded_window);
+                single_prediction.push_back(padded_window);
+                std::vector<unsigned long> next_ids = net(single_prediction);
+                prompt.add_output(next_ids[1]);
+                response_ids.push_back(next_ids[1]);
+                single_prediction.pop_back();
             }
         }
         sp.Decode(response_ids, &output);
@@ -1874,6 +1879,7 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         
+        // Trainer setup
         const string model_sync_filename = fs::current_path().string() + "/ernie_checkpoint.dat";        
         llm::trn_net_v1_1 net;
         dnn_trainer<llm::trn_net_v1_1, adam> my_trainer(net, adam(weight_decay, beta1, beta2), gpus);
@@ -1882,23 +1888,37 @@ int main(int argc, char* argv[]) {
         my_trainer.set_iterations_without_progress_threshold(iterations_without_progress_threshold);
         my_trainer.set_mini_batch_size(mini_batch_size);
         if (use_sync_file) my_trainer.set_synchronization_file(model_sync_filename, std::chrono::minutes(5));
-        my_trainer.be_verbose();
         if (!fs::exists(model_sync_filename) && fs::exists(language_model)) deserialize(language_model) >> net;
         std::ostringstream oss;
         oss << net << endl << my_trainer;
         cout << oss.str() << endl;
         
+        // Data preparation
         documents data;
         std::vector<matrix<int, 0, 1>> samples;
         std::vector<unsigned long> labels;
+        std::vector<std::vector<matrix<int, 0, 1>>> batches;
+        std::vector<std::vector<unsigned long>> label_batches;
         cout << "preprocessing entries... " << endl;
         if (corpus_dir.empty()) {
             string initial_raw_data = fs::current_path().string() + "/ernie_raw_data.txt";
             write_raw_data(initial_raw_data);
-            data.load_documents(initial_raw_data);
+            data.load_documents(initial_raw_data, false);
             fs::remove(initial_raw_data);
         } else data.load_documents(corpus_dir, false);
-        cout << "about " << data.get_total_samples() << " samples for the training" << endl;
+        data.generate_samples(1, samples, labels, false);
+        size_t num_samples = (data.get_total_presamples() / mini_batch_size) * mini_batch_size, step = 0;
+        size_t num_batches = num_samples / mini_batch_size;
+        cout << "number of generated samples: " << num_samples << endl;
+        cout << "number of batches: " << num_batches << endl;
+        data.set_samples_idx(0);
+        data.generate_samples(num_samples, samples, labels, false);
+        for (size_t i = 0; i < num_samples; i += mini_batch_size) {
+            std::vector<matrix<int, 0, 1>> batch_samples(samples.begin() + i, samples.begin() + i + mini_batch_size);
+            std::vector<unsigned long> batch_labels(labels.begin() + i, labels.begin() + i + mini_batch_size);
+            batches.push_back(batch_samples);
+            label_batches.push_back(batch_labels);
+        }
 
         // Use some threads to preload samples
         dlib::pipe<a_training> p_data(10);                          
@@ -1915,10 +1935,24 @@ int main(int argc, char* argv[]) {
         cout << "done" << endl;
 
         // Training loop
+        size_t num_epochs = 10000, epoch, b;
+        dlib::rand rnd(std::rand());
         a_training a_training_sample;
-        while (!g_interrupt_signal_received && my_trainer.get_learning_rate() >= my_trainer.get_min_learning_rate()) {
-            p_data.dequeue(a_training_sample);
-            my_trainer.train_one_step(a_training_sample.samples, a_training_sample.labels);
+        for (epoch = 0; epoch < num_epochs && !g_interrupt_signal_received; ++epoch) {
+            for (b = 0; b < num_batches && !g_interrupt_signal_received; ++b)
+                my_trainer.train_one_step(batches[b], label_batches[b]);
+            step += b;
+            if (epoch % 5 == 0) {
+                p_data.dequeue(a_training_sample);
+                my_trainer.test_one_step(a_training_sample.samples, a_training_sample.labels);
+                cout << "epoch[MAX]#: " << epoch << "[" << num_epochs << "] step#: " <<
+                    step << " learning rate: " <<
+                    my_trainer.get_learning_rate() << " train loss: " <<
+                    my_trainer.get_average_loss() << " test loss: " <<
+                    my_trainer.get_average_test_loss() << " w/o progress: " <<
+                    my_trainer.get_steps_without_progress() << endl;
+                if (my_trainer.get_learning_rate() < my_trainer.get_min_learning_rate()) break;
+            }
         }
         cout << "stopping the training process" << endl;
         p_data.disable();
@@ -1932,6 +1966,24 @@ int main(int argc, char* argv[]) {
         if (use_sync_file && !g_interrupt_signal_received) {
             fs::remove(model_sync_filename);
             fs::remove((string(model_sync_filename) + string("_")).c_str());
+        }
+
+        // Simple test of the model quality        
+        if (fs::exists(language_model)) {
+            llm::inf_net_v1_1 inf_net;
+            deserialize(language_model) >> inf_net;
+
+            if (samples.size() > 5000) samples.resize(5000);
+            std::vector<unsigned long> predicted_labels = inf_net(samples);
+            std::vector<size_t> error_indices;
+            size_t num_correct = 0;
+            for (size_t i = 0; i < predicted_labels.size(); ++i) {
+                if (predicted_labels[i] == labels[i]) num_correct++;
+                else error_indices.push_back(i);
+            }
+            double accuracy_b = static_cast<double>(num_correct) / predicted_labels.size();
+            DLIB_TEST_MSG(accuracy_b > 0.9, "model (accuracy: " + to_string(accuracy_b) + ") - right: " + \
+                to_string(num_correct) + " - wrong: " + to_string(predicted_labels.size() - num_correct));
         }
     } else if (model_prompting) {
         // TEST: context_window class
