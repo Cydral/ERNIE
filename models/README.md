@@ -49,7 +49,7 @@ It's worth noting that ERNIE's ability to accurately recite the learned text dep
 ```mizar
 Input text:
 Shall I compare thee to a winter's night?
-Thy beauty warms the frost - bitten bough.
+Thy beauty warms the frost-bitten bough.
 In darkness, thou art my guiding light,
 A beacon of hope 'midst winter's vow.
 
