@@ -1691,17 +1691,15 @@ int main(int argc, char* argv[]) {
                             trainer_c.train_one_step(a_training_sample.samples, a_training_sample.labels);
                         }
                         step += b;
-                        if (epoch % 5 == 0) {
-                            size_t idx = rnd.get_random_32bit_number() % num_batches;
-                            trainer_c.test_one_step(batches[idx], label_batches[idx]);
-                            cout << "epoch[MAX]#: " << epoch << "[" << num_epochs << "] step#: " <<
-                                step << " learning rate: " <<
-                                trainer_c.get_learning_rate() << " train loss: " <<
-                                trainer_c.get_average_loss() << " test loss: " <<
-                                trainer_c.get_average_test_loss() << " w/o progress: " <<
-                                trainer_c.get_steps_without_progress() << endl;
-                            if (trainer_c.get_learning_rate() < trainer_c.get_min_learning_rate()) break;
-                        }
+                        size_t idx = rnd.get_random_32bit_number() % num_batches;
+                        trainer_c.test_one_step(batches[idx], label_batches[idx]);
+                        cout << "epoch[MAX]#: " << epoch << "[" << num_epochs << "] step#: " <<
+                            step << " learning rate: " <<
+                            trainer_c.get_learning_rate() << " train loss: " <<
+                            trainer_c.get_average_loss() << " test loss: " <<
+                            trainer_c.get_average_test_loss() << " w/o progress: " <<
+                            trainer_c.get_steps_without_progress() << endl;
+                        if (trainer_c.get_learning_rate() < trainer_c.get_min_learning_rate()) break;
                     }
                     p_data.disable();
                     data_loader1.join();
@@ -1941,18 +1939,17 @@ int main(int argc, char* argv[]) {
         for (epoch = 0; epoch < num_epochs && !g_interrupt_signal_received; ++epoch) {
             for (b = 0; b < num_batches && !g_interrupt_signal_received; ++b)
                 my_trainer.train_one_step(batches[b], label_batches[b]);
-            step += b;
-            if (epoch % 5 == 0) {
-                p_data.dequeue(a_training_sample);
-                my_trainer.test_one_step(a_training_sample.samples, a_training_sample.labels);
-                cout << "epoch[MAX]#: " << epoch << "[" << num_epochs << "] step#: " <<
-                    step << " learning rate: " <<
-                    my_trainer.get_learning_rate() << " train loss: " <<
-                    my_trainer.get_average_loss() << " test loss: " <<
-                    my_trainer.get_average_test_loss() << " w/o progress: " <<
-                    my_trainer.get_steps_without_progress() << endl;
-                if (my_trainer.get_learning_rate() < my_trainer.get_min_learning_rate()) break;
-            }
+            step += b;            
+                
+            p_data.dequeue(a_training_sample);
+            my_trainer.test_one_step(a_training_sample.samples, a_training_sample.labels);
+            cout << "epoch[MAX]#: " << epoch << "[" << num_epochs << "] step#: " <<
+                step << " learning rate: " <<
+                my_trainer.get_learning_rate() << " train loss: " <<
+                my_trainer.get_average_loss() << " test loss: " <<
+                my_trainer.get_average_test_loss() << " w/o progress: " <<
+                my_trainer.get_steps_without_progress() << endl;
+            if (my_trainer.get_learning_rate() < my_trainer.get_min_learning_rate()) break;
         }
         cout << "stopping the training process" << endl;
         p_data.disable();
