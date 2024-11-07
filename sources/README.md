@@ -11,7 +11,7 @@ The source code for ERNIE is organized in the ERNIE/sources/ directory, with tok
 ┃ ┣ 📜 cuda_dlib_ext.cuh<br>
 ┃ ┣ 📜 dlib_ext.h<br>
 ┃ ┣ 📜 llm_defs.h<br>
-┃ ┗ 📜 data_fr.h<br>
+┃ ┗ 📜 data.h<br>
 ┣ 📂 <b>tokenizing</b><br>
 ┃ ┣ 📂 en-fr<br>
 ┃ ┃ ┣ 📜 *.model<br>
