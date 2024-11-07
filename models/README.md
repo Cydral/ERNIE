@@ -34,7 +34,7 @@ When (...)"
 ```
 
   🔍 Sequence Length Impact:
-It's worth noting that ERNIE's ability to accurately recite the learned text depends significantly on the input sequence length. For instance, in Hamlet's soliloquy, the phrase "To die, to sleep—" appears twice with different continuations. ERNIE correctly disambiguates between these occurrences due to its sufficiently large context window. This showcases how the model uses the broader context to accurately predict the next characters, demonstrating not just memorization, but also the capacity to utilize contextual information for precise text reproduction.
+It's worth noting that ERNIE's ability to accurately recite the learned text depends significantly on the input sequence length. For instance, in Hamlet's soliloquy, the phrase "To die, to sleep-" appears twice with different continuations. ERNIE correctly disambiguates between these occurrences due to its sufficiently large context window. This showcases how the model uses the broader context to accurately predict the next characters, demonstrating not just memorization, but also the capacity to utilize contextual information for precise text reproduction.
 
 - **`llm_shakespeare_model_b.dat`**: 
   This advanced model represents ERNIE's attempt to generate text in the style of Shakespeare after training on his complete works.
