@@ -50,8 +50,8 @@ The source code for ERNIE is organized in the ERNIE/sources/ directory, with tok
 - **`llm_defs.h`**: 
   - Contains the versioned construction of the global generative AI model
 
-- **`data_fr.h`**: 
-  - Contains general text examples in French
+- **`data.h`**: 
+  - Contains general text examples in English
   - Used for training a language model from scratch
   - Serves as a sample dataset for initial model development and testing
 
