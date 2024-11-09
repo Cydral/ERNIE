@@ -754,7 +754,7 @@ namespace dlib {
                         else dest_data[dest_idx] = src_data[src_idx];
                     }
                 }
-                });
+            });
         }
 
         // -----------------------------------------------------------------------------------
@@ -986,36 +986,34 @@ namespace dlib {
                 const auto transa = trans_lhs ? CUBLAS_OP_T : CUBLAS_OP_N;
                 const auto transb = trans_rhs ? CUBLAS_OP_T : CUBLAS_OP_N;
 
-                long num_samples = std::max({ lhs.num_samples(), rhs.num_samples(), dest.num_samples() });
-                long num_channels = std::max({ lhs.k(), rhs.k(), dest.k() });
+                long num_samples = std::min({ lhs.num_samples(), rhs.num_samples(), dest.num_samples() });
+                long num_channels = std::min({ lhs.k(), rhs.k(), dest.k() });
 
                 auto is_matrix = [](const auto& tensor) {
-                    return (tensor.num_samples() == 1 && tensor.k() == 1) ||
-                        (tensor.nr() == 1 && tensor.nc() == 1);
+                    return ((tensor.num_samples() * tensor.k() == 1 && tensor.nr() * tensor.nc() > 1) ||
+                        (tensor.num_samples() * tensor.k() > 1 && tensor.nr() * tensor.nc() == 1));
                     };
                 const bool lhs_is_matrix = is_matrix(lhs), rhs_is_matrix = is_matrix(rhs), dest_is_matrix = is_matrix(dest);
+                if (lhs_is_matrix && rhs_is_matrix && dest_is_matrix) num_samples = num_channels = 1;
 
-                if (lhs_is_matrix && rhs_is_matrix && dest_is_matrix) {
-                    num_samples = num_channels = 1;
+                size_t lhs_rows = lhs.nr();
+                size_t lhs_cols = lhs.nc();
+                if (lhs_is_matrix && (lhs.num_samples() > 1 || lhs.k() > 1)) {
+                    lhs_rows = lhs.num_samples();
+                    lhs_cols = lhs.k();
                 }
-                else {
-                    auto adjust = [&](const auto& tensor) {
-                        if (!is_matrix(tensor)) {
-                            if (tensor.num_samples() < num_samples) num_samples = tensor.num_samples();
-                            if (tensor.k() < num_channels) num_channels = tensor.k();
-                        }
-                        };
-                    adjust(lhs);
-                    adjust(rhs);
-                    adjust(dest);
+                size_t rhs_rows = rhs.nr();
+                size_t rhs_cols = rhs.nc();
+                if (rhs_is_matrix && (rhs.num_samples() > 1 || rhs.k() > 1)) {
+                    rhs_rows = rhs.num_samples();
+                    rhs_cols = rhs.k();
                 }
-
-                size_t lhs_rows = (lhs_is_matrix && lhs.num_samples() > 1) ? lhs.num_samples() : lhs.nr();
-                size_t lhs_cols = (lhs_is_matrix && lhs.k() > 1) ? lhs.k() : lhs.nc();
-                size_t rhs_rows = (rhs_is_matrix && rhs.num_samples() > 1) ? rhs.num_samples() : rhs.nr();
-                size_t rhs_cols = (rhs_is_matrix && rhs.k() > 1) ? rhs.k() : rhs.nc();
-                size_t dest_rows = (dest_is_matrix && dest.num_samples() > 1) ? dest.num_samples() : dest.nr();
-                size_t dest_cols = (dest_is_matrix && dest.k() > 1) ? dest.k() : dest.nc();
+                size_t dest_rows = dest.nr();
+                size_t dest_cols = dest.nc();
+                if (dest_is_matrix && (dest.num_samples() > 1 || dest.k() > 1)) {
+                    dest_rows = dest.num_samples();
+                    dest_cols = dest.k();
+                }
 
                 const size_t lhs_plane_size = lhs_rows * lhs_cols;
                 const size_t rhs_plane_size = rhs_rows * rhs_cols;
@@ -2795,9 +2793,9 @@ namespace dlib {
             tt::softmax(grad, output_tensor, softmax_mode::PLANE_WISE);
 
             double loss = 0.0;
-            const size_t plane_size = grad.nr() * grad.nc();
-            const float scale = 1.0f / grad.num_samples();
             const size_t ns = grad.num_samples(), nk = grad.k(), nr = grad.nr(), nc = grad.nc();
+            const float scale = 1.0f / ns;
+            const size_t plane_size = nr * nc;
 
             for (size_t s = 0; s < ns; ++s)
             {

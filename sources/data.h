@@ -171,7 +171,7 @@ std::vector<string> raw_data = {
 };
 
 const string raw_data_test =
-R"(During an international conference on innovative technologies, diverse participants from different cultural backgrounds gathered in small discussion groups. As the facilitator approached one particularly engaged group, she noticed subtle shifts in body language and conversational dynamics. The way people were positioning themselves, their facial micro-expressions, and their turn-taking patterns revealed interesting patterns of)";
+R"(During an international conference on innovative technologies, diverse participants from different cultural backgrounds gathered in small discussion groups. As the facilitator approached one particularly engaged group, she noticed subtle shifts in body language and conversational dynamics. The way people were positioning themselves, their facial micro-expressions, and their turn-taking patterns revealed interesting patterns of )";
 
 wstring utf8_to_wstr(const string& utf8) {
     wstring_convert<std::codecvt_utf8_utf16<wchar_t>> wcu8;
