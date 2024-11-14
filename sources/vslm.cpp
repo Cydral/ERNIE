@@ -59,7 +59,7 @@ struct a_training {
 };
 
 // Other global parameters
-string vocabulary_prefix = "ernie.en-fr.ung.40k", language_model = "ernie_62M_v1.dat";
+string vocabulary_prefix = "ernie.en-fr.ung.40k", language_model = "ernie_3M_v1.dat";
 std::unique_ptr<advanced_tokenizer> tokenizer_;
 
 void configure_console() {
@@ -951,12 +951,18 @@ void test_linear()
     net_type net;
 
     // Input tensor
-    const int n_samples = 1, k = 1;
+    const int n_samples = 3, k = 1;
     std::vector<matrix<float>> x(n_samples);
     matrix<float> xtmp(2, 4);
     xtmp = 1.0f, 2.0f, 3.0f, 4.0f,
         5.0f, 6.0f, 7.0f, 8.0f;
     x[0] = xtmp;
+    xtmp = 9.0f, 10.0f, 11.0f, 12.0f,
+        13.0f, 14.0f, 15.0f, 16.0f;
+    x[1] = xtmp;
+    xtmp = 17.0f, 18.0f, 19.0f, 20.0f,
+        21.0f, 22.0f, 23.0f, 24.0f;
+    x[2] = xtmp;
 
     // Convert input matrix to tensor
     resizable_tensor input_tensor;
@@ -967,14 +973,74 @@ void test_linear()
     matrix<float> w = mat(layer<tag2>(net).subnet().layer_details().get_weights());
 
     // Theoretical calculation of the output
-    matrix<float> input_matrix = x[0];
-    matrix<float> expected_output = input_matrix * w;
+    std::vector<matrix<float>> expected_outputs(n_samples);
+    for (int i = 0; i < n_samples; ++i) {
+        matrix<float> input_matrix = x[i];
+        expected_outputs[i] = input_matrix * w;
+    }
 
     // Compare output tensor with expected output
     auto& net_output = layer<tag2>(net).get_output();
 
     // Display results
-    DLIB_TEST_MSG(max(abs(mat(net_output) - expected_output)) < 1e-5, "linear layer");
+    for (int i = 0; i < n_samples; ++i) {
+        matrix<float> output_sample;
+        output_sample.set_size(2, 6);
+        for (long r = 0; r < output_sample.nr(); ++r) {
+            for (long c = 0; c < output_sample.nc(); ++c) {
+                output_sample(r, c) = net_output.host()[tensor_index(net_output, i, 0, r, c)];
+            }
+        }
+        DLIB_TEST_MSG(max(abs(output_sample - expected_outputs[i])) < 1e-5,
+            "linear layer - sample " + std::to_string(i));
+    } 
+}
+
+void test_loss_cross_entropy()
+{
+    //print_spinner();
+    constexpr int input_height = 5;
+    constexpr int input_width = 3;
+    const size_t num_samples = 50;
+    const size_t num_classes = 4;
+
+    std::vector<matrix<double>> x(num_samples);
+    std::vector<unsigned long> y(num_samples);
+    matrix<double> xtmp(input_height, input_width);
+
+    dlib::rand rnd;
+    for (size_t ii = 0; ii < num_samples; ++ii)
+    {
+        for (int jj = 0; jj < input_height; ++jj)
+            for (int kk = 0; kk < input_width; ++kk)
+                xtmp(jj, kk) = rnd.get_random_float();
+        x[ii] = xtmp;
+        y[ii] = rnd.get_integer_in_range(0, num_classes);
+    }
+
+    using net_type = loss_cross_entropy<linear_no_bias<num_classes, input<matrix<double>>>>;
+
+    net_type net;
+    dnn_trainer<net_type> trainer(net, sgd(0, 0.9));
+    trainer.set_learning_rate(0.1);
+    trainer.set_min_learning_rate(0.01);
+    trainer.set_mini_batch_size(10);
+    trainer.set_max_num_epochs(100);
+    trainer.train(x, y);
+
+    const std::vector<unsigned long> predictions = net(x);
+    int correct_predictions = 0, incorrect_predictions = 0;
+    for (size_t ii = 0; ii < num_samples; ++ii)
+    {
+        if (predictions[ii] == y[ii])
+            ++correct_predictions;
+        else
+            ++incorrect_predictions;
+    }
+
+    DLIB_TEST_MSG(correct_predictions > incorrect_predictions,
+        "Predicted labels (" << correct_predictions << ") do not dominate: correct="
+        << correct_predictions << ", incorrect=" << incorrect_predictions);
 }
 
 int main(int argc, char* argv[]) {
@@ -982,9 +1048,10 @@ int main(int argc, char* argv[]) {
     bool do_benchmark = false, text_generation = false;
     bool voc_training = false, model_training = false, model_prompting = false, use_sync_file = false;
     double learning_rate = 1e-3, min_learning_rate = 1e-6, weight_decay = 0.05, beta1 = 0.9, beta2 = 0.999, temperature = 0.9;
-    long mini_batch_size = 64, iterations_without_progress_threshold = 15000, top_k = 3;
+    long mini_batch_size = 64, iterations_without_progress_threshold = 25000, top_k = 3;
     std::vector<int> gpus = { 0 };
     set_dnn_prefer_fastest_algorithms();
+    compressed_float::disable_compression();    
        
     configure_console();
     std::cout << endl <<
@@ -1039,6 +1106,9 @@ int main(int argc, char* argv[]) {
         cerr << "error: " << e.what() << endl;
         return 1;
     }
+    if (compressed_float::is_compression_enabled()) {
+        cout << "WARNING: BF16 compression is currently enabled - network weights will be stored using reduced precision (16 bits instead of 32 bits)" << endl;
+    }
     // Set the signal handler for SIGINT
     signal(SIGINT, signalHandler);
     
@@ -1059,8 +1129,9 @@ int main(int argc, char* argv[]) {
             true,      // 9: linear layer       
             true,      // 10: hsplit/hstack layers
             true,      // 11: rms_norm layer
-            true,      // 12: multihead attention model
-            false      // 13: "shakespeare" example
+            true,     // 12: loss_cross_entropy loss
+            true,      // 13: multihead attention model
+            false      // 14: "shakespeare" example
         };
 
         // test: tokenization
@@ -1393,8 +1464,14 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // test: multihead attention model
+        // test: rms_norm layer
         if (!skip_tests[12]) {
+            if (display_debug_info) cout << "\ntest: loss_cross_entropy loss\n";
+            test_loss_cross_entropy();
+        }
+
+        // test: multihead attention model
+        if (!skip_tests[13]) {
             mini_batch_size = 48;
             if (display_debug_info) cout << "\ntest: multihead attention model\n";
             const long num_classes = 256, num_epochs = 3000;
@@ -1425,7 +1502,7 @@ int main(int argc, char* argv[]) {
                 label_batches.push_back(batch_labels);
             }
 
-            using net_type_a = llm::classification_head<num_classes,
+            using net_type_a = llm::classification_head<num_classes, llm::embedding_size,
                 repeat<1, llm::transformer_block,
                 llm::positional_embeddings<num_classes, llm::embedding_size,
                 input<matrix<int, 0, 1>>>>>;
@@ -1469,13 +1546,13 @@ int main(int argc, char* argv[]) {
         }
 
         // test: "shakespeare" example
-        if (!skip_tests[13])        
+        if (!skip_tests[14])        
         {
             if (display_debug_info) cout << "\ntest: test: \"shakespeare\" example\n";                        
             {
                 mini_batch_size = 48;
                 const long num_classes = 256;
-                using net_type_b = llm::classification_head<num_classes,
+                using net_type_b = llm::classification_head<num_classes, llm::embedding_size,
                     repeat<2, llm::transformer_block,
                     llm::positional_embeddings<num_classes, llm::embedding_size,
                     input<matrix<int, 0, 1>>>>>;
@@ -1619,31 +1696,28 @@ int main(int argc, char* argv[]) {
                     
                     {
                         // Extract latent vectors
-                        resizable_tensor output_tensor = net_b.subnet().subnet().get_output();
+                        resizable_tensor output_tensor = layer<2>(net_b).get_output();
                         const size_t num_samples = output_tensor.num_samples();
                         const size_t num_channels = output_tensor.k();
                         const size_t plane_size = output_tensor.nr() * output_tensor.nc();
+                        std::vector<std::vector<float>> latent_vectors(num_samples);
                         matrix<float> sums(output_tensor.nr(), output_tensor.nc());
-                        std::vector<std::vector<float>> latent_vectors;                        
-                        for (size_t s = 0; s < num_samples; ++s)
-                        {
+                        for (size_t s = 0; s < num_samples; ++s) {                            
                             sums = 0.0f;
-                            for (size_t k = 0; k < num_channels; ++k)
-                            {
+                            for (size_t k = 0; k < num_channels; ++k) {
                                 auto o_plane = alias_tensor(output_tensor.nr(), output_tensor.nc())(output_tensor, (s * num_channels + k) * plane_size);
                                 sums += mat(o_plane);
                             }
-                            matrix<float> lv = sum_rows(sums / num_channels) / output_tensor.nr();
-                            std::vector<float> v(lv.nc());
-                            for (size_t c = 0; c < lv.nc(); c++) v[c] = lv(0, c);
-                            latent_vectors.push_back(v);
+                            auto flatten = sum_rows(sums) / output_tensor.nr();
+                            latent_vectors[s].resize(output_tensor.nc());
+                            for (size_t c = 0; c < output_tensor.nc(); ++c) latent_vectors[s][c] = flatten(c, 0);
                         }
                         cout << "number of latent vectors: " << latent_vectors.size() <<
                             " (input matrice: " << num_samples << "x" << num_channels << "x" <<
                             output_tensor.nr() << "x" << output_tensor.nc() << ")" << endl;
                         if (latent_vectors.size() > 0) {
-                            const auto& v = latent_vectors[0];                            
-                            cout << "  - values (idx:0): ";
+                            const auto& v = latent_vectors[1];                            
+                            cout << "  - values (idx:1): ";
                             if (v.size() >= (7 + 7)) {
                                 for (size_t i = 0; i < 7; ++i) cout << v[i] << " ";
                                 cout << " [...] ";
@@ -1742,7 +1816,7 @@ int main(int argc, char* argv[]) {
 
                     // Test partially the new model
                     visit_computational_layers(net_b, [](dropout_& l) { l = dropout_(0.0f); });
-                    if (samples.size() > 5000) samples.resize(5000);
+                    if (samples.size() > 8000) samples.resize(8000);
                     std::vector<unsigned long> predicted_labels = net_b(samples);
                     std::vector<size_t> error_indices;
                     size_t num_correct_b = 0;
@@ -2000,7 +2074,7 @@ int main(int argc, char* argv[]) {
             deserialize(language_model) >> inf_net;
             visit_computational_layers(inf_net, [](dropout_& l) { l = dropout_(0.0f); });
 
-            if (samples.size() > 5000) samples.resize(5000);
+            if (samples.size() > 10000) samples.resize(10000);
             std::vector<unsigned long> predicted_labels = inf_net(samples);
             std::vector<size_t> error_indices;
             size_t num_correct = 0;

@@ -28,8 +28,8 @@ namespace llm
     const long vocab_size       = 40000;    // Vocabulary size
     const long number_of_blocks = 4;        // Number of stacked Transformer blocks
     const long number_of_heads  = 8;        // Number of parallel attention heads
-    const long embedding_size   = 64;       // Embedding dimension (d_model)
-    const long sequence_size    = 24;       // Maximum sequence length
+    const long embedding_size   = 128;      // Embedding dimension (d_model)
+    const long sequence_size    = 32;       // Maximum sequence length
 
     // Scale Weights Layer
     template <long d_k_>
@@ -53,9 +53,8 @@ namespace llm
         tag9<embeddings<nb_embeddings, embedding_length, tag10<SUBNET>>>>>>>;
 
     // Classification Head
-    template <long num_logits, typename SUBNET>
-    using classification_head = loss_multiclass_log<fc<num_logits, SUBNET>>;
-    //using classification_head = loss_cross_entropy<linear<num_logits, SUBNET>>;
+    template <long num_logits, long embedding_length, typename SUBNET>
+    using classification_head = loss_cross_entropy<linear<num_logits, rms_norm<SUBNET>>>;
 
     namespace v1_1_6 {
         template <long seq_len, long d_model, typename SUBNET>
@@ -138,6 +137,12 @@ namespace llm
          * @param SUBNET: Input subnet type
          */
         template <long d_model, typename SUBNET>
+        using feed_forward_fc =
+            add_prev5<
+            scale5<con<1, 1, 1, 1, 1,
+            dropout_rate<8, fc<d_model, gelu<bn_fc<fc<d_model * 4, rms_norm<
+            tag5<SUBNET>>>>>>>>>>;
+        template <long d_model, typename SUBNET>
         using feed_forward =
             add_prev5<            
             dropout_rate<8, linear<d_model, gelu<linear<d_model * 4, rms_norm<
@@ -176,7 +181,7 @@ namespace llm
     template <typename SUBNET>
     using transformer_block = v1_1_6::transformer<sequence_size, embedding_size, number_of_heads, SUBNET>;
 
-    using net_v1_1 = classification_head<vocab_size,
+    using net_v1_1 = classification_head<vocab_size, embedding_size,
         repeat<number_of_blocks, transformer_block,
         positional_embeddings<vocab_size, embedding_size,
         input<matrix<int, 0, 1>>>>>;

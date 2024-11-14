@@ -198,6 +198,78 @@ namespace densenet
 }
 
 namespace dlib {
+    class compressed_float {
+    private:
+        static constexpr int MANTISSA_BITS = 7;
+        static constexpr int EXP_BITS = 8;
+
+        static inline bool compression_enabled = false;
+
+    public:
+        static void enable_compression() { compression_enabled = true; }
+        static void disable_compression() { compression_enabled = false; }
+        static bool is_compression_enabled() { return compression_enabled; }
+
+        static uint16_t compress(float value) {
+            if (value == 0.0f) return 0;
+
+            uint32_t raw;
+            std::memcpy(&raw, &value, sizeof(float));
+
+            uint32_t sign = (raw >> 31) & 0x1;
+            uint32_t exp = ((raw >> 23) & 0xFF);
+            uint32_t mantissa = (raw & 0x7FFFFF);
+
+            uint16_t compressed = (sign << 15) |
+                ((exp & ((1 << EXP_BITS) - 1)) << MANTISSA_BITS) |
+                (mantissa >> (23 - MANTISSA_BITS));
+
+            return compressed;
+        }
+
+        static float decompress(uint16_t compressed) {
+            if (compressed == 0) return 0.0f;
+
+            uint32_t sign = (compressed >> 15) & 0x1;
+            uint32_t exp = (compressed >> MANTISSA_BITS) & ((1 << EXP_BITS) - 1);
+            uint32_t mantissa = (compressed & ((1 << MANTISSA_BITS) - 1));
+
+            // IEEE-754 float
+            uint32_t raw = (sign << 31) | (exp << 23) | (mantissa << (23 - MANTISSA_BITS));
+
+            float result;
+            std::memcpy(&result, &raw, sizeof(float));
+            return result;
+        }
+    };
+
+    template<typename T>
+    typename std::enable_if<std::is_same<T, float>::value, std::ostream&>::type
+        operator<<(std::ostream& out, const T& item) {
+        if (compressed_float::is_compression_enabled()) {
+            uint16_t compressed = compressed_float::compress(item);
+            out.write(reinterpret_cast<const char*>(&compressed), sizeof(uint16_t));
+        }
+        else {
+            out.write(reinterpret_cast<const char*>(&item), sizeof(float));
+        }
+        return out;
+    }
+
+    template<typename T>
+    typename std::enable_if<std::is_same<T, float>::value, std::istream&>::type
+        operator>>(std::istream& in, T& item) {
+        if (compressed_float::is_compression_enabled()) {
+            uint16_t compressed = 0;
+            in.read(reinterpret_cast<char*>(&compressed), sizeof(uint16_t));
+            item = compressed_float::decompress(compressed);
+        }
+        else {
+            in.read(reinterpret_cast<char*>(&item), sizeof(float));
+        }
+        return in;
+    }
+
     namespace cpu {
         /* TO BE ADDED TO <cpu_dlib.cpp> */
         namespace ttimpl
@@ -1411,7 +1483,7 @@ namespace dlib {
         )
         {
 #ifdef DLIB_USE_CUDA
-            cuda::softmax_gradient(grad, dest, gradient_input, s_mode);
+            cpu::softmax_gradient(grad, dest, gradient_input, s_mode);
 #else
             cpu::softmax_gradient(grad, dest, gradient_input, s_mode);
 #endif
@@ -1461,29 +1533,17 @@ namespace dlib {
             else if (g_mode == PLANE_WISE)
             {
                 auto is_matrix = [](const auto& tensor) {
-                    return (tensor.num_samples() == 1 && tensor.k() == 1) ||
-                        (tensor.nr() == 1 && tensor.nc() == 1);
+                    return ((tensor.num_samples() * tensor.k() == 1 && tensor.nr() * tensor.nc() > 1) ||
+                        (tensor.num_samples() * tensor.k() > 1 && tensor.nr() * tensor.nc() == 1));
                     };
 
-                size_t num_samples = std::max({ lhs.num_samples(), rhs.num_samples(), dest.num_samples() });
-                size_t num_channels = std::max({ lhs.k(), rhs.k(), dest.k() });
+                long num_samples = std::min({ lhs.num_samples(), rhs.num_samples(), dest.num_samples() });
+                long num_channels = std::min({ lhs.k(), rhs.k(), dest.k() });
                 const bool lhs_is_matrix = is_matrix(lhs), rhs_is_matrix = is_matrix(rhs), dest_is_matrix = is_matrix(dest);
 
                 if (lhs_is_matrix && rhs_is_matrix && dest_is_matrix) {
                     num_samples = num_channels = 1;
-                }
-                else
-                {
-                    auto adjust = [&](const auto& tensor) {
-                        if (!is_matrix(tensor)) {
-                            if (tensor.num_samples() < num_samples) num_samples = tensor.num_samples();
-                            if (tensor.k() < num_channels) num_channels = tensor.k();
-                        }
-                        };
-                    adjust(lhs);
-                    adjust(rhs);
-                    adjust(dest);
-                }
+                }                
 
                 size_t lhs_rows = (lhs_is_matrix && lhs.num_samples() > 1) ? lhs.num_samples() : lhs.nr();
                 size_t lhs_cols = (lhs_is_matrix && lhs.k() > 1) ? lhs.k() : lhs.nc();
@@ -2124,9 +2184,9 @@ namespace dlib {
                 params.set_size(num_inputs, num_outputs);
 
             dlib::rand rnd(std::rand());
-            randomize_parameters(params, num_inputs + num_outputs, rnd);
-            
+            randomize_parameters(params, num_inputs + num_outputs, rnd);            
             weights = alias_tensor(num_inputs, num_outputs);
+
             if (bias_mode == LINEAR_HAS_BIAS) {
                 biases = alias_tensor(1, num_outputs);
                 biases(params, weights.size()) = 0;
@@ -2173,8 +2233,8 @@ namespace dlib {
             }
             
             const auto& prev_gradient = sub.get_gradient_input();
-            auto w = weights(params, 0);
             auto sgi = alias_tensor(prev_gradient.num_samples() * prev_gradient.k() * prev_gradient.nr(), num_inputs)(prev_gradient, 0);
+            auto w = weights(params, 0);
             tt::gemm(1, (tensor&)sgi, 1, gi, false, w, true, tt::gemm_mode::CHANNEL_WISE);
         }
 
@@ -2738,7 +2798,7 @@ namespace dlib {
     public:
 
         typedef unsigned long training_label_type;
-        typedef unsigned long output_label_type;
+        typedef unsigned long output_label_type;        
 
         template <
             typename SUB_TYPE,
@@ -2780,6 +2840,7 @@ namespace dlib {
             SUBNET& sub
         ) const
         {
+            const float label_smoothing = 0.1f;
             const tensor& output_tensor = sub.get_output();
             tensor& grad = sub.get_gradient_input();
 
@@ -2806,13 +2867,17 @@ namespace dlib {
                 {                    
                     auto grad_plane = alias_tensor(nr, nc)(grad, (s * nk + k) * plane_size);
                     float prob_y = 0.0f;
+
                     for (size_t r = 0; r < nr; ++r)
                     {
                         for (size_t c = 0; c < nc; ++c)
                         {
                             const long idx = r * nc + c;
                             const float prob = grad_plane.host()[idx];
-                            if (c == y)
+                            float target = (c == y) ? (1.0f - label_smoothing) : (nc > 1 ? label_smoothing / (nc - 1) : label_smoothing);
+                            prob_y += target * prob;
+                            grad_plane.host()[idx] = scale * (prob - target);
+                            /*if (c == y)
                             {
                                 prob_y += prob;
                                 grad_plane.host()[idx] = scale * (prob - 1.0f);
@@ -2820,7 +2885,7 @@ namespace dlib {
                             else
                             {
                                 grad_plane.host()[idx] = scale * prob;
-                            }
+                            }*/
                         }
                     }
                     loss += scale * -safe_log(prob_y / nr);
