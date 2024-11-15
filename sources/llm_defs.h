@@ -25,10 +25,10 @@ namespace llm
     using namespace dlib;
 
     // Network architectural parameters
-    const long vocab_size       = 40000;    // Vocabulary size
+    const long vocab_size       = 12000;    // Vocabulary size
     const long number_of_blocks = 4;        // Number of stacked Transformer blocks
     const long number_of_heads  = 8;        // Number of parallel attention heads
-    const long embedding_size   = 128;      // Embedding dimension (d_model)
+    const long embedding_size   = 256;      // Embedding dimension (d_model)
     const long sequence_size    = 32;       // Maximum sequence length
 
     // Scale Weights Layer
@@ -43,8 +43,7 @@ namespace llm
 
     // Positional Embeddings
     template <long nb_embeddings, long embedding_length, typename SUBNET>
-    using positional_embeddings =
-        multiply<positional_encodings<htan<embeddings<nb_embeddings, embedding_length, SUBNET>>>>;
+    using positional_embeddings = positional_encodings<embeddings<nb_embeddings, embedding_length, SUBNET>>;
 
     // Learned Positional Embeddings
     template <long nb_embeddings, long embedding_length, typename SUBNET>

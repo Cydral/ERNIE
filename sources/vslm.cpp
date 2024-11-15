@@ -59,7 +59,7 @@ struct a_training {
 };
 
 // Other global parameters
-string vocabulary_prefix = "ernie.en-fr.ung.40k", language_model = "ernie_3M_v1.dat";
+string vocabulary_prefix = "ernie.en-fr.ung.12k", language_model = "ernie_3M_v1.dat";
 std::unique_ptr<advanced_tokenizer> tokenizer_;
 
 void configure_console() {
@@ -1552,10 +1552,15 @@ int main(int argc, char* argv[]) {
             {
                 mini_batch_size = 48;
                 const long num_classes = 256;
-                using net_type_b = llm::classification_head<num_classes, llm::embedding_size,
+                /*using net_type_b = llm::classification_head<num_classes, llm::embedding_size,
                     repeat<2, llm::transformer_block,
                     llm::positional_embeddings<num_classes, llm::embedding_size,
-                    input<matrix<int, 0, 1>>>>>;
+                    input<matrix<int, 0, 1>>>>>;*/
+                using net_type_b = loss_multiclass_log<fc<num_classes, relu<bn_fc<fc<llm::embedding_size, avg_pool_everything<
+                    densenet::def<relu, bn_con, 16>::backbone<8, 12, 6, 3,
+                    llm::transformer_block<
+                    llm::positional_embeddings<num_classes, llm::embedding_size,
+                    input<matrix<int, 0, 1>>>>>>>>>>>;
 
                 // Tokenize the Shakespeare text
                 string input_sequence = shakespeare_test;
@@ -1663,23 +1668,18 @@ int main(int argc, char* argv[]) {
                     net_type_b net_b;
                     deserialize("llm_shakespeare_model_a.dat") >> net_b;
                     visit_computational_layers(net_b, [](dropout_& l) { l = dropout_(0.0f); });
-                    size_t sequence_len = llm::sequence_size;
-                    sequence_len = std::min(sequence_len, input_sequence.length());
-                    std::string extracted_sequence = input_sequence.substr(input_sequence.length() - sequence_len);
-                    std::vector<matrix<int, 0, 1>> single_prediction;
+                    std::string extracted_sequence = input_sequence.substr(input_sequence.length() - llm::sequence_size);
                     dlib::matrix<int, 0, 1> input_tokens;
-                    input_tokens.set_size(sequence_len);
-                    for (size_t i = 0; i < sequence_len; ++i) input_tokens(i, 0) = static_cast<int>(extracted_sequence[i]);
-                    single_prediction.push_back(input_tokens);
+                    input_tokens.set_size(llm::sequence_size);
+                    for (size_t i = 0; i < llm::sequence_size; ++i) input_tokens(i, 0) = static_cast<int>(extracted_sequence[i]);
 
                     string start_seq = data_b.to_unsigned_char_string(input_tokens);
                     cout << "input sequence for text generation: <" << start_seq << "> (size: " << start_seq.length() << ")" << endl;
                     string generated_sonnet;
                     
                     for (int i = 0; i < 450; ++i) {                        
-                        single_prediction.push_back(input_tokens);
-                        std::vector<unsigned long> next_char = net_b(single_prediction);
-                        generated_sonnet += data_b.to_unsigned_char_string(next_char[1]);
+                        unsigned long next_char = net_b(input_tokens);
+                        generated_sonnet += data_b.to_unsigned_char_string(next_char);
 
                         for (int j = 0; j < (llm::sequence_size - 1); ++j) input_tokens(j, 0) = input_tokens(j + 1, 0);
                         int insert_pos = std::distance(
@@ -1688,29 +1688,24 @@ int main(int argc, char* argv[]) {
                                 [&](const auto& element) { return element == pad_id; })
                         );
                         if (insert_pos == llm::sequence_size) insert_pos = llm::sequence_size - 1;
-                        input_tokens(insert_pos, 0) = static_cast<int>(next_char[1]);
-                        single_prediction.pop_back();
+                        input_tokens(insert_pos, 0) = next_char;
                     }
                     input_sequence += generated_sonnet;
                     cout << "generated text:\n\n" << input_sequence << " (...)\n\n";
                     
-                    {
+                    /* {
                         // Extract latent vectors
-                        resizable_tensor output_tensor = layer<2>(net_b).get_output();
+                        resizable_tensor output_tensor = layer<3>(net_b).get_output();
                         const size_t num_samples = output_tensor.num_samples();
                         const size_t num_channels = output_tensor.k();
                         const size_t plane_size = output_tensor.nr() * output_tensor.nc();
                         std::vector<std::vector<float>> latent_vectors(num_samples);
-                        matrix<float> sums(output_tensor.nr(), output_tensor.nc());
-                        for (size_t s = 0; s < num_samples; ++s) {                            
-                            sums = 0.0f;
-                            for (size_t k = 0; k < num_channels; ++k) {
-                                auto o_plane = alias_tensor(output_tensor.nr(), output_tensor.nc())(output_tensor, (s * num_channels + k) * plane_size);
-                                sums += mat(o_plane);
+                        for (size_t s = 0; s < num_samples; ++s) {
+                            latent_vectors[s].resize(num_channels);
+                            for (size_t k = 0; k < num_channels; ++k)
+                            {
+                                latent_vectors[s][k] = output_tensor.host()[tensor_index(output_tensor, s, k, 0, 0)]
                             }
-                            auto flatten = sum_rows(sums) / output_tensor.nr();
-                            latent_vectors[s].resize(output_tensor.nc());
-                            for (size_t c = 0; c < output_tensor.nc(); ++c) latent_vectors[s][c] = flatten(c, 0);
                         }
                         cout << "number of latent vectors: " << latent_vectors.size() <<
                             " (input matrice: " << num_samples << "x" << num_channels << "x" <<
@@ -1727,7 +1722,7 @@ int main(int argc, char* argv[]) {
                             }
                             cout << endl;
                         }
-                    }
+                    } */
                 }
 
                 // Loading now the complete Shakespeare file
@@ -1832,17 +1827,14 @@ int main(int argc, char* argv[]) {
                     string sonnet_start = "Shall I compare thee to a winter's night?\nThy beauty warms the frost-bitten bough.\nIn darkness, thou art my guiding light,\nA beacon of hope 'midst winter's vow.";
                     size_t sequence_len = std::min((size_t)llm::sequence_size, sonnet_start.length());
                     std::string extracted_sequence = sonnet_start.substr(sonnet_start.length() - sequence_len);
-                    std::vector<matrix<int, 0, 1>> single_prediction;
                     dlib::matrix<int, 0, 1> input_tokens;
                     input_tokens.set_size(sequence_len, 1);
                     for (size_t i = 0; i < sequence_len; ++i) input_tokens(i, 0) = static_cast<unsigned char>(extracted_sequence[i]);
-                    single_prediction.push_back(input_tokens);
                     
                     cout << "\ngenerated sonnet:\n";
                     string generated_sonnet;
                     for (int i = 0; i < 600; ++i) {
-                        single_prediction.push_back(input_tokens);
-                        unsigned long next_char = net_b(single_prediction)[1];
+                        unsigned long next_char = net_b(input_tokens);
                         generated_sonnet += data_c.to_unsigned_char_string(next_char);
 
                         // Stop after generating what looks like a complete sonnet
@@ -1856,7 +1848,6 @@ int main(int argc, char* argv[]) {
                         );
                         if (insert_pos == llm::sequence_size) insert_pos = llm::sequence_size - 1;
                         input_tokens(insert_pos, 0) = static_cast<int>(next_char);
-                        single_prediction.pop_back();
                     }
                     cout << sonnet_start << generated_sonnet << "\n";
 
@@ -1908,15 +1899,11 @@ int main(int argc, char* argv[]) {
         sp.Encode(dlib::trim(raw_data_test), &prompt_ids);
         prompt.add_input(prompt_ids);
         matrix<int, 0, 1> padded_window;
-        std::vector<matrix<int, 0, 1>> single_prediction;
         for (int i = 0; i < 150; ++i) {
             if (prompt.get_padded_window(padded_window)) {
-                if (single_prediction.empty()) single_prediction.push_back(padded_window);
-                single_prediction.push_back(padded_window);
-                int next_id = static_cast<int>(net(single_prediction)[1]);
+                int next_id = static_cast<int>(net(padded_window));
                 prompt.add_output(next_id);
                 response_ids.push_back(next_id);
-                single_prediction.pop_back();
             }
         }
         sp.Decode(response_ids, &output);
@@ -2146,14 +2133,11 @@ int main(int argc, char* argv[]) {
                 // Generate response
                 response_ids.clear();
                 cout << "[ERNIE] ";
-                std::vector<matrix<int, 0, 1>> predictions;
                 matrix<int, 0, 1> padded_window;
                 int cur_top_k = (top_k >= 1) ? top_k : 1, predicted_label;
                 for (int i = 0; i < total_steps; ++i) {                    
                     if (prompt.get_padded_window(padded_window)) {
-                        if (predictions.empty()) predictions.push_back(padded_window);
-                        predictions.push_back(padded_window);
-                        predicted_label = static_cast<int>(net(predictions)[1]);
+                        predicted_label = static_cast<int>(net(padded_window));
 
                         /*matrix<float, llm::sequence_size, llm::vocab_size> output = mat(generator(padded_window));
                         matrix<float, 1, llm::vocab_size> logits = sum_rows(output);
