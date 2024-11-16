@@ -59,7 +59,7 @@ struct a_training {
 };
 
 // Other global parameters
-string vocabulary_prefix = "ernie.en-fr.ung.12k", language_model = "ernie_3M_v1.dat";
+string vocabulary_prefix = "ernie.en-fr.ung.12k", language_model = "ernie_7M_fp32_v1.dat";
 std::unique_ptr<advanced_tokenizer> tokenizer_;
 
 void configure_console() {
@@ -1735,7 +1735,7 @@ int main(int argc, char* argv[]) {
                     trainer_c.set_min_learning_rate(min_learning_rate);
                     trainer_c.set_learning_rate_shrink_factor(0.1);
                     trainer_c.set_mini_batch_size(mini_batch_size);
-                    trainer_c.set_iterations_without_progress_threshold(25000);
+                    trainer_c.set_iterations_without_progress_threshold(75000);
 
                     // Reload previous model                    
                     if (!fs::exists("llm_shakespeare_model_b.dat") && fs::exists("llm_shakespeare_model_a.dat")) {
@@ -1882,7 +1882,7 @@ int main(int argc, char* argv[]) {
             cerr << "vocabulary file not found! (<" << (vocabulary_prefix + ".model|.vocab") << ">)" << endl;
             return 1;
         }
-        llm::net_v1_1 net;
+        llm::inf_v1_2 net;
         if (fs::exists(language_model)) deserialize(language_model) >> net;
         else {
             cerr << "language model not found! (<" << language_model << ">)" << endl;
@@ -1969,8 +1969,8 @@ int main(int argc, char* argv[]) {
         
         // Trainer setup
         const string model_sync_filename = fs::current_path().string() + "/ernie_checkpoint.dat";        
-        llm::net_v1_1 net;
-        dnn_trainer<llm::net_v1_1, adam> my_trainer(net, adam(weight_decay, beta1, beta2), gpus);
+        llm::train_v1_2 net;
+        dnn_trainer<llm::train_v1_2, adam> my_trainer(net, adam(weight_decay, beta1, beta2), gpus);
         my_trainer.set_learning_rate(learning_rate);
         my_trainer.set_min_learning_rate(min_learning_rate);
         my_trainer.set_iterations_without_progress_threshold(iterations_without_progress_threshold);
@@ -2057,7 +2057,7 @@ int main(int argc, char* argv[]) {
 
         // Simple test of the model quality        
         if (fs::exists(language_model)) {
-            llm::net_v1_1 inf_net;
+            llm::inf_v1_2 inf_net;
             deserialize(language_model) >> inf_net;
             visit_computational_layers(inf_net, [](dropout_& l) { l = dropout_(0.0f); });
 
@@ -2103,7 +2103,7 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        llm::net_v1_1 net;
+        llm::inf_v1_2 net;
         if (fs::exists(language_model)) deserialize(language_model) >> net;
         else {
             cerr << "language model not found! (<" << language_model << ">)" << endl;

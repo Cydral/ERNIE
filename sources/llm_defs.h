@@ -54,6 +54,9 @@ namespace llm
     // Classification Head
     template <long num_logits, long embedding_length, typename SUBNET>
     using classification_head = loss_cross_entropy<linear<num_logits, rms_norm<SUBNET>>>;
+    template <long num_logits, long embedding_length, typename SUBNET>
+    using classification_head_fc = loss_multiclass_log<fc<num_logits,
+        relu<bn_fc<fc<embedding_length, avg_pool_everything<SUBNET>>>>>>;
 
     namespace v1_1_6 {
         template <long seq_len, long d_model, typename SUBNET>
@@ -184,6 +187,17 @@ namespace llm
         repeat<number_of_blocks, transformer_block,
         positional_embeddings<vocab_size, embedding_size,
         input<matrix<int, 0, 1>>>>>;
+
+    using train_v1_2 = classification_head_fc<vocab_size, embedding_size,
+        densenet::def<relu, bn_con, 16>::backbone<8, 12, 6, 3,
+        repeat<number_of_blocks, transformer_block,
+        positional_embeddings<vocab_size, embedding_size,
+        input<matrix<int, 0, 1>>>>>>;
+    using inf_v1_2 = classification_head_fc<vocab_size, embedding_size,
+        densenet::def<relu, affine, 16>::backbone<8, 12, 6, 3,
+        repeat<number_of_blocks, transformer_block,
+        positional_embeddings<vocab_size, embedding_size,
+        input<matrix<int, 0, 1>>>>>>;
 }
 
 #endif // LlmNet_H
