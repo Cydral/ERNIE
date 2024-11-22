@@ -25,11 +25,11 @@ namespace llm
     using namespace dlib;
 
     // Network architectural parameters
-    const long vocab_size       = 12000;    // Vocabulary size
-    const long number_of_blocks = 4;        // Number of stacked Transformer blocks
-    const long number_of_heads  = 8;        // Number of parallel attention heads
+    const long vocab_size       = 2000;     // Vocabulary size
+    const long number_of_blocks = 6;        // Number of stacked Transformer blocks
+    const long number_of_heads  = 4;        // Number of parallel attention heads
     const long embedding_size   = 256;      // Embedding dimension (d_model)
-    const long sequence_size    = 32;       // Maximum sequence length
+    const long sequence_size    = 64;       // Maximum sequence length
 
     // Scale Weights Layer
     template <long d_k_>
@@ -55,8 +55,7 @@ namespace llm
     template <long num_logits, long embedding_length, typename SUBNET>
     using classification_head = loss_cross_entropy<linear<num_logits, rms_norm<SUBNET>>>;
     template <long num_logits, long embedding_length, typename SUBNET>
-    using classification_head_fc = loss_multiclass_log<fc<num_logits,
-        relu<bn_fc<fc<embedding_length, avg_pool_everything<SUBNET>>>>>>;
+    using classification_head_fc = loss_multiclass_log<fc<num_logits, gelu<fc<embedding_length, rms_norm<SUBNET>>>>>;
 
     namespace v1_1_6 {
         template <long seq_len, long d_model, typename SUBNET>
@@ -108,13 +107,13 @@ namespace llm
             dropout_rate<10, linear<d_model,
             hstack<
             multm_prev3<
-            dropout_rate<5, softmaxm<tril_mask<
+            softmaxm<tril_mask<
             scale_weights<d_model / nb_heads,
             multm_prev4<hsplit<nb_heads, query<seq_len, d_model, skip2<
             tag4<transpose<hsplit<nb_heads, key<seq_len, d_model, skip2<
             tag3<hsplit<nb_heads, value<seq_len, d_model,
             tag2<hsplit<3, linear_no_bias<d_model * 3, rms_norm<
-            tag1<SUBNET>>>>>>>>>>>>>>>>>>>>>>>>>>;
+            tag1<SUBNET>>>>>>>>>>>>>>>>>>>>>>>>>;
 
         /**
          * Feed-Forward Network Implementation
@@ -189,15 +188,15 @@ namespace llm
         input<matrix<int, 0, 1>>>>>;
 
     using train_v1_2 = classification_head_fc<vocab_size, embedding_size,
-        densenet::def<relu, bn_con, 16>::backbone<8, 12, 6, 3,
+        //densenet::def<relu, bn_con, 16>::backbone<8, 12, 6, 3,
         repeat<number_of_blocks, transformer_block,
         positional_embeddings<vocab_size, embedding_size,
-        input<matrix<int, 0, 1>>>>>>;
+        input<matrix<int, 0, 1>>>>>;
     using inf_v1_2 = classification_head_fc<vocab_size, embedding_size,
-        densenet::def<relu, affine, 16>::backbone<8, 12, 6, 3,
+        //densenet::def<relu, affine, 16>::backbone<8, 12, 6, 3,
         repeat<number_of_blocks, transformer_block,
         positional_embeddings<vocab_size, embedding_size,
-        input<matrix<int, 0, 1>>>>>>;
+        input<matrix<int, 0, 1>>>>>;
 }
 
 #endif // LlmNet_H

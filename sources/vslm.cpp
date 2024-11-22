@@ -59,7 +59,7 @@ struct a_training {
 };
 
 // Other global parameters
-string vocabulary_prefix = "ernie.en-fr.ung.12k", language_model = "ernie_7M_fp32_v1.dat";
+string vocabulary_prefix = "ernie.en.ung.1k", language_model = "ernie_fp32_v1.dat";
 std::unique_ptr<advanced_tokenizer> tokenizer_;
 
 void configure_console() {
@@ -930,15 +930,15 @@ void test_softmaxm()
     cpu_grad = 0;
     gradient_input.copy_size(input_tensor);    
     randomize_parameters(gradient_input, nr + nc, rnd);
-    cpu::softmax(output_tensor, input_tensor, 1);    
-    cpu::softmax_gradient(cpu_grad, output_tensor, gradient_input, 1);
+    cpu::softmax(output_tensor, input_tensor, tt::operation_mode::PLANE_WISE);    
+    cpu::softmax_gradient(cpu_grad, output_tensor, gradient_input, tt::operation_mode::PLANE_WISE);
     DLIB_TEST_MSG(max(abs(mat(output_tensor) - mat(expected_output))) < 1e-5, "softmax (cpu)");
 #ifdef DLIB_USE_CUDA
     resizable_tensor cuda_grad;
     cuda_grad.copy_size(input_tensor);
     cuda_grad = 0;
-    cuda::softmax(output_tensor, input_tensor, 1);
-    cpu::softmax_gradient(cuda_grad, output_tensor, gradient_input, 1);
+    cuda::softmax(output_tensor, input_tensor, tt::operation_mode::PLANE_WISE);
+    cpu::softmax_gradient(cuda_grad, output_tensor, gradient_input, tt::operation_mode::PLANE_WISE);
     DLIB_TEST_MSG(max(abs(mat(output_tensor) - mat(expected_output))) < 1e-5, "softmax (cuda)");
     DLIB_TEST_MSG(max(abs(mat(cuda_grad) - mat(cpu_grad))) < 1e-5, "softmax_gradient cpu-cuda");
 #endif
@@ -1048,7 +1048,7 @@ int main(int argc, char* argv[]) {
     bool do_benchmark = false, text_generation = false;
     bool voc_training = false, model_training = false, model_prompting = false, use_sync_file = false;
     double learning_rate = 1e-3, min_learning_rate = 1e-6, weight_decay = 0.05, beta1 = 0.9, beta2 = 0.999, temperature = 0.9;
-    long mini_batch_size = 64, iterations_without_progress_threshold = 25000, top_k = 3;
+    long mini_batch_size = 128, iterations_without_progress_threshold = 50000, top_k = 3;
     std::vector<int> gpus = { 0 };
     set_dnn_prefer_fastest_algorithms();
     compressed_float::disable_compression();    
@@ -1298,12 +1298,12 @@ int main(int argc, char* argv[]) {
             if (display_debug_info) cout << "\ntest: softmax layer\n";
             test_softmaxm();
             {
-                softmax2_<softmax_mode::CHANNEL_WISE> l;
+                softmax2_< static_cast<unsigned long>(tt::operation_mode::CHANNEL_WISE)> l;
                 auto res = test_layer(l);
                 DLIB_TEST_MSG(res, " softmaxm test_0 layer\n" + res);
             }
             {
-                softmax2_<softmax_mode::PLANE_WISE> l;
+                softmax2_< static_cast<unsigned long>(tt::operation_mode::PLANE_WISE)> l;
                 auto res = test_layer(l);
                 DLIB_TEST_MSG(res, " softmaxm test_1 layer\n" + res);
             }
@@ -1556,11 +1556,10 @@ int main(int argc, char* argv[]) {
                     repeat<2, llm::transformer_block,
                     llm::positional_embeddings<num_classes, llm::embedding_size,
                     input<matrix<int, 0, 1>>>>>;*/
-                using net_type_b = loss_multiclass_log<fc<num_classes, relu<bn_fc<fc<llm::embedding_size, avg_pool_everything<
-                    densenet::def<relu, bn_con, 16>::backbone<8, 12, 6, 3,
-                    llm::transformer_block<
+                using net_type_b = loss_multiclass_log<fc<num_classes, gelu<fc<llm::embedding_size, rms_norm<
+                    repeat<2, llm::transformer_block,
                     llm::positional_embeddings<num_classes, llm::embedding_size,
-                    input<matrix<int, 0, 1>>>>>>>>>>>;
+                    input<matrix<int, 0, 1>>>>>>>>>;
 
                 // Tokenize the Shakespeare text
                 string input_sequence = shakespeare_test;
@@ -1693,7 +1692,7 @@ int main(int argc, char* argv[]) {
                     input_sequence += generated_sonnet;
                     cout << "generated text:\n\n" << input_sequence << " (...)\n\n";
                     
-                    /* {
+                    {
                         // Extract latent vectors
                         resizable_tensor output_tensor = layer<3>(net_b).get_output();
                         const size_t num_samples = output_tensor.num_samples();
@@ -1703,15 +1702,13 @@ int main(int argc, char* argv[]) {
                         for (size_t s = 0; s < num_samples; ++s) {
                             latent_vectors[s].resize(num_channels);
                             for (size_t k = 0; k < num_channels; ++k)
-                            {
-                                latent_vectors[s][k] = output_tensor.host()[tensor_index(output_tensor, s, k, 0, 0)]
-                            }
+                                latent_vectors[s][k] = output_tensor.host()[tensor_index(output_tensor, s, k, 0, 0)];
                         }
                         cout << "number of latent vectors: " << latent_vectors.size() <<
                             " (input matrice: " << num_samples << "x" << num_channels << "x" <<
                             output_tensor.nr() << "x" << output_tensor.nc() << ")" << endl;
                         if (latent_vectors.size() > 0) {
-                            const auto& v = latent_vectors[1];                            
+                            const auto& v = latent_vectors[0];                            
                             cout << "  - values (idx:1): ";
                             if (v.size() >= (7 + 7)) {
                                 for (size_t i = 0; i < 7; ++i) cout << v[i] << " ";
@@ -1722,7 +1719,7 @@ int main(int argc, char* argv[]) {
                             }
                             cout << endl;
                         }
-                    } */
+                    }
                 }
 
                 // Loading now the complete Shakespeare file
@@ -1916,7 +1913,7 @@ int main(int argc, char* argv[]) {
             concatenate_files(corpus_dir);
             return 1;
         }*/
-        std::vector<int> vocab_sizes = { 3000, 8000, 12000, 20000, 40000, 80000, 100000 };
+        std::vector<int> vocab_sizes = { 1000, 2000, 4000, 6000, 8000, 10000 };
         string corpus_files;
 
         for (const auto& entry : fs::recursive_directory_iterator(corpus_dir)) {
@@ -1928,14 +1925,14 @@ int main(int argc, char* argv[]) {
 
         for (const auto& vocab_size : vocab_sizes) {
             string size_suffix;
-            if (vocab_size == 3000) size_suffix = "3k";
+            if (vocab_size == 1000) size_suffix = "1k";
+            else if (vocab_size == 2000) size_suffix = "2k";
+            else if (vocab_size == 4000) size_suffix = "4k";
+            else if (vocab_size == 6000) size_suffix = "6k";
             else if (vocab_size == 8000) size_suffix = "8k";
-            else if (vocab_size == 12000) size_suffix = "12k";
-            else if (vocab_size == 20000) size_suffix = "20k";
-            else if (vocab_size == 40000) size_suffix = "40k";
-            else if (vocab_size == 80000) size_suffix = "80k";
-            else if (vocab_size == 100000) size_suffix = "100k";
-            string current_vocabulary_prefix = "ernie.eu.ung." + size_suffix;
+            else if (vocab_size == 10000) size_suffix = "10k";            
+            string current_vocabulary_prefix = "ernie.en.ung." + size_suffix;
+            //string current_vocabulary_prefix = "ernie.eu.ung." + size_suffix;
             //string current_vocabulary_prefix = "ernie.en-fr.ung." + size_suffix;
 
             string train_args = "--input=" + corpus_files +

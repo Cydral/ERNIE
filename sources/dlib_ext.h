@@ -234,6 +234,207 @@ namespace dlib {
         return in;
     }
 
+    namespace tt {
+        enum class operation_mode { CHANNEL_WISE = 0, PLANE_WISE = 1 };
+
+        /* TO BE ADDED TO <tensor_tools.h> */
+        // -----------------------------------------------------------------------------------
+        void embeddings(
+            resizable_tensor& dest,
+            const tensor& src,
+            const tensor& embs
+        );
+        /*!
+            requires
+                - src.nr() > 0
+                - embs.num_samples() > 0
+                - embs.k() > 0
+                - embs.nr() == 1
+                - embs.nc() == 1
+                - dest.num_samples() == src.num_samples()
+                - dest.k() == src.k()
+                - dest.nr() == src.nr()
+                - dest.nc() == embs.k()
+            ensures
+                - Projects tokens from the input tensor `src` into embeddings stored in `embs`.
+                - The resulting embeddings are stored in the `dest` tensor.
+                - For all valid s (0 <= s < dest.num_samples()),
+                               k (0 <= k < dest.k()),
+                               r (0 <= r < dest.nr()),
+                               c (0 <= c < dest.nc()):
+                    - Let token_idx = static_cast<unsigned long>(src(s,k,r,0))
+                    - If token_idx < embs.num_samples():
+                        - #dest(s,k,r,c) == embs(token_idx, c, 0, 0)
+                    - Else:
+                        - #dest(s,k,r,c) == 1
+                - The function iterates over all elements of src and populates dest accordingly.
+                - If a token index in src is out of range (>= embs.num_samples()),
+                  the corresponding embedding in dest is filled with 1's instead of 0's.
+        */
+
+        void embeddings_gradient(
+            const tensor& prev,
+            const tensor& gradient_input,
+            tensor& grads,
+            const tensor& freqs,
+            float learning_rate,
+            bool scale
+        );
+        /*!
+            requires
+                - prev.nr() > 0
+                - gradient_input.num_samples() == prev.num_samples()
+                - gradient_input.k() == prev.k()
+                - gradient_input.nr() == prev.nr()
+                - gradient_input.nc() == grads.k()
+                - grads.num_samples() > 0
+                - grads.k() > 0
+                - grads.nr() == 1
+                - grads.nc() == 1
+            ensures
+                - Updates the `grads` tensor based on the gradients in `gradient_input`.
+                - For each sample s, channel k, and row r in prev:
+                    - Retrieves the token index from prev[s,k,r]
+                    - If the token index is valid (< grads.num_samples()):
+                        - If scale is true:
+                            - Computes a frequency scale factor based on freqs[token_idx]
+                            - The scale factor is min(0.15, max(2.0 * (1.0 / (1.0 + freqs[token_idx])), 1.0))
+                        - For each column c in gradient_input:
+                            - Updates grads[token_idx, c] -= gradient_input[s,k,r,c] * rate * freq_scale
+                - The updates to grads are performed atomically to handle concurrent updates to the same embedding.
+                - The function is thread-safe and processes samples in parallel.
+        */
+
+        void rms_normalize(
+            const double eps,
+            resizable_tensor& dest,
+            resizable_tensor& scale,
+            const tensor& src,
+            const tensor& gamma
+        );
+        /*!
+            requires
+                - eps > 0
+                - gamma.k() == src.k()
+                - gamma.nr() == 1
+                - gamma.nc() == 1
+            ensures
+                - have_same_dimensions(#dest, src) == true
+                - #scale.size() == src.num_samples()
+                - #dest == the RMS normalized version of src
+                - #scale contains the RMS (Root Mean Square) values used to normalize each sample of src.
+                - Each element of #dest is computed as:
+                    - #dest[n, k, i, j] == src[n, k, i, j] * gamma[k] / scale[n]
+                where n is the sample index, k is the channel index, and i, j are the spatial indices.
+        !*/
+
+        void rms_normalize_gradient(
+            const tensor& gradient_input,
+            const tensor& scale,
+            const tensor& src,
+            const tensor& gamma,
+            tensor& src_grad,
+            tensor& gamma_grad,
+            resizable_tensor& dscale
+        );
+        /*!
+            requires
+                - scale.size() == src.num_samples()
+                - have_same_dimensions(gamma, gamma_grad)
+                - gamma.k() == src.k()
+                - gamma.nr() == 1
+                - gamma.nc() == 1
+                - have_same_dimensions(gradient_input, src)
+                - have_same_dimensions(gradient_input, src_grad)
+            ensures
+                - Let f(src, gamma) == dot(gradient_input, dest output of
+                  rms_normalize(eps, dest, scale, src, gamma))
+                - Adds the gradient of f() with respect to src to #src_grad
+                - Assigns the gradient of f() with respect to gamma to #gamma_grad
+                - #dscale contains the gradients of f() with respect to the RMS values.
+        !*/
+
+        void transpose(
+            bool add_to,
+            tensor& dest,
+            const tensor& src
+        );
+        /*!
+            requires
+                - dest.num_samples() == src.num_samples()
+                - dest.k() == src.k()
+                - dest.nr() == src.nc()
+                - dest.nc() == src.nr()
+                - is_same_object(dest, src) == false
+            ensures
+                - Performs a transpose operation on the nr() x nc() matrices within src.
+                - If (add_to) is false:
+                    - The result is stored in dest, overwriting its previous contents.
+                    - For all valid n, k, r, c:
+                        - #dest(n,k,c,r) == src(n,k,r,c)
+                - If (add_to) is true:
+                    - The result is added to the existing contents of dest.
+                    - For all valid n, k, r, c:
+                        - #dest(n,k,c,r) == dest(n,k,c,r) + src(n,k,r,c)
+        !*/
+
+        void split_columns(
+            bool add_to,
+            tensor& dest,
+            const tensor& src,
+            const long num_heads
+        );
+        /*!
+            requires
+                - is_same_object(dest, src) == false
+                - dest.num_samples() == src.num_samples()
+                - dest.k() == num_heads
+                - src.k() == 1
+                - dest.nr() == src.nr()
+                - dest.nc() == (src.nc() / num_heads)
+                - src.nc() % num_heads == 0
+            ensures
+                - Splits the columns of src into num_heads separate heads in dest.
+                - If (add_to) is false:
+                    - The result is stored in dest, overwriting its previous contents.
+                    - For all valid n, h, s, d:
+                        - #dest(n,h,s,d) == src(n,0,s,h*head_dim + d)
+                          where head_dim = src.nc() / num_heads
+                - If (add_to) is true:
+                    - The result is added to the existing contents of dest.
+                    - For all valid n, h, s, d:
+                        - #dest(n,h,s,d) == dest(n,h,s,d) + src(n,0,s,h*head_dim + d)
+                          where head_dim = src.nc() / num_heads
+        !*/
+
+        void merge_columns(
+            bool add_to,
+            tensor& dest,
+            const tensor& src
+        );
+        /*!
+            requires
+                - is_same_object(dest, src) == false
+                - dest.num_samples() == src.num_samples()
+                - dest.k() == 1
+                - src.k() > 1
+                - dest.nr() == src.nr()
+                - dest.nc() == (src.nc() * src.k())
+            ensures
+                - Merges the columns from separate heads in src back into a single tensor dest.
+                - If (add_to) is false:
+                    - The result is stored in dest, overwriting its previous contents.
+                    - For all valid n, r, c:
+                        - #dest(n,0,r,c) == src(n,h,r,d)
+                          where h = c / src.nc() and d = c % src.nc()
+                - If (add_to) is true:
+                    - The result is added to the existing contents of dest.
+                    - For all valid n, r, c:
+                        - #dest(n,0,r,c) == dest(n,0,r,c) + src(n,h,r,d)
+                          where h = c / src.nc() and d = c % src.nc()
+        !*/
+    }
+
     namespace cpu {
         /* TO BE ADDED TO <cpu_dlib.cpp> */
         namespace ttimpl
@@ -243,7 +444,7 @@ namespace dlib {
                 const long num_channels,
                 tensor& dest,
                 const tensor& src,
-                size_t mode = 0
+                tt::operation_mode mode = tt::operation_mode::CHANNEL_WISE
             )
             {
                 DLIB_ASSERT(num_channels * num_locations == src.nr() * src.nc() * src.k());
@@ -256,7 +457,7 @@ namespace dlib {
                     auto ss = s + num_locations * num_channels * n;
                     auto dd = d + num_locations * num_channels * n;
 
-                    if (mode == 0) // softmax_mode::CHANNEL_WISE
+                    if (mode == tt::operation_mode::CHANNEL_WISE)
                     {
                         for (long i = 0; i < num_locations; ++i)
                         {
@@ -270,7 +471,6 @@ namespace dlib {
                                 dd[k * num_locations] = std::exp(ss[k * num_locations] - max_val);
                                 sum += dd[k * num_locations];
                             }
-                            sum += std::numeric_limits<float>::epsilon();
                             for (long k = 0; k < num_channels; ++k)
                                 dd[k * num_locations] /= sum;
 
@@ -278,7 +478,7 @@ namespace dlib {
                             ++dd;
                         }
                     }
-                    else if (mode == 1) // softmax_mode::PLANE_WISE
+                    else if (mode == tt::operation_mode::PLANE_WISE)
                     {
                         for (long k = 0; k < num_channels; ++k)
                         {
@@ -303,7 +503,6 @@ namespace dlib {
                                         d_channel[idx] = std::exp(s_channel[idx] - max_val);
                                         sum += d_channel[idx];
                                     }
-                                    sum += std::numeric_limits<float>::epsilon();
                                     for (long c = 0, idx = r * src.nc(); c < src.nc(); ++c, ++idx)
                                         d_channel[idx] /= sum;
                                 }
@@ -319,7 +518,7 @@ namespace dlib {
                 tensor& grad,
                 const tensor& dest,
                 const tensor& gradient_input,
-                size_t mode = 0
+                tt::operation_mode mode = tt::operation_mode::CHANNEL_WISE
             )
             {
                 DLIB_ASSERT(num_channels * num_locations == grad.nr() * grad.nc() * grad.k());
@@ -335,7 +534,7 @@ namespace dlib {
                     const auto g2 = g + num_locations * num_channels * n;
                     const auto in2 = in + num_locations * num_channels * n;
 
-                    if (mode == 0) // softmax_mode::CHANNEL_WISE
+                    if (mode == tt::operation_mode::CHANNEL_WISE)
                     {
                         for (long i = 0; i < num_locations; ++i)
                         {
@@ -357,7 +556,7 @@ namespace dlib {
                             }
                         }
                     }
-                    else if (mode == 1) // softmax_mode::PLANE_WISE
+                    else if (mode == tt::operation_mode::PLANE_WISE)
                     {
                         for (long k = 0; k < num_channels; ++k)
                         {
@@ -389,7 +588,7 @@ namespace dlib {
         void softmax(
             tensor& dest,
             const tensor& src,
-            size_t mode
+            tt::operation_mode mode
         )
         {
             DLIB_CASSERT(have_same_dimensions(dest, src));
@@ -400,7 +599,7 @@ namespace dlib {
             tensor& grad,
             const tensor& output,
             const tensor& gradient_input,
-            size_t mode
+            tt::operation_mode mode
         )
         {
             DLIB_CASSERT(have_same_dimensions(grad, output));
@@ -857,7 +1056,6 @@ namespace dlib {
         }
 
         // -----------------------------------------------------------------------------------
-
     }
 
 #ifdef DLIB_USE_CUDA
@@ -965,10 +1163,10 @@ namespace dlib {
             bool trans_lhs,
             const tensor& rhs,
             bool trans_rhs,
-            size_t g_mode = 0
+            tt::operation_mode mode = tt::operation_mode::CHANNEL_WISE
         )
         {
-            if (g_mode == 0) // gemm_mode::CHANNEL_WISE
+            if (mode == tt::operation_mode::CHANNEL_WISE)
             {
                 // Recall that BLAS uses column major order so to deal with that we flip the
                 // order of the lhs and rhs arguments.
@@ -1017,7 +1215,7 @@ namespace dlib {
                     &beta,
                     dest.device(), dest_nc));
             }
-            else if (g_mode == 1) // gemm_mode::PLANE_WISE
+            else if (mode == tt::operation_mode::PLANE_WISE)
             {
                 const auto transa = trans_lhs ? CUBLAS_OP_T : CUBLAS_OP_N;
                 const auto transb = trans_rhs ? CUBLAS_OP_T : CUBLAS_OP_N;
@@ -1080,17 +1278,18 @@ namespace dlib {
         void softmax(
             tensor& dest,
             const tensor& src,
-            size_t mode = 0
+            tt::operation_mode mode = tt::operation_mode::CHANNEL_WISE
         )
         {
             DLIB_CASSERT(have_same_dimensions(dest, src));
-            DLIB_CASSERT(mode == 0 /*CHANNEL_WISE*/ || mode == 1 /*PLANE_WISE*/, "Invalid softmax mode");
+            DLIB_CASSERT(mode == tt::operation_mode::CHANNEL_WISE ||
+                mode == tt::operation_mode::PLANE_WISE, "Invalid softmax mode");
             if (src.size() == 0) return;
 
             const float alpha = 1;
             const float beta = 0;
 
-            if (mode == 0)
+            if (mode == tt::operation_mode::CHANNEL_WISE)
             {
                 CHECK_CUDNN(cudnnSoftmaxForward(ccontext(),
                     CUDNN_SOFTMAX_ACCURATE,
@@ -1102,7 +1301,7 @@ namespace dlib {
                     descriptor(dest),
                     dest.device()));
             }
-            else if (mode == 1)
+            else if (mode == tt::operation_mode::PLANE_WISE)
             {
                 const size_t num_samples = src.num_samples();
                 const size_t num_channels = src.k();
@@ -1135,19 +1334,20 @@ namespace dlib {
             tensor& grad,
             const tensor& output,
             const tensor& gradient_input,
-            size_t mode = 0
+            tt::operation_mode mode = tt::operation_mode::CHANNEL_WISE
         )
         {
             DLIB_CASSERT(
                 have_same_dimensions(output, gradient_input) == true &&
                 have_same_dimensions(output, grad) == true);
-            DLIB_CASSERT(mode == 0 /*CHANNEL_WISE*/ || mode == 1 /*PLANE_WISE*/, "Invalid softmax mode");
+            DLIB_CASSERT(mode == tt::operation_mode::CHANNEL_WISE ||
+                mode == tt::operation_mode::PLANE_WISE, "Invalid softmax mode");
             if (output.size() == 0) return;
 
             const float alpha = 1;
             const float beta = is_same_object(grad, gradient_input) ? 0 : 1;
 
-            if (mode == 0)
+            if (mode == tt::operation_mode::CHANNEL_WISE)
             {
                 CHECK_CUDNN(cudnnSoftmaxBackward(ccontext(),
                     CUDNN_SOFTMAX_ACCURATE,
@@ -1161,7 +1361,7 @@ namespace dlib {
                     descriptor(grad),
                     grad.device()));
             }
-            else if (mode == 1)
+            else if (mode == tt::operation_mode::PLANE_WISE)
             {
                 const size_t num_samples = output.num_samples();
                 const size_t num_channels = output.k();
@@ -1197,203 +1397,6 @@ namespace dlib {
 #endif
 
     namespace tt {
-        /* TO BE ADDED TO <tensor_tools.h> */
-        // -----------------------------------------------------------------------------------
-        void embeddings(
-            resizable_tensor& dest,
-            const tensor& src,
-            const tensor& embs
-        );
-        /*!
-            requires
-                - src.nr() > 0
-                - embs.num_samples() > 0
-                - embs.k() > 0
-                - embs.nr() == 1
-                - embs.nc() == 1
-                - dest.num_samples() == src.num_samples()
-                - dest.k() == src.k()
-                - dest.nr() == src.nr()
-                - dest.nc() == embs.k()
-            ensures
-                - Projects tokens from the input tensor `src` into embeddings stored in `embs`.
-                - The resulting embeddings are stored in the `dest` tensor.
-                - For all valid s (0 <= s < dest.num_samples()),
-                               k (0 <= k < dest.k()),
-                               r (0 <= r < dest.nr()),
-                               c (0 <= c < dest.nc()):
-                    - Let token_idx = static_cast<unsigned long>(src(s,k,r,0))
-                    - If token_idx < embs.num_samples():
-                        - #dest(s,k,r,c) == embs(token_idx, c, 0, 0)
-                    - Else:
-                        - #dest(s,k,r,c) == 1
-                - The function iterates over all elements of src and populates dest accordingly.
-                - If a token index in src is out of range (>= embs.num_samples()),
-                  the corresponding embedding in dest is filled with 1's instead of 0's.
-        */
-
-        void embeddings_gradient(
-            const tensor& prev,
-            const tensor& gradient_input,
-            tensor& grads,
-            const tensor& freqs,
-            float learning_rate,
-            bool scale
-        );
-        /*!
-            requires
-                - prev.nr() > 0
-                - gradient_input.num_samples() == prev.num_samples()
-                - gradient_input.k() == prev.k()
-                - gradient_input.nr() == prev.nr()
-                - gradient_input.nc() == grads.k()
-                - grads.num_samples() > 0
-                - grads.k() > 0
-                - grads.nr() == 1
-                - grads.nc() == 1
-            ensures
-                - Updates the `grads` tensor based on the gradients in `gradient_input`.
-                - For each sample s, channel k, and row r in prev:
-                    - Retrieves the token index from prev[s,k,r]
-                    - If the token index is valid (< grads.num_samples()):
-                        - If scale is true:
-                            - Computes a frequency scale factor based on freqs[token_idx]
-                            - The scale factor is min(0.15, max(2.0 * (1.0 / (1.0 + freqs[token_idx])), 1.0))
-                        - For each column c in gradient_input:
-                            - Updates grads[token_idx, c] -= gradient_input[s,k,r,c] * rate * freq_scale
-                - The updates to grads are performed atomically to handle concurrent updates to the same embedding.
-                - The function is thread-safe and processes samples in parallel.
-        */
-
-        void rms_normalize(
-            const double eps,
-            resizable_tensor& dest,
-            resizable_tensor& scale,
-            const tensor& src,
-            const tensor& gamma
-        );
-        /*!
-            requires
-                - eps > 0
-                - gamma.k() == src.k()
-                - gamma.nr() == 1
-                - gamma.nc() == 1
-            ensures
-                - have_same_dimensions(#dest, src) == true
-                - #scale.size() == src.num_samples()
-                - #dest == the RMS normalized version of src
-                - #scale contains the RMS (Root Mean Square) values used to normalize each sample of src.
-                - Each element of #dest is computed as:
-                    - #dest[n, k, i, j] == src[n, k, i, j] * gamma[k] / scale[n]
-                where n is the sample index, k is the channel index, and i, j are the spatial indices.
-        !*/
-
-        void rms_normalize_gradient(
-            const tensor& gradient_input,
-            const tensor& scale,
-            const tensor& src,
-            const tensor& gamma,
-            tensor& src_grad,
-            tensor& gamma_grad,
-            resizable_tensor& dscale
-        );
-        /*!
-            requires
-                - scale.size() == src.num_samples()
-                - have_same_dimensions(gamma, gamma_grad)
-                - gamma.k() == src.k()
-                - gamma.nr() == 1
-                - gamma.nc() == 1
-                - have_same_dimensions(gradient_input, src)
-                - have_same_dimensions(gradient_input, src_grad)
-            ensures
-                - Let f(src, gamma) == dot(gradient_input, dest output of
-                  rms_normalize(eps, dest, scale, src, gamma))
-                - Adds the gradient of f() with respect to src to #src_grad
-                - Assigns the gradient of f() with respect to gamma to #gamma_grad
-                - #dscale contains the gradients of f() with respect to the RMS values.
-        !*/
-
-        void transpose(
-            bool add_to,
-            tensor& dest,
-            const tensor& src
-        );
-        /*!
-            requires
-                - dest.num_samples() == src.num_samples()
-                - dest.k() == src.k()
-                - dest.nr() == src.nc()
-                - dest.nc() == src.nr()
-                - is_same_object(dest, src) == false
-            ensures
-                - Performs a transpose operation on the nr() x nc() matrices within src.
-                - If (add_to) is false:
-                    - The result is stored in dest, overwriting its previous contents.
-                    - For all valid n, k, r, c:
-                        - #dest(n,k,c,r) == src(n,k,r,c)
-                - If (add_to) is true:
-                    - The result is added to the existing contents of dest.
-                    - For all valid n, k, r, c:
-                        - #dest(n,k,c,r) == dest(n,k,c,r) + src(n,k,r,c)
-        !*/
-
-        void split_columns(
-            bool add_to,
-            tensor& dest,
-            const tensor& src,
-            const long num_heads
-        );
-        /*!
-            requires
-                - is_same_object(dest, src) == false
-                - dest.num_samples() == src.num_samples()
-                - dest.k() == num_heads
-                - src.k() == 1
-                - dest.nr() == src.nr()
-                - dest.nc() == (src.nc() / num_heads)
-                - src.nc() % num_heads == 0
-            ensures
-                - Splits the columns of src into num_heads separate heads in dest.
-                - If (add_to) is false:
-                    - The result is stored in dest, overwriting its previous contents.
-                    - For all valid n, h, s, d:
-                        - #dest(n,h,s,d) == src(n,0,s,h*head_dim + d)
-                          where head_dim = src.nc() / num_heads
-                - If (add_to) is true:
-                    - The result is added to the existing contents of dest.
-                    - For all valid n, h, s, d:
-                        - #dest(n,h,s,d) == dest(n,h,s,d) + src(n,0,s,h*head_dim + d)
-                          where head_dim = src.nc() / num_heads
-        !*/
-
-        void merge_columns(
-            bool add_to,
-            tensor& dest,
-            const tensor& src
-        );
-        /*!
-            requires
-                - is_same_object(dest, src) == false
-                - dest.num_samples() == src.num_samples()
-                - dest.k() == 1
-                - src.k() > 1
-                - dest.nr() == src.nr()
-                - dest.nc() == (src.nc() * src.k())
-            ensures
-                - Merges the columns from separate heads in src back into a single tensor dest.
-                - If (add_to) is false:
-                    - The result is stored in dest, overwriting its previous contents.
-                    - For all valid n, r, c:
-                        - #dest(n,0,r,c) == src(n,h,r,d)
-                          where h = c / src.nc() and d = c % src.nc()
-                - If (add_to) is true:
-                    - The result is added to the existing contents of dest.
-                    - For all valid n, r, c:
-                        - #dest(n,0,r,c) == dest(n,0,r,c) + src(n,h,r,d)
-                          where h = c / src.nc() and d = c % src.nc()
-        !*/
-
         /* TO BE ADDED TO <tensor_tools.cpp> */
         // ----------------------------------------------------------------------------------------
 
@@ -1429,13 +1432,13 @@ namespace dlib {
         void softmax(
             tensor& dest,
             const tensor& src,
-            size_t s_mode = 0
+            tt::operation_mode mode = tt::operation_mode::CHANNEL_WISE
         )
         {
 #ifdef DLIB_USE_CUDA
-            cuda::softmax(dest, src, s_mode);
+            cuda::softmax(dest, src, mode);
 #else
-            cpu::softmax(dest, src, s_mode);
+            cpu::softmax(dest, src, mode);
 #endif
         }
 
@@ -1443,17 +1446,15 @@ namespace dlib {
             tensor& grad,
             const tensor& dest,
             const tensor& gradient_input,
-            size_t s_mode = 0
+            tt::operation_mode mode = tt::operation_mode::CHANNEL_WISE
         )
         {
 #ifdef DLIB_USE_CUDA
-            cpu::softmax_gradient(grad, dest, gradient_input, s_mode);
+            cuda::softmax_gradient(grad, dest, gradient_input, mode);
 #else
-            cpu::softmax_gradient(grad, dest, gradient_input, s_mode);
+            cpu::softmax_gradient(grad, dest, gradient_input, mode);
 #endif
         }
-
-        enum gemm_mode { CHANNEL_WISE = 0, PLANE_WISE = 1 };
 
         void gemm(
             float beta,
@@ -1463,13 +1464,13 @@ namespace dlib {
             bool trans_lhs,
             const tensor& rhs,
             bool trans_rhs,
-            gemm_mode g_mode = CHANNEL_WISE
+            tt::operation_mode mode = tt::operation_mode::CHANNEL_WISE
         )
         {
 #ifdef DLIB_USE_CUDA
-            cuda::gemm(beta, dest, alpha, lhs, trans_lhs, rhs, trans_rhs, g_mode);
+            cuda::gemm(beta, dest, alpha, lhs, trans_lhs, rhs, trans_rhs, mode);
 #else
-            if (g_mode == CHANNEL_WISE)
+            if (mode == tt::operation_mode::CHANNEL_WISE)
             {
                 if (beta != 0)
                 {
@@ -1494,7 +1495,7 @@ namespace dlib {
                         dest = alpha * mat(lhs) * mat(rhs);
                 }
             }
-            else if (g_mode == PLANE_WISE)
+            else if (mode == tt::operation_mode::PLANE_WISE)
             {
                 auto is_matrix = [](const auto& tensor) {
                     return ((tensor.num_samples() * tensor.k() == 1 && tensor.nr() * tensor.nc() > 1) ||
@@ -2169,7 +2170,7 @@ namespace dlib {
             auto so = alias_tensor(prev_output.num_samples() * prev_output.k() * prev_output.nr(), num_inputs)(prev_output, 0);
 
             auto w = weights(params, 0);
-            tt::gemm(0, (tensor&)o, 1, so, false, w, false, tt::gemm_mode::CHANNEL_WISE);
+            tt::gemm(0, (tensor&)o, 1, so, false, w, false, tt::operation_mode::CHANNEL_WISE);
             
             if (bias_mode == LINEAR_HAS_BIAS)
             {
@@ -2187,7 +2188,7 @@ namespace dlib {
                 const auto& prev_output = sub.get_output();
                 auto pw = weights(params_grad, 0);
                 auto so = alias_tensor(prev_output.num_samples() * prev_output.k() * prev_output.nr(), num_inputs)(prev_output, 0);
-                tt::gemm(0, pw, learning_rate_multiplier, so, true, gi, false, tt::gemm_mode::CHANNEL_WISE);
+                tt::gemm(0, pw, learning_rate_multiplier, so, true, gi, false, tt::operation_mode::CHANNEL_WISE);
 
                 if (bias_mode == LINEAR_HAS_BIAS)
                 {
@@ -2199,7 +2200,7 @@ namespace dlib {
             const auto& prev_gradient = sub.get_gradient_input();
             auto sgi = alias_tensor(prev_gradient.num_samples() * prev_gradient.k() * prev_gradient.nr(), num_inputs)(prev_gradient, 0);
             auto w = weights(params, 0);
-            tt::gemm(1, (tensor&)sgi, 1, gi, false, w, true, tt::gemm_mode::CHANNEL_WISE);
+            tt::gemm(1, (tensor&)sgi, 1, gi, false, w, true, tt::operation_mode::CHANNEL_WISE);
         }
 
         alias_tensor_instance get_weights() { return weights(params, 0); }
@@ -2618,7 +2619,7 @@ namespace dlib {
             auto& t2 = layer<tag>(sub).get_output();
             output.set_size(t1.num_samples(), t1.k(), t1.nr(), t2.nc());
 
-            tt::gemm(0, output, 1, t1, false, t2, false, tt::gemm_mode::PLANE_WISE);
+            tt::gemm(0, output, 1, t1, false, t2, false, tt::operation_mode::PLANE_WISE);
         }
 
         template <typename SUBNET>
@@ -2629,8 +2630,8 @@ namespace dlib {
             auto& prev = sub.get_gradient_input();
             auto& prev_tag = layer<tag>(sub).get_gradient_input();
 
-            tt::gemm(1, prev, 1, gradient_input, false, t2, true, tt::gemm_mode::PLANE_WISE);
-            tt::gemm(1, prev_tag, 1, t1, true, gradient_input, false, tt::gemm_mode::PLANE_WISE);
+            tt::gemm(1, prev, 1, gradient_input, false, t2, true, tt::operation_mode::PLANE_WISE);
+            tt::gemm(1, prev_tag, 1, t1, true, gradient_input, false, tt::operation_mode::PLANE_WISE);
         }
 
         const tensor& get_layer_params() const { return params; }
@@ -2692,8 +2693,6 @@ namespace dlib {
     using multm_prev9_ = multm_prev_<tag9>;
     using multm_prev10_ = multm_prev_<tag10>;
 
-    enum softmax_mode { CHANNEL_WISE = 0, PLANE_WISE = 1 };
-
     template <unsigned long s_mode_>
     class softmax2_
     {
@@ -2705,7 +2704,7 @@ namespace dlib {
 
         void forward_inplace(const tensor& input, tensor& output)
         {
-            tt::softmax(output, input, s_mode_);
+            tt::softmax(output, input, (tt::operation_mode)s_mode_);
         }
 
         void backward_inplace(
@@ -2715,7 +2714,7 @@ namespace dlib {
             tensor& /*params_grad*/
         )
         {
-            tt::softmax_gradient(data_grad, computed_output, gradient_input, s_mode_);
+            tt::softmax_gradient(data_grad, computed_output, gradient_input, (tt::operation_mode)s_mode_);
         }
 
         const tensor& get_layer_params() const { return params; }
@@ -2736,13 +2735,13 @@ namespace dlib {
 
         friend std::ostream& operator<<(std::ostream& out, const softmax2_& item)
         {
-            out << "softmax2 (mode=" << (s_mode_ == CHANNEL_WISE ? "channel_wise" : "plane_wise") << ")";
+            out << "softmax2 (mode=" << (s_mode_ == static_cast<unsigned long>(tt::operation_mode::CHANNEL_WISE) ? "channel_wise" : "plane_wise") << ")";
             return out;
         }
 
         friend void to_xml(const softmax2_& item, std::ostream& out)
         {
-            out << "<softmax2 mode='" << (s_mode_ == CHANNEL_WISE ? "channel_wise" : "plane_wise") << "'/>\n";
+            out << "<softmax2 mode='" << (s_mode_ == static_cast<unsigned long>(tt::operation_mode::CHANNEL_WISE) ? "channel_wise" : "plane_wise") << "'/>\n";
         }
 
     private:
@@ -2750,13 +2749,14 @@ namespace dlib {
     };
 
     template <typename SUBNET>
-    using softmax2 = add_layer<softmax2_<CHANNEL_WISE>, SUBNET>;
+    using softmax2 = add_layer<softmax2_<static_cast<unsigned long>(tt::operation_mode::CHANNEL_WISE)>, SUBNET>;
 
     template <typename SUBNET>
-    using softmaxm = add_layer<softmax2_<PLANE_WISE>, SUBNET>;
+    using softmaxm = add_layer<softmax2_< static_cast<unsigned long>(tt::operation_mode::PLANE_WISE)>, SUBNET>;
 
 // ----------------------------------------------------------------------------------------
-    /* TO BE ADDED TO <loss.h> */
+    /* TO BE ADDED TO <loss.h> */ 
+
     class loss_cross_entropy_
     {
     public:
@@ -2815,7 +2815,7 @@ namespace dlib {
             DLIB_CASSERT(input_tensor.num_samples() == output_tensor.num_samples());
             DLIB_CASSERT(have_same_dimensions(output_tensor, grad));
 
-            tt::softmax(grad, output_tensor, softmax_mode::PLANE_WISE);
+            tt::softmax(grad, output_tensor, tt::operation_mode::PLANE_WISE);
 
             double loss = 0.0;
             const size_t ns = grad.num_samples(), nk = grad.k(), nr = grad.nr(), nc = grad.nc();
@@ -2841,15 +2841,6 @@ namespace dlib {
                             float target = (c == y) ? (1.0f - label_smoothing) : (nc > 1 ? label_smoothing / (nc - 1) : label_smoothing);
                             prob_y += target * prob;
                             grad_plane.host()[idx] = scale * (prob - target);
-                            /*if (c == y)
-                            {
-                                prob_y += prob;
-                                grad_plane.host()[idx] = scale * (prob - 1.0f);
-                            }
-                            else
-                            {
-                                grad_plane.host()[idx] = scale * prob;
-                            }*/
                         }
                     }
                     loss += scale * -safe_log(prob_y / nr);
