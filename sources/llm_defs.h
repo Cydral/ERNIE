@@ -10,26 +10,25 @@
  * leverages cognitive principles of parallel information processing and
  * selective attention.
  *
- * Key features v1.1.4:
+ * Key features:
  * - RMS normalization for enhanced stability
  * - Optimized residual connections
  * - Causal masking for autoregressive attention
- * - Dynamic weight adaptation through learning
  */
 
-//#include <dlib/dnn.h>
 #include "dlib_ext.h"
+#include <dlib/dnn.h>
 
-namespace llm
+namespace transformer
 {
     using namespace dlib;
 
     // Network architectural parameters
-    const long vocab_size       = 2000;     // Vocabulary size
-    const long number_of_blocks = 6;        // Number of stacked Transformer blocks
-    const long number_of_heads  = 4;        // Number of parallel attention heads
-    const long embedding_size   = 256;      // Embedding dimension (d_model)
-    const long sequence_size    = 64;       // Maximum sequence length
+    const long vocab_size = 10000;      // Vocabulary size
+    const long num_layers = 3;          // Number of stacked Transformer blocks
+    const long num_heads = 8;           // Number of parallel attention heads
+    const long embedding_dim = 256;     // Embedding dimension (d_model)
+    const long max_seq_len = 162;       // Maximum sequence length
 
     // Scale Weights Layer
     template <long d_k_>
@@ -41,31 +40,15 @@ namespace llm
     template <long d_k, typename SUBNET>
     using scale_weights = add_layer<scale_weights_<d_k>, SUBNET>;
 
-    // Positional Embeddings
-    template <long nb_embeddings, long embedding_length, typename SUBNET>
-    using positional_embeddings = positional_encodings<embeddings<nb_embeddings, embedding_length, SUBNET>>;
-
-    // Learned Positional Embeddings
-    template <long nb_embeddings, long embedding_length, typename SUBNET>
-    using learned_positional_embeddings =
-        htan<add_prev9<linear<embedding_length, skip10<
-        tag9<embeddings<nb_embeddings, embedding_length, tag10<SUBNET>>>>>>>;
-
-    // Classification Head
-    template <long num_logits, long embedding_length, typename SUBNET>
-    using classification_head = loss_cross_entropy<linear<num_logits, rms_norm<SUBNET>>>;
-    template <long num_logits, long embedding_length, typename SUBNET>
-    using classification_head_fc = loss_multiclass_log<fc<num_logits, gelu<fc<embedding_length, rms_norm<SUBNET>>>>>;
-
-    namespace v1_1_6 {
+    namespace def {
         template <long seq_len, long d_model, typename SUBNET>
         using query = extract<0, 1, seq_len, d_model, SUBNET>;
 
         template <long seq_len, long d_model, typename SUBNET>
-        using key = extract<seq_len * d_model, 1, seq_len, d_model, SUBNET>;
+        using key = extract<seq_len* d_model, 1, seq_len, d_model, SUBNET>;
 
         template <long seq_len, long d_model, typename SUBNET>
-        using value = extract<(seq_len * d_model) * 2, 1, seq_len, d_model, SUBNET>;
+        using value = extract<(seq_len* d_model) * 2, 1, seq_len, d_model, SUBNET>;
 
         /**
          * Multi-Head Attention Implementation
@@ -76,7 +59,7 @@ namespace llm
          *    - Linear projection to (Q,K,V) space for feature extraction
          *    - Split into distinct Q, K, V tensors
          * 2. Attention Head Formation:
-         *    - Split into nb_heads parallel processors
+         *    - Split into num_heads parallel processors
          *    - K transposition for matrix compatibility
          *    - Models brain's distributed processing
          * 3. Scaled Dot-Product Attention:
@@ -92,28 +75,29 @@ namespace llm
          *    - Linear projection to model dimension
          *    - Residual connection for gradient flow
          * Training Specifics:
-         *    - 10% output dropout, 5% attention weights dropout
-         *    - Inference version: dropout -> "temperature value"
+         *    - 10% output & attention weights
+         *    - Inference version: dropout -> multiply
          *
          * Template Parameters:
          * @param seq_len: Maximum sequence length
          * @param d_model: Model dimension
-         * @param nb_heads: Number of attention heads
+         * @param num_heads: Number of attention heads
          * @param SUBNET: Input subnet type
          */
-        template <long seq_len, long d_model, long nb_heads, typename SUBNET>
+        template <template <typename> class ACT, template <typename> class DO,
+            long seq_len, long d_model, long num_heads, typename SUBNET>
         using multihead_attention =
             add_prev1<
-            dropout_rate<10, linear<d_model,
+            DO<linear<d_model,
             hstack<
             multm_prev3<
-            softmaxm<tril_mask<
-            scale_weights<d_model / nb_heads,
-            multm_prev4<hsplit<nb_heads, query<seq_len, d_model, skip2<
-            tag4<transpose<hsplit<nb_heads, key<seq_len, d_model, skip2<
-            tag3<hsplit<nb_heads, value<seq_len, d_model,
+            DO<softmaxm<tril_mask<
+            scale_weights<d_model / num_heads,
+            multm_prev4<hsplit<num_heads, query<seq_len, d_model, skip2<
+            tag4<transpose<hsplit<num_heads, key<seq_len, d_model, skip2<
+            tag3<hsplit<num_heads, value<seq_len, d_model,
             tag2<hsplit<3, linear_no_bias<d_model * 3, rms_norm<
-            tag1<SUBNET>>>>>>>>>>>>>>>>>>>>>>>>>;
+            tag1<SUBNET>>>>>>>>>>>>>>>>>>>>>>>>>>;
 
         /**
          * Feed-Forward Network Implementation
@@ -127,7 +111,7 @@ namespace llm
          *    - GELU non-linear activation
          *    - Projection back to model dimension
          * 3. Regularization and Residuals:
-         *    - 8% dropout during training
+         *    - 10% dropout during training
          *    - add_prev5 residual connection
          * Architectural modifications:
          * - RMS norm for stability
@@ -137,29 +121,42 @@ namespace llm
          * @param d_model: Model dimension
          * @param SUBNET: Input subnet type
          */
-        template <long d_model, typename SUBNET>
-        using feed_forward_fc =
-            add_prev5<
-            scale5<con<1, 1, 1, 1, 1,
-            dropout_rate<8, fc<d_model, gelu<bn_fc<fc<d_model * 4, rms_norm<
-            tag5<SUBNET>>>>>>>>>>;
-        template <long d_model, typename SUBNET>
+        template <template <typename> class ACT, template <typename> class DO, long d_model, typename SUBNET>
         using feed_forward =
-            add_prev5<            
-            dropout_rate<8, linear<d_model, gelu<linear<d_model * 4, rms_norm<
+            add_prev5<
+            DO<linear<d_model, ACT<linear<d_model * 4, rms_norm<
             tag5<SUBNET>>>>>>>;
 
-        template <long seq_len, long d_model, long nb_heads, typename SUBNET>
+        template <template <typename> class ACT, template <typename> class DO, long seq_len, long d_model, long num_heads, typename SUBNET>
         using transformer =
-            feed_forward<d_model,
-            multihead_attention<seq_len, d_model, nb_heads, SUBNET>>;
+            feed_forward<ACT, DO, d_model,
+            multihead_attention<ACT, DO, seq_len, d_model, num_heads, SUBNET>>;
     }
+
+    // Positional Embeddings
+    template <long num_embeddings, long embedding_length, typename SUBNET>
+    using positional_embeddings = positional_encodings<embeddings<num_embeddings, embedding_length, SUBNET>>;
+
+    // Learned Positional Embeddings
+    template <long num_embeddings, long embedding_length, typename SUBNET>
+    using learned_positional_embeddings = add_prev9<linear<embedding_length, skip10<
+        tag9<embeddings<num_embeddings, embedding_length, tag10<SUBNET>>>>>>;
+
+    // Classification Head
+    template <long num_logits, long embedding_length, typename SUBNET>
+    using classification_head = loss_cross_entropy<linear<num_logits, rms_norm<SUBNET>>>;
+    
+    template <template <typename> class ACT, long embedding_length, typename SUBNET>
+    using squeezing = fc<embedding_length, ACT<fc<embedding_length / 8, SUBNET>>>;
+    
+    template <template <typename> class ACT, long num_logits, long embedding_length, typename SUBNET>
+    using classification_head_fc = loss_multiclass_log<fc<num_logits, squeezing<ACT, embedding_length, rms_norm<SUBNET>>>>;
 
     /**
      * Global Transformer Architecture
      *
      * Network variants:
-     * - net_v1_1: Training&inferance network with/without dropout
+     * - Training&inference network with/without dropout
      *
      * Common structure:
      * 1. Input Layer: Token sequences (integer matrices)
@@ -175,27 +172,26 @@ namespace llm
      *
      * Specifics:
      * - Training version: Includes dropout
-     * - Inference version: Uses a specific "temperature"
+     * - Inference version: Uses multiply instead of dropout
      * - RMS normalization for stability
      * - Causal masking for autoregression
      */
     template <typename SUBNET>
-    using transformer_block = v1_1_6::transformer<sequence_size, embedding_size, number_of_heads, SUBNET>;
+    using dropout_10 = dropout_rate<10, SUBNET>;
 
-    using net_v1_1 = classification_head<vocab_size, embedding_size,
-        repeat<number_of_blocks, transformer_block,
-        positional_embeddings<vocab_size, embedding_size,
-        input<matrix<int, 0, 1>>>>>;
+    template <typename SUBNET>
+    using t_transformer_block = def::transformer<gelu, dropout_10, max_seq_len, embedding_dim, num_heads, SUBNET>;
 
-    using train_v1_2 = classification_head_fc<vocab_size, embedding_size,
-        //densenet::def<relu, bn_con, 16>::backbone<8, 12, 6, 3,
-        repeat<number_of_blocks, transformer_block,
-        positional_embeddings<vocab_size, embedding_size,
+    template <typename SUBNET>
+    using i_transformer_block = def::transformer<gelu, multiply, max_seq_len, embedding_dim, num_heads, SUBNET>;
+
+    using train_v1_0 = classification_head_fc<gelu, vocab_size, embedding_dim,
+        repeat<num_layers, t_transformer_block,
+        positional_embeddings<vocab_size, embedding_dim,
         input<matrix<int, 0, 1>>>>>;
-    using inf_v1_2 = classification_head_fc<vocab_size, embedding_size,
-        //densenet::def<relu, affine, 16>::backbone<8, 12, 6, 3,
-        repeat<number_of_blocks, transformer_block,
-        positional_embeddings<vocab_size, embedding_size,
+    using inf_v1_0 = classification_head_fc<gelu, vocab_size, embedding_dim,
+        repeat<num_layers, i_transformer_block,
+        positional_embeddings<vocab_size, embedding_dim,
         input<matrix<int, 0, 1>>>>>;
 }
 

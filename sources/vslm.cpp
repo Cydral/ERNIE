@@ -59,7 +59,7 @@ struct a_training {
 };
 
 // Other global parameters
-string vocabulary_prefix = "ernie.en.ung.1k", language_model = "ernie_fp32_v1.dat";
+string vocabulary_prefix = "ernie.en.ung.10k", language_model = "ernie_fp32_v1.dat";
 std::unique_ptr<advanced_tokenizer> tokenizer_;
 
 void configure_console() {
@@ -184,7 +184,7 @@ using utils::replace_html_entities;
 using utils::is_utf8;
 using utils::concatenate_files;
 
-const size_t std_global_context_size = (5 * llm::sequence_size);
+const size_t std_global_context_size = (5 * transformer::max_seq_len);
 class context_window {
 public:
     context_window(size_t window_size, int pad_value = pad_id, size_t max_global_context_size = std_global_context_size)
@@ -250,7 +250,7 @@ private:
 
 class documents {
 public:
-    documents(size_t seq_size = llm::sequence_size, int pad_value = pad_id,
+    documents(size_t seq_size = transformer::max_seq_len, int pad_value = pad_id,
         bool use_letter_tokenization = false, long token_limit = -1) :
         sequence_size_(seq_size), pad_value_(pad_value),
         use_letter_tokenization_(use_letter_tokenization), token_limit_(token_limit) {
@@ -1048,7 +1048,7 @@ int main(int argc, char* argv[]) {
     bool do_benchmark = false, text_generation = false;
     bool voc_training = false, model_training = false, model_prompting = false, use_sync_file = false;
     double learning_rate = 1e-3, min_learning_rate = 1e-6, weight_decay = 0.05, beta1 = 0.9, beta2 = 0.999, temperature = 0.9;
-    long mini_batch_size = 128, iterations_without_progress_threshold = 50000, top_k = 3;
+    long mini_batch_size = 64, iterations_without_progress_threshold = 50000, top_k = 3;
     std::vector<int> gpus = { 0 };
     set_dnn_prefer_fastest_algorithms();
     compressed_float::disable_compression();    
@@ -1375,7 +1375,7 @@ int main(int argc, char* argv[]) {
                 }
 
                 // Model definition
-                using net_type = tag10<multm_prev1<tag7<softmaxm<llm::scale_weights<3, tag6<multm_prev4<
+                using net_type = tag10<multm_prev1<tag7<softmaxm<transformer::scale_weights<3, tag6<multm_prev4<
                     tag3<linear<3, // Q
                     skip5<tag4<transpose<tag2<linear<3, // K
                     skip5<tag1<linear<3, // V
@@ -1472,18 +1472,22 @@ int main(int argc, char* argv[]) {
 
         // test: multihead attention model
         if (!skip_tests[13]) {
-            mini_batch_size = 48;
+            mini_batch_size = 32;
             if (display_debug_info) cout << "\ntest: multihead attention model\n";
-            const long num_classes = 256, num_epochs = 3000;
-            long num_samples = (2000 / mini_batch_size) * mini_batch_size;
+            const long num_heads = 4;
+            const long embedding_dim = 64;
+            const long max_seq_len = 48;
+            const long num_classes = 256;
+            const long num_epochs = 3000;
+            const long num_samples = (1000 / mini_batch_size) * mini_batch_size;
 
             // Generate synthetic training data
             dlib::rand rnd(std::rand());
             std::vector<matrix<int, 0, 1>> samples;
             std::vector<unsigned long> labels;
             for (int i = 0; i < num_samples; ++i) {
-                matrix<int> sample(llm::sequence_size, 1);
-                for (int r = 0; r < llm::sequence_size; ++r) sample(r, 0) = rnd.get_random_32bit_number() % num_classes;
+                matrix<int> sample(max_seq_len, 1);
+                for (int r = 0; r < max_seq_len; ++r) sample(r, 0) = rnd.get_random_32bit_number() % num_classes;
                 samples.push_back(sample);
                 labels.push_back(rnd.get_random_32bit_number() % num_classes);
             }
@@ -1502,28 +1506,28 @@ int main(int argc, char* argv[]) {
                 label_batches.push_back(batch_labels);
             }
 
-            using net_type_a = llm::classification_head<num_classes, llm::embedding_size,
-                repeat<1, llm::transformer_block,
-                llm::positional_embeddings<num_classes, llm::embedding_size,
+            using train_net_a = transformer::classification_head_fc<gelu, num_classes, embedding_dim,
+                transformer::def::transformer<gelu, transformer::dropout_10, max_seq_len, embedding_dim, num_heads,
+                transformer::positional_embeddings<num_classes, embedding_dim,
                 input<matrix<int, 0, 1>>>>>;
 
-            cout << "sequence size: " << llm::sequence_size << endl;
-            cout << "embedding size: " << llm::embedding_size << endl;
+            cout << "sequence size: " << max_seq_len << endl;
+            cout << "embedding size: " << embedding_dim << endl;
             cout << "number of embeddings: " << num_classes << endl;
             cout << "batch size: " << mini_batch_size << endl;
             cout << "number of samples: " << samples.size() << endl;
             cout << "number of unique classes: " << count_unique_classes() << std::endl;
             cout << "number of batches: " << batches.size() << "/" << label_batches.size() << endl;
 
-            net_type_a net_a;            
-            dnn_trainer<net_type_a, adam> trainer_a(net_a, adam(weight_decay, beta1, beta2), gpus);
+            train_net_a net_a;
+            dnn_trainer<train_net_a, adam> trainer_a(net_a, adam(weight_decay, beta1, beta2), gpus);
             trainer_a.set_learning_rate(learning_rate);
             trainer_a.set_min_learning_rate(min_learning_rate);
             trainer_a.set_mini_batch_size(mini_batch_size);
             trainer_a.set_learning_rate_shrink_factor(0.1);
             trainer_a.set_iterations_without_progress_threshold(1000);
             for (size_t epoch = 0, step = 0; epoch < num_epochs && !g_interrupt_signal_received; ++epoch) {
-                for (size_t i = 0; i < batches.size(); ++i) trainer_a.train_one_step(batches[i], label_batches[i]);
+                for (size_t i = 0; i < batches.size() && !g_interrupt_signal_received; ++i) trainer_a.train_one_step(batches[i], label_batches[i]);
                 step += batches.size();
                 if (epoch % 100 == 0) cout << "epoch[MAX]#: " << (epoch + 1) << "[" << num_epochs << "] step#: " <<
                     step << " learning rate : " <<
@@ -1550,27 +1554,33 @@ int main(int argc, char* argv[]) {
         {
             if (display_debug_info) cout << "\ntest: test: \"shakespeare\" example\n";                        
             {
-                mini_batch_size = 48;
+                mini_batch_size = 64;
+                const long num_heads = 4;
+                const long embedding_dim = 128;
+                const long max_seq_len = 48;
                 const long num_classes = 256;
-                /*using net_type_b = llm::classification_head<num_classes, llm::embedding_size,
-                    repeat<2, llm::transformer_block,
-                    llm::positional_embeddings<num_classes, llm::embedding_size,
-                    input<matrix<int, 0, 1>>>>>;*/
-                using net_type_b = loss_multiclass_log<fc<num_classes, gelu<fc<llm::embedding_size, rms_norm<
-                    repeat<2, llm::transformer_block,
-                    llm::positional_embeddings<num_classes, llm::embedding_size,
-                    input<matrix<int, 0, 1>>>>>>>>>;
+                const long num_epochs = 3000;
+
+                using train_net_b = transformer::classification_head_fc<gelu, num_classes, embedding_dim,
+                    transformer::def::transformer<gelu, transformer::dropout_10, max_seq_len, embedding_dim, num_heads,
+                    transformer::positional_embeddings<num_classes, embedding_dim,
+                    input<matrix<int, 0, 1>>>>>;
 
                 // Tokenize the Shakespeare text
                 string input_sequence = shakespeare_test;
                 std::vector<matrix<int, 0, 1>> samples;
                 std::vector<unsigned long> labels;
-                documents data_b(llm::sequence_size, pad_id, true);
+                documents data_b(max_seq_len, pad_id, true);
                 data_b.load_text(shakespeare_text, false);
-                cout << "batch size: " << mini_batch_size << endl;
                 data_b.generate_samples(1, samples, labels, false);                
                 size_t num_samples = (data_b.get_total_presamples() / mini_batch_size) * mini_batch_size, step = 0;
                 size_t num_batches = num_samples / mini_batch_size;                
+                // Display LLM parameters
+                cout << "sequence size: " << max_seq_len << endl;
+                cout << "embedding size: " << embedding_dim << endl;
+                cout << "number of heads: " << num_heads << endl;
+                cout << "number of embeddings: " << num_classes << endl;
+                cout << "batch size: " << mini_batch_size << endl;
                 cout << "number of generated samples: " << num_samples << endl;
                 cout << "number of batches: " << num_batches << endl;
 
@@ -1596,8 +1606,8 @@ int main(int argc, char* argv[]) {
                 };                
 
                 if (!fs::exists("llm_shakespeare_model_a.dat")) {                    
-                    net_type_b net_b;
-                    dnn_trainer<net_type_b, adam> trainer_b(net_b, adam(weight_decay, beta1, beta2), gpus);
+                    train_net_b net_b;
+                    dnn_trainer<train_net_b, adam> trainer_b(net_b, adam(weight_decay, beta1, beta2), gpus);
                     trainer_b.set_learning_rate(learning_rate);
                     trainer_b.set_min_learning_rate(min_learning_rate);
                     trainer_b.set_learning_rate_shrink_factor(0.1);
@@ -1615,7 +1625,7 @@ int main(int argc, char* argv[]) {
                     size_t num_epochs = 1500, epoch, b;
                     dlib::rand rnd(std::rand());
                     for (epoch = 0; epoch < num_epochs && !g_interrupt_signal_received; ++epoch) {
-                        for (b = 0; b < num_batches; ++b) {
+                        for (b = 0; b < num_batches && !g_interrupt_signal_received; ++b) {
                             p_data.dequeue(a_training_sample);
                             trainer_b.train_one_step(a_training_sample.samples, a_training_sample.labels);
                         }
@@ -1664,13 +1674,13 @@ int main(int argc, char* argv[]) {
 
                 // Predict the next sequence of characters
                 if (fs::exists("llm_shakespeare_model_a.dat")) {
-                    net_type_b net_b;
+                    train_net_b net_b;
                     deserialize("llm_shakespeare_model_a.dat") >> net_b;
                     visit_computational_layers(net_b, [](dropout_& l) { l = dropout_(0.0f); });
-                    std::string extracted_sequence = input_sequence.substr(input_sequence.length() - llm::sequence_size);
+                    std::string extracted_sequence = input_sequence.substr(input_sequence.length() - max_seq_len);
                     dlib::matrix<int, 0, 1> input_tokens;
-                    input_tokens.set_size(llm::sequence_size);
-                    for (size_t i = 0; i < llm::sequence_size; ++i) input_tokens(i, 0) = static_cast<int>(extracted_sequence[i]);
+                    input_tokens.set_size(max_seq_len);
+                    for (size_t i = 0; i < max_seq_len; ++i) input_tokens(i, 0) = static_cast<int>(extracted_sequence[i]);
 
                     string start_seq = data_b.to_unsigned_char_string(input_tokens);
                     cout << "input sequence for text generation: <" << start_seq << "> (size: " << start_seq.length() << ")" << endl;
@@ -1680,13 +1690,13 @@ int main(int argc, char* argv[]) {
                         unsigned long next_char = net_b(input_tokens);
                         generated_sonnet += data_b.to_unsigned_char_string(next_char);
 
-                        for (int j = 0; j < (llm::sequence_size - 1); ++j) input_tokens(j, 0) = input_tokens(j + 1, 0);
+                        for (int j = 0; j < (max_seq_len - 1); ++j) input_tokens(j, 0) = input_tokens(j + 1, 0);
                         int insert_pos = std::distance(
                             input_tokens.begin(),
                             std::find_if(input_tokens.begin(), input_tokens.end(),
                                 [&](const auto& element) { return element == pad_id; })
                         );
-                        if (insert_pos == llm::sequence_size) insert_pos = llm::sequence_size - 1;
+                        if (insert_pos == max_seq_len) insert_pos = max_seq_len - 1;
                         input_tokens(insert_pos, 0) = next_char;
                     }
                     input_sequence += generated_sonnet;
@@ -1694,22 +1704,22 @@ int main(int argc, char* argv[]) {
                     
                     {
                         // Extract latent vectors
-                        resizable_tensor output_tensor = layer<3>(net_b).get_output();
-                        const size_t num_samples = output_tensor.num_samples();
-                        const size_t num_channels = output_tensor.k();
-                        const size_t plane_size = output_tensor.nr() * output_tensor.nc();
+                        resizable_tensor o_tensor = layer<2>(net_b).get_output();
+                        const size_t num_samples = o_tensor.num_samples();
+                        const size_t num_channels = o_tensor.k();
+                        const size_t plane_size = o_tensor.nr() * o_tensor.nc();
                         std::vector<std::vector<float>> latent_vectors(num_samples);
                         for (size_t s = 0; s < num_samples; ++s) {
                             latent_vectors[s].resize(num_channels);
                             for (size_t k = 0; k < num_channels; ++k)
-                                latent_vectors[s][k] = output_tensor.host()[tensor_index(output_tensor, s, k, 0, 0)];
+                                latent_vectors[s][k] = o_tensor.host()[tensor_index(o_tensor, s, k, 0, 0)];
                         }
                         cout << "number of latent vectors: " << latent_vectors.size() <<
                             " (input matrice: " << num_samples << "x" << num_channels << "x" <<
-                            output_tensor.nr() << "x" << output_tensor.nc() << ")" << endl;
+                            o_tensor.nr() << "x" << o_tensor.nc() << ")" << endl;
                         if (latent_vectors.size() > 0) {
                             const auto& v = latent_vectors[0];                            
-                            cout << "  - values (idx:1): ";
+                            cout << "  - values (idx:0): ";
                             if (v.size() >= (7 + 7)) {
                                 for (size_t i = 0; i < 7; ++i) cout << v[i] << " ";
                                 cout << " [...] ";
@@ -1725,9 +1735,8 @@ int main(int argc, char* argv[]) {
                 // Loading now the complete Shakespeare file
                 string shakespeare_file = "shakespeare.txt";
                 if (fs::exists(shakespeare_file)) {
-                    net_type_b net_b;
-                    mini_batch_size = 64;
-                    dnn_trainer<net_type_b, adam> trainer_c(net_b, adam(weight_decay, beta1, beta2), gpus);
+                    train_net_b net_b;
+                    dnn_trainer<train_net_b, adam> trainer_c(net_b, adam(weight_decay, beta1, beta2), gpus);
                     trainer_c.set_learning_rate(learning_rate);
                     trainer_c.set_min_learning_rate(min_learning_rate);
                     trainer_c.set_learning_rate_shrink_factor(0.1);
@@ -1748,7 +1757,7 @@ int main(int argc, char* argv[]) {
                     }
 
                     // Prepare data
-                    documents data_c(llm::sequence_size, pad_id, true);
+                    documents data_c(max_seq_len, pad_id, true);
                     data_c.load_documents(shakespeare_file, false);
                     cout << "loading " << data_c.get_total_samples() << " samples from " << shakespeare_file << endl;
 
@@ -1784,14 +1793,10 @@ int main(int argc, char* argv[]) {
                             trainer_c.train_one_step(a_training_sample.samples, a_training_sample.labels);
                         }
                         step += b;
-
-                        size_t idx = rnd.get_random_32bit_number() % num_batches;
-                        trainer_c.test_one_step(batches[idx], label_batches[idx]);
                         cout << "epoch[MAX]#: " << (epoch + 1) << "[" << num_epochs << "] step#: " <<
                             step << " learning rate: " <<
                             trainer_c.get_learning_rate() << " train loss: " <<
                             trainer_c.get_average_loss() << " test loss: " <<
-                            trainer_c.get_average_test_loss() << " w/o progress: " <<
                             trainer_c.get_steps_without_progress() << endl;
                         if (trainer_c.get_learning_rate() < trainer_c.get_min_learning_rate()) break;
                     }
@@ -1822,7 +1827,7 @@ int main(int argc, char* argv[]) {
 
                     // Attempting to generate a new sonnet                    
                     string sonnet_start = "Shall I compare thee to a winter's night?\nThy beauty warms the frost-bitten bough.\nIn darkness, thou art my guiding light,\nA beacon of hope 'midst winter's vow.";
-                    size_t sequence_len = std::min((size_t)llm::sequence_size, sonnet_start.length());
+                    size_t sequence_len = std::min((size_t)max_seq_len, sonnet_start.length());
                     std::string extracted_sequence = sonnet_start.substr(sonnet_start.length() - sequence_len);
                     dlib::matrix<int, 0, 1> input_tokens;
                     input_tokens.set_size(sequence_len, 1);
@@ -1837,13 +1842,13 @@ int main(int argc, char* argv[]) {
                         // Stop after generating what looks like a complete sonnet
                         if (generated_sonnet.find("END") != string::npos) break;
 
-                        for (int j = 0; j < (llm::sequence_size - 1); ++j) input_tokens(j, 0) = input_tokens(j + 1, 0);
+                        for (int j = 0; j < (max_seq_len - 1); ++j) input_tokens(j, 0) = input_tokens(j + 1, 0);
                         int insert_pos = std::distance(
                             input_tokens.begin(),
                             std::find_if(input_tokens.begin(), input_tokens.end(),
                                 [&](const auto& element) { return element == pad_id; })
                         );
-                        if (insert_pos == llm::sequence_size) insert_pos = llm::sequence_size - 1;
+                        if (insert_pos == max_seq_len) insert_pos = max_seq_len - 1;
                         input_tokens(insert_pos, 0) = static_cast<int>(next_char);
                     }
                     cout << sonnet_start << generated_sonnet << "\n";
@@ -1879,7 +1884,7 @@ int main(int argc, char* argv[]) {
             cerr << "vocabulary file not found! (<" << (vocabulary_prefix + ".model|.vocab") << ">)" << endl;
             return 1;
         }
-        llm::inf_v1_2 net;
+        transformer::inf_v1_0 net;
         if (fs::exists(language_model)) deserialize(language_model) >> net;
         else {
             cerr << "language model not found! (<" << language_model << ">)" << endl;
@@ -1887,7 +1892,7 @@ int main(int argc, char* argv[]) {
         }
         visit_computational_layers(net, [](dropout_& l) { l = dropout_(0.0f); });
         cout << "number of model parameters: " << count_parameters(net) << endl << endl;
-        context_window prompt(llm::sequence_size);
+        context_window prompt(transformer::max_seq_len);
         string output = "";
         cout << "input prompt: (...) " << raw_data_test << " (...)" << endl;
         cout << "generated text: " << raw_data_test;
@@ -1966,8 +1971,8 @@ int main(int argc, char* argv[]) {
         
         // Trainer setup
         const string model_sync_filename = fs::current_path().string() + "/ernie_checkpoint.dat";        
-        llm::train_v1_2 net;
-        dnn_trainer<llm::train_v1_2, adam> my_trainer(net, adam(weight_decay, beta1, beta2), gpus);
+        transformer::train_v1_0 net;
+        dnn_trainer<transformer::train_v1_0, adam> my_trainer(net, adam(weight_decay, beta1, beta2), gpus);
         my_trainer.set_learning_rate(learning_rate);
         my_trainer.set_min_learning_rate(min_learning_rate);
         my_trainer.set_iterations_without_progress_threshold(iterations_without_progress_threshold);
@@ -2054,7 +2059,7 @@ int main(int argc, char* argv[]) {
 
         // Simple test of the model quality        
         if (fs::exists(language_model)) {
-            llm::inf_v1_2 inf_net;
+            transformer::inf_v1_0 inf_net;
             deserialize(language_model) >> inf_net;
             visit_computational_layers(inf_net, [](dropout_& l) { l = dropout_(0.0f); });
 
@@ -2100,7 +2105,7 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        llm::inf_v1_2 net;
+        transformer::inf_v1_0 net;
         if (fs::exists(language_model)) deserialize(language_model) >> net;
         else {
             cerr << "language model not found! (<" << language_model << ">)" << endl;
@@ -2112,8 +2117,8 @@ int main(int argc, char* argv[]) {
 
         std::random_device rd;
         std::mt19937 gen(rd());
-        std::uniform_int_distribution<> dis(llm::sequence_size/2, llm::sequence_size*6);
-        context_window prompt(llm::sequence_size);
+        std::uniform_int_distribution<> dis(transformer::max_seq_len /2, transformer::max_seq_len *6);
+        context_window prompt(transformer::max_seq_len);
         std::vector<int> prompt_ids, endings = { eos_id, pad_id }, response_ids;
 
         cout << ">>> press [CTRL+C] to stop the dialog with ERNIE <<<" << endl << endl;
@@ -2126,7 +2131,7 @@ int main(int argc, char* argv[]) {
                 sp.Encode(dlib::trim(input), &prompt_ids);
                 prompt.reset();
                 prompt.add_input(prompt_ids);
-                size_t total_steps = std::min(static_cast<int>(llm::sequence_size), dis(gen));
+                size_t total_steps = std::min(static_cast<int>(transformer::max_seq_len), dis(gen));
                 // Generate response
                 response_ids.clear();
                 cout << "[ERNIE] ";
