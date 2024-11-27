@@ -59,7 +59,7 @@ struct a_training {
 };
 
 // Other global parameters
-string vocabulary_prefix = "ernie.en.ung.10k", language_model = "ernie_fp32_v1.dat";
+string vocabulary_prefix = "ernie.en.bpe.2k", language_model = "ernie_fp32_v1.dat";
 std::unique_ptr<advanced_tokenizer> tokenizer_;
 
 void configure_console() {
@@ -184,7 +184,7 @@ using utils::replace_html_entities;
 using utils::is_utf8;
 using utils::concatenate_files;
 
-const size_t std_global_context_size = (5 * transformer::max_seq_len);
+const size_t std_global_context_size = (5 * transformer::vslm::MAX_SEQ_LEN);
 class context_window {
 public:
     context_window(size_t window_size, int pad_value = pad_id, size_t max_global_context_size = std_global_context_size)
@@ -250,7 +250,7 @@ private:
 
 class documents {
 public:
-    documents(size_t seq_size = transformer::max_seq_len, int pad_value = pad_id,
+    documents(size_t seq_size = transformer::vslm::MAX_SEQ_LEN, int pad_value = pad_id,
         bool use_letter_tokenization = false, long token_limit = -1) :
         sequence_size_(seq_size), pad_value_(pad_value),
         use_letter_tokenization_(use_letter_tokenization), token_limit_(token_limit) {
@@ -1117,7 +1117,7 @@ int main(int argc, char* argv[]) {
     if (do_benchmark) {
         const bool display_debug_info = false;
         const bool skip_tests[] = {
-            true,      // 0: strings & tokenization
+            false,      // 0: strings & tokenization
             true,      // 1: documents class
             true,      // 2: transpose layer
             true,      // 3: tril layer
@@ -1131,7 +1131,7 @@ int main(int argc, char* argv[]) {
             true,      // 11: rms_norm layer
             true,     // 12: loss_cross_entropy loss
             true,      // 13: multihead attention model
-            false      // 14: "shakespeare" example
+            true      // 14: "shakespeare" example
         };
 
         // test: tokenization
@@ -1884,7 +1884,8 @@ int main(int argc, char* argv[]) {
             cerr << "vocabulary file not found! (<" << (vocabulary_prefix + ".model|.vocab") << ">)" << endl;
             return 1;
         }
-        transformer::inf_v1_0 net;
+        using inference_network = transformer::vslm::network_type<false>;
+        inference_network net;
         if (fs::exists(language_model)) deserialize(language_model) >> net;
         else {
             cerr << "language model not found! (<" << language_model << ">)" << endl;
@@ -1892,7 +1893,7 @@ int main(int argc, char* argv[]) {
         }
         visit_computational_layers(net, [](dropout_& l) { l = dropout_(0.0f); });
         cout << "number of model parameters: " << count_parameters(net) << endl << endl;
-        context_window prompt(transformer::max_seq_len);
+        context_window prompt(transformer::vslm::MAX_SEQ_LEN);
         string output = "";
         cout << "input prompt: (...) " << raw_data_test << " (...)" << endl;
         cout << "generated text: " << raw_data_test;
@@ -1918,7 +1919,7 @@ int main(int argc, char* argv[]) {
             concatenate_files(corpus_dir);
             return 1;
         }*/
-        std::vector<int> vocab_sizes = { 1000, 2000, 4000, 6000, 8000, 10000 };
+        std::vector<int> vocab_sizes = { 2000 };
         string corpus_files;
 
         for (const auto& entry : fs::recursive_directory_iterator(corpus_dir)) {
@@ -1936,8 +1937,7 @@ int main(int argc, char* argv[]) {
             else if (vocab_size == 6000) size_suffix = "6k";
             else if (vocab_size == 8000) size_suffix = "8k";
             else if (vocab_size == 10000) size_suffix = "10k";            
-            string current_vocabulary_prefix = "ernie.en.ung." + size_suffix;
-            //string current_vocabulary_prefix = "ernie.eu.ung." + size_suffix;
+            string current_vocabulary_prefix = "ernie.en.bpe." + size_suffix;
             //string current_vocabulary_prefix = "ernie.en-fr.ung." + size_suffix;
 
             string train_args = "--input=" + corpus_files +
@@ -1945,7 +1945,7 @@ int main(int argc, char* argv[]) {
                 " --bos_id=" + to_string(bos_id) + " --eos_id=" + to_string(eos_id) +
                 " --unk_id=" + to_string(unk_id) + " --pad_id=" + to_string(pad_id) +
                 " --user_defined_symbols=\"<rn>\"" +
-                " --model_type=unigram" +
+                " --model_type=bpe" +
                 " --character_coverage=1.0" +
                 " --max_sentence_length=16768" +
                 " --split_by_unicode_script=false" +
@@ -1970,9 +1970,10 @@ int main(int argc, char* argv[]) {
         }
         
         // Trainer setup
-        const string model_sync_filename = fs::current_path().string() + "/ernie_checkpoint.dat";        
-        transformer::train_v1_0 net;
-        dnn_trainer<transformer::train_v1_0, adam> my_trainer(net, adam(weight_decay, beta1, beta2), gpus);
+        const string model_sync_filename = fs::current_path().string() + "/ernie_checkpoint.dat";
+        using train_network = transformer::vslm::network_type<true>;
+        train_network net;
+        dnn_trainer<train_network, adam> my_trainer(net, adam(weight_decay, beta1, beta2), gpus);
         my_trainer.set_learning_rate(learning_rate);
         my_trainer.set_min_learning_rate(min_learning_rate);
         my_trainer.set_iterations_without_progress_threshold(iterations_without_progress_threshold);
@@ -2029,12 +2030,14 @@ int main(int argc, char* argv[]) {
         dlib::rand rnd(std::rand());
         a_training a_training_sample;
         for (epoch = 0; epoch < num_epochs && !g_interrupt_signal_received; ++epoch) {
-            for (b = 0; b < num_batches && !g_interrupt_signal_received; ++b)
-                my_trainer.train_one_step(batches[b], label_batches[b]);
-            step += b;            
+            for (b = 0; b < num_batches && !g_interrupt_signal_received; ++b) {
+                p_data.dequeue(a_training_sample);
+                my_trainer.train_one_step(a_training_sample.samples, a_training_sample.labels);
+            }                
+            step += num_batches;
                 
-            p_data.dequeue(a_training_sample);
-            my_trainer.test_one_step(a_training_sample.samples, a_training_sample.labels);
+            size_t idx = rnd.get_random_32bit_number() % num_batches;
+            my_trainer.test_one_step(batches[idx], label_batches[idx]);
             cout << "epoch[MAX]#: " << (epoch + 1) << "[" << num_epochs << "] step#: " <<
                 step << " learning rate: " <<
                 my_trainer.get_learning_rate() << " train loss: " <<
@@ -2059,7 +2062,8 @@ int main(int argc, char* argv[]) {
 
         // Simple test of the model quality        
         if (fs::exists(language_model)) {
-            transformer::inf_v1_0 inf_net;
+            using inference_network = transformer::vslm::network_type<false>;
+            inference_network inf_net;
             deserialize(language_model) >> inf_net;
             visit_computational_layers(inf_net, [](dropout_& l) { l = dropout_(0.0f); });
 
@@ -2105,7 +2109,8 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        transformer::inf_v1_0 net;
+        using inference_network = transformer::vslm::network_type<false>;
+        inference_network net;
         if (fs::exists(language_model)) deserialize(language_model) >> net;
         else {
             cerr << "language model not found! (<" << language_model << ">)" << endl;
@@ -2117,8 +2122,8 @@ int main(int argc, char* argv[]) {
 
         std::random_device rd;
         std::mt19937 gen(rd());
-        std::uniform_int_distribution<> dis(transformer::max_seq_len /2, transformer::max_seq_len *6);
-        context_window prompt(transformer::max_seq_len);
+        std::uniform_int_distribution<> dis(transformer::vslm::MAX_SEQ_LEN /2, transformer::vslm::MAX_SEQ_LEN *6);
+        context_window prompt(transformer::vslm::MAX_SEQ_LEN);
         std::vector<int> prompt_ids, endings = { eos_id, pad_id }, response_ids;
 
         cout << ">>> press [CTRL+C] to stop the dialog with ERNIE <<<" << endl << endl;
@@ -2131,7 +2136,7 @@ int main(int argc, char* argv[]) {
                 sp.Encode(dlib::trim(input), &prompt_ids);
                 prompt.reset();
                 prompt.add_input(prompt_ids);
-                size_t total_steps = std::min(static_cast<int>(transformer::max_seq_len), dis(gen));
+                size_t total_steps = std::min(static_cast<int>(transformer::vslm::MAX_SEQ_LEN), dis(gen));
                 // Generate response
                 response_ids.clear();
                 cout << "[ERNIE] ";

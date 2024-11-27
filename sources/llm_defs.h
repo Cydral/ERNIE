@@ -23,13 +23,6 @@ namespace transformer
 {
     using namespace dlib;
 
-    // Network architectural parameters
-    const long vocab_size = 10000;      // Vocabulary size
-    const long num_layers = 3;          // Number of stacked Transformer blocks
-    const long num_heads = 8;           // Number of parallel attention heads
-    const long embedding_dim = 256;     // Embedding dimension (d_model)
-    const long max_seq_len = 162;       // Maximum sequence length
-
     // Scale Weights Layer
     template <long d_k_>
     class scale_weights_ : public multiply_ {
@@ -147,52 +140,143 @@ namespace transformer
     using classification_head = loss_cross_entropy<linear<num_logits, rms_norm<SUBNET>>>;
     
     template <template <typename> class ACT, long embedding_length, typename SUBNET>
-    using squeezing = fc<embedding_length, ACT<fc<embedding_length / 8, SUBNET>>>;
+    using squeezing = fc<embedding_length / 4, ACT<fc<embedding_length / 8, SUBNET>>>;
     
     template <template <typename> class ACT, long num_logits, long embedding_length, typename SUBNET>
     using classification_head_fc = loss_multiclass_log<fc<num_logits, squeezing<ACT, embedding_length, rms_norm<SUBNET>>>>;
 
-    /**
-     * Global Transformer Architecture
-     *
-     * Network variants:
-     * - Training&inference network with/without dropout
-     *
-     * Common structure:
-     * 1. Input Layer: Token sequences (integer matrices)
-     * 2. Embeddings: Combines token and positional
-     * 3. Transformer Blocks (x4):
-     *    - Stabilizing RMS normalization
-     *    - Causal multi-head attention
-     *    - Feed-forward network:
-     *      * 4x dimension expansion
-     *      * GELU activation
-     *    - Residual connections
-     * 4. Classification: Next token prediction
-     *
-     * Specifics:
-     * - Training version: Includes dropout
-     * - Inference version: Uses multiply instead of dropout
-     * - RMS normalization for stability
-     * - Causal masking for autoregression
-     */
     template <typename SUBNET>
     using dropout_10 = dropout_rate<10, SUBNET>;
 
-    template <typename SUBNET>
-    using t_transformer_block = def::transformer<gelu, dropout_10, max_seq_len, embedding_dim, num_heads, SUBNET>;
+    /**
+     * @brief Transformer model configuration template
+     *
+     * Provides a flexible and type-safe configuration mechanism for Transformer models
+     * with compile-time parameter validation and network generation.
+     *
+     * @tparam vocab_size Vocabulary size for token embedding
+     * @tparam num_layers Number of Transformer layers
+     * @tparam num_heads Number of attention heads
+     * @tparam embedding_dim Dimension of token embeddings
+     * @tparam max_seq_len Maximum sequence length
+     * @tparam activation_func Activation function type
+     * @tparam dropout_policy Dropout regularization policy
+     */
+    template <
+        long vocab_size = 2000,                                 // Default vocabulary size
+        long num_layers = 6,                                    // Default number of layers
+        long num_heads = 4,                                     // Default number of attention heads
+        long embedding_dim = 256,                               // Default embedding dimension
+        long max_seq_len = 80,                                  // Default maximum sequence length
+        template <typename> class activation_func = gelu,      // Default activation function
+        template <typename> class dropout_policy = dropout_10  // Default dropout policy
+    >
+    struct transformer_config {
+        // Core model parameters
+        static constexpr long VOCAB_SIZE = vocab_size;
+        static constexpr long NUM_LAYERS = num_layers;
+        static constexpr long NUM_HEADS = num_heads;
+        static constexpr long EMBEDDING_DIM = embedding_dim;
+        static constexpr long MAX_SEQ_LEN = max_seq_len;
 
-    template <typename SUBNET>
-    using i_transformer_block = def::transformer<gelu, multiply, max_seq_len, embedding_dim, num_heads, SUBNET>;
+        // Derived and calculated parameters
+        static constexpr long HEAD_DIM = EMBEDDING_DIM / NUM_HEADS;
+        static constexpr long FFN_HIDDEN_DIM = EMBEDDING_DIM * 4;
 
-    using train_v1_0 = classification_head_fc<gelu, vocab_size, embedding_dim,
-        repeat<num_layers, t_transformer_block,
-        positional_embeddings<vocab_size, embedding_dim,
-        input<matrix<int, 0, 1>>>>>;
-    using inf_v1_0 = classification_head_fc<gelu, vocab_size, embedding_dim,
-        repeat<num_layers, i_transformer_block,
-        positional_embeddings<vocab_size, embedding_dim,
-        input<matrix<int, 0, 1>>>>>;
+        /**
+         * @brief Compile-time validation of model configuration
+         *
+         * Performs static assertions to ensure valid model parameters
+         */
+        struct validation {
+            static_assert(VOCAB_SIZE > 0, "Vocabulary size must be positive");
+            static_assert(NUM_LAYERS > 0, "Number of layers must be positive");
+            static_assert(NUM_HEADS > 0, "Number of attention heads must be positive");
+            static_assert(EMBEDDING_DIM % NUM_HEADS == 0, "Embedding dimension must be divisible by number of heads");
+        };
+
+        /**
+         * @brief Network type generation based on training/inference mode
+         *
+         * Generates different network types for training and inference
+         * using the configured parameters
+         *
+         * @tparam is_training Determines training or inference network type
+         */
+        template <typename SUBNET>
+        using t_transformer_block = def::transformer<activation_func, dropout_policy, MAX_SEQ_LEN, EMBEDDING_DIM, NUM_HEADS, SUBNET>;
+        template <typename SUBNET>
+        using i_transformer_block = def::transformer<activation_func, multiply, MAX_SEQ_LEN, EMBEDDING_DIM, NUM_HEADS, SUBNET>;
+
+        template<bool is_training>
+        using network_type = std::conditional_t<is_training,
+            classification_head_fc<activation_func, VOCAB_SIZE, EMBEDDING_DIM,
+            repeat<NUM_LAYERS, t_transformer_block,
+            positional_embeddings<VOCAB_SIZE, EMBEDDING_DIM, input<matrix<int, 0, 1>>>>>,
+            classification_head_fc<activation_func, VOCAB_SIZE, EMBEDDING_DIM,
+            repeat<NUM_LAYERS, i_transformer_block,
+            positional_embeddings<VOCAB_SIZE, EMBEDDING_DIM, input<matrix<int, 0, 1>>>>>
+        >;
+
+        /**
+         * @brief Model configuration information and debugging utility
+         *
+         * Provides methods to generate human-readable model configuration details
+         */
+        struct model_info {
+            /**
+             * @brief Generate a detailed description of the model configuration
+             *
+             * @return String containing model configuration details
+             */
+            static std::string describe() {
+                std::stringstream ss;
+                ss << "transformer model configuration:\n"
+                    << "- vocabulary size: " << VOCAB_SIZE << "\n"
+                    << "- layers: " << NUM_LAYERS << "\n"
+                    << "- attention heads: " << NUM_HEADS << "\n"
+                    << "- embedding dimension: " << EMBEDDING_DIM << "\n"
+                    << "- max sequence length: " << MAX_SEQ_LEN;
+                return ss.str();
+            }
+        };
+    };
+
+    using vslm = transformer_config<>; // Very Small Language Model
+
+    /**
+     * @example Configuration and Usage Examples
+     *
+     * // Creating different transformer configurations
+     * using default_transformer = transformer_config<>;
+     * using large_transformer = transformer_config<
+     *     5000,   // Larger vocabulary
+     *     8,      // More layers
+     *     8,      // More heads
+     *     512,    // Larger embedding dimension
+     *     128     // Longer sequences
+     * >;
+     *
+     * // Network type instantiations for different modes
+     * using train_network = default_transformer::network_type<true>;
+     * using inference_network = default_transformer::network_type<false>;
+     *
+     * // Utility function to print model configuration
+     * void print_model_info() {
+     *     std::cout << default_transformer::model_info::describe() << std::endl;
+     * }
+     *
+     * @note
+     * - Supports compile-time configuration
+     * - Provides static validation of model parameters
+     * - Enables dynamic network type generation
+     * - Offers advanced hyperparameter tuning utilities
+     *
+     * @author Cydral
+     * @site https://github.com/Cydral
+     * @version 1.0
+     * @date 11/2024
+     */
 }
 
 #endif // LlmNet_H
