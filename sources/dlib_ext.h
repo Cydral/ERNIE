@@ -1232,19 +1232,19 @@ namespace dlib {
 
                 size_t lhs_rows = lhs.nr();
                 size_t lhs_cols = lhs.nc();
-                if (lhs_is_matrix && (lhs.num_samples() > 1 || lhs.k() > 1)) {
+                if (lhs_is_matrix && (lhs_rows * lhs_cols == 1)) {
                     lhs_rows = lhs.num_samples();
                     lhs_cols = lhs.k();
                 }
                 size_t rhs_rows = rhs.nr();
                 size_t rhs_cols = rhs.nc();
-                if (rhs_is_matrix && (rhs.num_samples() > 1 || rhs.k() > 1)) {
+                if (rhs_is_matrix && (rhs_rows * rhs_cols == 1)) {
                     rhs_rows = rhs.num_samples();
                     rhs_cols = rhs.k();
                 }
                 size_t dest_rows = dest.nr();
                 size_t dest_cols = dest.nc();
-                if (dest_is_matrix && (dest.num_samples() > 1 || dest.k() > 1)) {
+                if (dest_is_matrix && (dest_rows * dest_cols == 1)) {
                     dest_rows = dest.num_samples();
                     dest_cols = dest.k();
                 }
@@ -2476,6 +2476,7 @@ namespace dlib {
     };
 
     template <typename SUBNET> using transpose = add_layer<transpose_, SUBNET>;
+
 
     struct neg_infinity_tag {};
     struct zero_tag {};

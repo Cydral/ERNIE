@@ -34,96 +34,98 @@ namespace transformer
     using scale_weights = add_layer<scale_weights_<d_k>, SUBNET>;
 
     namespace def {
-        template <long seq_len, long d_model, typename SUBNET>
-        using query = extract<0, 1, seq_len, d_model, SUBNET>;
+        template <long num_heads, long d_model, typename SUBNET>
+        using query = extract<0, num_heads, d_model / num_heads, 1, SUBNET>;
 
-        template <long seq_len, long d_model, typename SUBNET>
-        using key = extract<seq_len* d_model, 1, seq_len, d_model, SUBNET>;
+        template <long num_heads, long d_model, typename SUBNET>
+        using key = extract<d_model, num_heads, 1, d_model / num_heads, SUBNET>;
 
-        template <long seq_len, long d_model, typename SUBNET>
-        using value = extract<(seq_len* d_model) * 2, 1, seq_len, d_model, SUBNET>;
+        template <long num_heads, long d_model, typename SUBNET>
+        using value = extract<(d_model * 2), num_heads, d_model / num_heads, 1, SUBNET>;
 
         /**
-         * Multi-Head Attention Implementation
+         * Multi-Head Attention Layer
          *
-         * Models selective attention and parallel processing:
-         * 1. Initial Processing:
-         *    - RMS normalization to stabilize neural activation
-         *    - Linear projection to (Q,K,V) space for feature extraction
-         *    - Split into distinct Q, K, V tensors
-         * 2. Attention Head Formation:
-         *    - Split into num_heads parallel processors
-         *    - K transposition for matrix compatibility
-         *    - Models brain's distributed processing
-         * 3. Scaled Dot-Product Attention:
-         *    - Similarity computation via Q*K^T
-         *    - 1/sqrt(d_k) scaling for gradient stability
-         *    - Causal masking for autoregressive learning
-         *    - Softmax normalization of attention weights
-         * 4. Value Integration:
-         *    - Attention * values weighting
-         *    - Head fusion through concatenation
-         *    - Multi-channel information aggregation
-         * 5. Final Processing:
-         *    - Linear projection to model dimension
-         *    - Residual connection for gradient flow
-         * Training Specifics:
-         *    - 10% output & attention weights
-         *    - Inference version: dropout -> multiply
+         * Structure:
+         * 1. Input Processing
+         *    - RMS normalization
+         *    - Single linear projection (d_model -> 3*d_model) for Q,K,V
+         * 2. Parallel Head Processing (num_heads)
+         *    - Split into Q, K, V tensors
+         *    - Key transposition for attention computation
+         * 3. Attention Mechanism
+         *    - Scaled dot-product (Q*K^T / sqrt(d_k))
+         *    - Causal masking (tril_mask)
+         *    - Softmax normalization
+         *    - Value weighting
+         * 4. Output
+         *    - Head concatenation
+         *    - Residual connection
          *
          * Template Parameters:
-         * @param seq_len: Maximum sequence length
+         * @param ACT: Activation function type
+         * @param DO: Dropout layer type
          * @param d_model: Model dimension
          * @param num_heads: Number of attention heads
          * @param SUBNET: Input subnet type
          */
-        template <template <typename> class ACT, template <typename> class DO,
-            long seq_len, long d_model, long num_heads, typename SUBNET>
-        using multihead_attention =
-            add_prev1<
-            DO<linear<d_model,
-            hstack<
-            multm_prev3<
+        template <template <typename> class ACT, template <typename> class DO, long d_model, long num_heads, typename SUBNET>
+        using multihead_attention = add_prev1<
+            DO<extract<0, 1, 1, d_model, multm_prev3<
             DO<softmaxm<tril_mask<
             scale_weights<d_model / num_heads,
-            multm_prev4<hsplit<num_heads, query<seq_len, d_model, skip2<
-            tag4<transpose<hsplit<num_heads, key<seq_len, d_model, skip2<
-            tag3<hsplit<num_heads, value<seq_len, d_model,
-            tag2<hsplit<3, linear_no_bias<d_model * 3, rms_norm<
-            tag1<SUBNET>>>>>>>>>>>>>>>>>>>>>>>>>>;
+            multm_prev4<query<num_heads, d_model, skip2<
+            tag4<key<num_heads, d_model, skip2<
+            tag3<value<num_heads, d_model,
+            tag2<fc_no_bias<d_model * 3, rms_norm<
+            tag1<SUBNET>>>>>>>>>>>>>>>>>>>>;
 
         /**
-         * Feed-Forward Network Implementation
+         * Feed-Forward Network Layer
          *
-         * Enhanced standard feed-forward network:
-         * 1. Preprocessing:
-         *    - RMS normalization of input
+         * Structure:
+         * 1. Input Processing
+         *    - RMS normalization
          *    - Input tagged for residual connection
-         * 2. Two-Layer Network:
-         *    - First layer 4x dimension expansion
-         *    - GELU non-linear activation
-         *    - Projection back to model dimension
-         * 3. Regularization and Residuals:
-         *    - 10% dropout during training
-         *    - add_prev5 residual connection
-         * Architectural modifications:
-         * - RMS norm for stability
-         * - GELU for smooth non-linearity
-         * - Optimized residual connections
+         * 2. Transformation
+         *    - Expansion layer (d_model -> 4*d_model)
+         *    - Activation function
+         *    - Projection layer (4*d_model -> d_model)
+         * 3. Output
+         *    - Dropout
+         *    - Residual connection
          *
+         * Template Parameters:
+         * @param ACT: Activation function type
+         * @param DO: Dropout layer type
          * @param d_model: Model dimension
          * @param SUBNET: Input subnet type
          */
         template <template <typename> class ACT, template <typename> class DO, long d_model, typename SUBNET>
         using feed_forward =
             add_prev5<
-            DO<linear<d_model, ACT<linear<d_model * 4, rms_norm<
-            tag5<SUBNET>>>>>>>;
+            DO<extract<0, 1, 1, d_model,
+            fc<d_model, ACT<fc<d_model * 4, rms_norm<
+            tag5<SUBNET>>>>>>>>;
 
-        template <template <typename> class ACT, template <typename> class DO, long seq_len, long d_model, long num_heads, typename SUBNET>
-        using transformer =
+        /**
+         * Transformer Block
+         *
+         * Combines sequentially:
+         * 1. Multi-head attention layer
+         * 2. Feed-forward network
+         *
+         * Template Parameters:
+         * @param ACT: Activation function type
+         * @param DO: Dropout layer type
+         * @param d_model: Model dimension
+         * @param num_heads: Number of attention heads
+         * @param SUBNET: Input subnet type
+         */
+        template <template <typename> class ACT, template <typename> class DO, long d_model, long num_heads, typename SUBNET>
+        using transformer_block =
             feed_forward<ACT, DO, d_model,
-            multihead_attention<ACT, DO, seq_len, d_model, num_heads, SUBNET>>;
+            multihead_attention<ACT, DO, d_model, num_heads, SUBNET>>;
     }
 
     // Positional Embeddings
@@ -135,15 +137,12 @@ namespace transformer
     using learned_positional_embeddings = add_prev9<linear<embedding_length, skip10<
         tag9<embeddings<num_embeddings, embedding_length, tag10<SUBNET>>>>>>;
 
-    // Classification Head
-    template <long num_logits, long embedding_length, typename SUBNET>
-    using classification_head = loss_cross_entropy<linear<num_logits, rms_norm<SUBNET>>>;
-    
+    // Classification Head   
     template <template <typename> class ACT, long embedding_length, typename SUBNET>
     using squeezing = fc<embedding_length / 4, ACT<fc<embedding_length / 8, SUBNET>>>;
     
     template <template <typename> class ACT, long num_logits, long embedding_length, typename SUBNET>
-    using classification_head_fc = loss_multiclass_log<fc<num_logits, squeezing<ACT, embedding_length, rms_norm<SUBNET>>>>;
+    using classification_head = loss_multiclass_log<fc<num_logits, squeezing<ACT, embedding_length, rms_norm<SUBNET>>>>;
 
     template <typename SUBNET>
     using dropout_10 = dropout_rate<10, SUBNET>;
@@ -164,9 +163,9 @@ namespace transformer
      */
     template <
         long vocab_size = 2000,                                 // Default vocabulary size
-        long num_layers = 6,                                    // Default number of layers
+        long num_layers = 3,                                    // Default number of layers
         long num_heads = 4,                                     // Default number of attention heads
-        long embedding_dim = 256,                               // Default embedding dimension
+        long embedding_dim = 128,                               // Default embedding dimension
         long max_seq_len = 80,                                  // Default maximum sequence length
         template <typename> class activation_func = gelu,      // Default activation function
         template <typename> class dropout_policy = dropout_10  // Default dropout policy
@@ -178,10 +177,6 @@ namespace transformer
         static constexpr long NUM_HEADS = num_heads;
         static constexpr long EMBEDDING_DIM = embedding_dim;
         static constexpr long MAX_SEQ_LEN = max_seq_len;
-
-        // Derived and calculated parameters
-        static constexpr long HEAD_DIM = EMBEDDING_DIM / NUM_HEADS;
-        static constexpr long FFN_HIDDEN_DIM = EMBEDDING_DIM * 4;
 
         /**
          * @brief Compile-time validation of model configuration
@@ -204,16 +199,16 @@ namespace transformer
          * @tparam is_training Determines training or inference network type
          */
         template <typename SUBNET>
-        using t_transformer_block = def::transformer<activation_func, dropout_policy, MAX_SEQ_LEN, EMBEDDING_DIM, NUM_HEADS, SUBNET>;
+        using t_transformer_block = def::transformer_block<activation_func, dropout_policy, EMBEDDING_DIM, NUM_HEADS, SUBNET>;
         template <typename SUBNET>
-        using i_transformer_block = def::transformer<activation_func, multiply, MAX_SEQ_LEN, EMBEDDING_DIM, NUM_HEADS, SUBNET>;
+        using i_transformer_block = def::transformer_block<activation_func, multiply, EMBEDDING_DIM, NUM_HEADS, SUBNET>;
 
         template<bool is_training>
         using network_type = std::conditional_t<is_training,
-            classification_head_fc<activation_func, VOCAB_SIZE, EMBEDDING_DIM,
+            classification_head<activation_func, VOCAB_SIZE, EMBEDDING_DIM,
             repeat<NUM_LAYERS, t_transformer_block,
             positional_embeddings<VOCAB_SIZE, EMBEDDING_DIM, input<matrix<int, 0, 1>>>>>,
-            classification_head_fc<activation_func, VOCAB_SIZE, EMBEDDING_DIM,
+            classification_head<activation_func, VOCAB_SIZE, EMBEDDING_DIM,
             repeat<NUM_LAYERS, i_transformer_block,
             positional_embeddings<VOCAB_SIZE, EMBEDDING_DIM, input<matrix<int, 0, 1>>>>>
         >;
@@ -273,7 +268,7 @@ namespace transformer
      * - Offers advanced hyperparameter tuning utilities
      *
      * @author Cydral
-     * @site https://github.com/Cydral
+     * @site https://github.com/Cydral/ERNIE
      * @version 1.0
      * @date 11/2024
      */

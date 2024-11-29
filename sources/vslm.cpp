@@ -1117,7 +1117,7 @@ int main(int argc, char* argv[]) {
     if (do_benchmark) {
         const bool display_debug_info = false;
         const bool skip_tests[] = {
-            false,      // 0: strings & tokenization
+            true,      // 0: strings & tokenization
             true,      // 1: documents class
             true,      // 2: transpose layer
             true,      // 3: tril layer
@@ -1129,9 +1129,9 @@ int main(int argc, char* argv[]) {
             true,      // 9: linear layer       
             true,      // 10: hsplit/hstack layers
             true,      // 11: rms_norm layer
-            true,     // 12: loss_cross_entropy loss
+            true,      // 12: loss_cross_entropy loss
             true,      // 13: multihead attention model
-            true      // 14: "shakespeare" example
+            false      // 14: "shakespeare" example
         };
 
         // test: tokenization
@@ -1506,8 +1506,8 @@ int main(int argc, char* argv[]) {
                 label_batches.push_back(batch_labels);
             }
 
-            using train_net_a = transformer::classification_head_fc<gelu, num_classes, embedding_dim,
-                transformer::def::transformer<gelu, transformer::dropout_10, max_seq_len, embedding_dim, num_heads,
+            using train_net_a = transformer::classification_head<gelu, num_classes, embedding_dim,
+                transformer::def::transformer_block<gelu, transformer::dropout_10, embedding_dim, num_heads,
                 transformer::positional_embeddings<num_classes, embedding_dim,
                 input<matrix<int, 0, 1>>>>>;
 
@@ -1555,16 +1555,13 @@ int main(int argc, char* argv[]) {
             if (display_debug_info) cout << "\ntest: test: \"shakespeare\" example\n";                        
             {
                 mini_batch_size = 64;
+                const long num_layers = 1;
                 const long num_heads = 4;
-                const long embedding_dim = 128;
-                const long max_seq_len = 48;
+                const long embedding_dim = 64;
+                const long max_seq_len = 32;
                 const long num_classes = 256;
                 const long num_epochs = 3000;
-
-                using train_net_b = transformer::classification_head_fc<gelu, num_classes, embedding_dim,
-                    transformer::def::transformer<gelu, transformer::dropout_10, max_seq_len, embedding_dim, num_heads,
-                    transformer::positional_embeddings<num_classes, embedding_dim,
-                    input<matrix<int, 0, 1>>>>>;
+                using net_type = transformer::transformer_config<num_classes, num_layers, num_heads, embedding_dim, max_seq_len>;
 
                 // Tokenize the Shakespeare text
                 string input_sequence = shakespeare_test;
@@ -1576,10 +1573,7 @@ int main(int argc, char* argv[]) {
                 size_t num_samples = (data_b.get_total_presamples() / mini_batch_size) * mini_batch_size, step = 0;
                 size_t num_batches = num_samples / mini_batch_size;                
                 // Display LLM parameters
-                cout << "sequence size: " << max_seq_len << endl;
-                cout << "embedding size: " << embedding_dim << endl;
-                cout << "number of heads: " << num_heads << endl;
-                cout << "number of embeddings: " << num_classes << endl;
+                cout << net_type::model_info::describe() << endl;
                 cout << "batch size: " << mini_batch_size << endl;
                 cout << "number of generated samples: " << num_samples << endl;
                 cout << "number of batches: " << num_batches << endl;
@@ -1605,9 +1599,10 @@ int main(int argc, char* argv[]) {
                     }
                 };                
 
-                if (!fs::exists("llm_shakespeare_model_a.dat")) {                    
-                    train_net_b net_b;
-                    dnn_trainer<train_net_b, adam> trainer_b(net_b, adam(weight_decay, beta1, beta2), gpus);
+                if (!fs::exists("llm_shakespeare_model_a.dat")) {
+                    using train_net = net_type::network_type<true>;
+                    train_net net_b;
+                    dnn_trainer<train_net, adam> trainer_b(net_b, adam(weight_decay, beta1, beta2), gpus);
                     trainer_b.set_learning_rate(learning_rate);
                     trainer_b.set_min_learning_rate(min_learning_rate);
                     trainer_b.set_learning_rate_shrink_factor(0.1);
@@ -1674,9 +1669,9 @@ int main(int argc, char* argv[]) {
 
                 // Predict the next sequence of characters
                 if (fs::exists("llm_shakespeare_model_a.dat")) {
-                    train_net_b net_b;
+                    using inference_net = net_type::network_type<false>;
+                    inference_net net_b;
                     deserialize("llm_shakespeare_model_a.dat") >> net_b;
-                    visit_computational_layers(net_b, [](dropout_& l) { l = dropout_(0.0f); });
                     std::string extracted_sequence = input_sequence.substr(input_sequence.length() - max_seq_len);
                     dlib::matrix<int, 0, 1> input_tokens;
                     input_tokens.set_size(max_seq_len);
@@ -1735,22 +1730,23 @@ int main(int argc, char* argv[]) {
                 // Loading now the complete Shakespeare file
                 string shakespeare_file = "shakespeare.txt";
                 if (fs::exists(shakespeare_file)) {
-                    train_net_b net_b;
-                    dnn_trainer<train_net_b, adam> trainer_c(net_b, adam(weight_decay, beta1, beta2), gpus);
+                    using train_net = net_type::network_type<true>;
+                    train_net net_b;
+                    dnn_trainer<train_net, adam> trainer_c(net_b, adam(weight_decay, beta1, beta2), gpus);
                     trainer_c.set_learning_rate(learning_rate);
                     trainer_c.set_min_learning_rate(min_learning_rate);
                     trainer_c.set_learning_rate_shrink_factor(0.1);
                     trainer_c.set_mini_batch_size(mini_batch_size);
-                    trainer_c.set_iterations_without_progress_threshold(75000);
+                    trainer_c.set_iterations_without_progress_threshold(50000);
 
                     // Reload previous model                    
-                    if (!fs::exists("llm_shakespeare_model_b.dat") && fs::exists("llm_shakespeare_model_a.dat")) {
+                    if (!fs::exists("shakespeare_fp32_llm_v1.dat") && fs::exists("llm_shakespeare_model_a.dat")) {
                         deserialize("llm_shakespeare_model_a.dat") >> net_b;
                         cout << "shakespeare model loaded (source template): llm_shakespeare_model_a.dat" << endl;
                     }
-                    else if (fs::exists("llm_shakespeare_model_b.dat")) {
-                        deserialize("llm_shakespeare_model_b.dat") >> net_b;
-                        cout << "shakespeare model loaded: llm_shakespeare_model_b.dat" << endl;
+                    else if (fs::exists("shakespeare_fp32_llm_v1.dat")) {
+                        deserialize("shakespeare_fp32_llm_v1.dat") >> net_b;
+                        cout << "shakespeare model loaded: shakespeare_fp32_llm_v1.dat" << endl;
                     }
                     else {
                         cout << "no previous model found, starting from scratch" << endl;
@@ -1807,8 +1803,8 @@ int main(int argc, char* argv[]) {
                     // Save the new model
                     trainer_c.get_net();
                     net_b.clean();
-                    serialize("llm_shakespeare_model_b.dat") << net_b;
-                    cout << "advanced shakespeare model saved: llm_shakespeare_model_b.dat" << endl;
+                    serialize("shakespeare_fp32_llm_v1.dat") << net_b;
+                    cout << "advanced shakespeare model saved: shakespeare_fp32_llm_v1.dat" << endl;
                     cout << "advanced shakespeare model parameters: " << count_parameters(net_b) << endl;                    
 
                     // Test partially the new model
