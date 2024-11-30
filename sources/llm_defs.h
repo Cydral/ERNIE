@@ -153,22 +153,22 @@ namespace transformer
      * Provides a flexible and type-safe configuration mechanism for Transformer models
      * with compile-time parameter validation and network generation.
      *
-     * @tparam vocab_size Vocabulary size for token embedding
-     * @tparam num_layers Number of Transformer layers
-     * @tparam num_heads Number of attention heads
-     * @tparam embedding_dim Dimension of token embeddings
-     * @tparam max_seq_len Maximum sequence length
-     * @tparam activation_func Activation function type
-     * @tparam dropout_policy Dropout regularization policy
+     * @param vocab_size Vocabulary size for token embedding
+     * @param num_layers Number of Transformer layers
+     * @param num_heads Number of attention heads
+     * @param embedding_dim Dimension of token embeddings
+     * @param max_seq_len Maximum sequence length
+     * @param activation_func Activation function type
+     * @param dropout_policy Dropout regularization policy
      */
     template <
         long vocab_size = 2000,                                 // Default vocabulary size
-        long num_layers = 3,                                    // Default number of layers
-        long num_heads = 4,                                     // Default number of attention heads
-        long embedding_dim = 128,                               // Default embedding dimension
-        long max_seq_len = 80,                                  // Default maximum sequence length
-        template <typename> class activation_func = gelu,      // Default activation function
-        template <typename> class dropout_policy = dropout_10  // Default dropout policy
+        long num_layers = 2,                                    // Default number of layers
+        long num_heads = 8,                                     // Default number of attention heads
+        long embedding_dim = 256,                               // Default embedding dimension
+        long max_seq_len = 128,                                 // Default maximum sequence length
+        template <typename> class activation_func = gelu,       // Default activation function
+        template <typename> class dropout_policy = dropout_10   // Default dropout policy
     >
     struct transformer_config {
         // Core model parameters

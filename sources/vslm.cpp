@@ -1557,8 +1557,8 @@ int main(int argc, char* argv[]) {
                 mini_batch_size = 64;
                 const long num_layers = 1;
                 const long num_heads = 4;
-                const long embedding_dim = 64;
-                const long max_seq_len = 32;
+                const long embedding_dim = 128;
+                const long max_seq_len = 28;
                 const long num_classes = 256;
                 const long num_epochs = 3000;
                 using net_type = transformer::transformer_config<num_classes, num_layers, num_heads, embedding_dim, max_seq_len>;
@@ -1740,13 +1740,13 @@ int main(int argc, char* argv[]) {
                     trainer_c.set_iterations_without_progress_threshold(50000);
 
                     // Reload previous model                    
-                    if (!fs::exists("shakespeare_fp32_llm_v1.dat") && fs::exists("llm_shakespeare_model_a.dat")) {
+                    if (!fs::exists("llm_shakespeare_fp32_v1.dat") && fs::exists("llm_shakespeare_model_a.dat")) {
                         deserialize("llm_shakespeare_model_a.dat") >> net_b;
                         cout << "shakespeare model loaded (source template): llm_shakespeare_model_a.dat" << endl;
                     }
-                    else if (fs::exists("shakespeare_fp32_llm_v1.dat")) {
-                        deserialize("shakespeare_fp32_llm_v1.dat") >> net_b;
-                        cout << "shakespeare model loaded: shakespeare_fp32_llm_v1.dat" << endl;
+                    else if (fs::exists("llm_shakespeare_fp32_v1.dat")) {
+                        deserialize("llm_shakespeare_fp32_v1.dat") >> net_b;
+                        cout << "shakespeare model loaded: llm_shakespeare_fp32_v1.dat" << endl;
                     }
                     else {
                         cout << "no previous model found, starting from scratch" << endl;
@@ -1803,8 +1803,8 @@ int main(int argc, char* argv[]) {
                     // Save the new model
                     trainer_c.get_net();
                     net_b.clean();
-                    serialize("shakespeare_fp32_llm_v1.dat") << net_b;
-                    cout << "advanced shakespeare model saved: shakespeare_fp32_llm_v1.dat" << endl;
+                    serialize("llm_shakespeare_fp32_v1.dat") << net_b;
+                    cout << "advanced shakespeare model saved: llm_shakespeare_fp32_v1.dat" << endl;
                     cout << "advanced shakespeare model parameters: " << count_parameters(net_b) << endl;                    
 
                     // Test partially the new model
