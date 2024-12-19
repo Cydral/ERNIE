@@ -8,7 +8,7 @@
     Key features of this implementation include:
     - Custom layers designed for matrix-based processing of inputs, optimized for dlib's
       tensor structure.
-    - Specialized input layers for LLM, including embedding injection and positional encoding.
+    - Specialized input layers for SLM, including embedding injection and positional encoding.
     - A complete example of training and using a language model.
     - Benchmarking and testing suite, including a "Shakespeare test" that showcases the
       model's ability to generate text in the style of the famous playwright.
@@ -42,7 +42,7 @@
 #include <atomic>
 #include <boost/program_options.hpp>
 
-#include "llm_defs.h"
+#include "slm_defs.h"
 #include "advanced_tokenizer.hpp"
 #include "data.h"
 
@@ -51,6 +51,15 @@
 
 namespace fs = std::filesystem;
 namespace po = boost::program_options;
+using namespace dlib;
+
+volatile std::sig_atomic_t g_interrupt_signal_received = 0;
+void signalHandler(int signal) {
+    if (signal == SIGINT) {
+        g_interrupt_signal_received = 1;
+        cout << "\ninterrupt detected (CTRL+C), cleaning up and closing the program" << endl;
+    }
+}
 
 const int bos_id = 0, eos_id = 1, unk_id = 2, pad_id = 3;
 struct a_training {
@@ -59,7 +68,7 @@ struct a_training {
 };
 
 // Other global parameters
-string vocabulary_prefix = "ernie.en.bpe.2k", language_model = "ernie_fp32_v1.dat";
+string vocabulary_prefix = "ernie.en-fr.ung.50k", language_model = "ernie_fp32_v1.dat";
 std::unique_ptr<advanced_tokenizer> tokenizer_;
 
 void configure_console() {
@@ -509,7 +518,7 @@ void test_transpose()
     cpu::transpose(false, output_cpu_a, input);
     cpu::transpose(true, output_cpu_b, output_cpu_a);
     input *= 2;
-    DLIB_TEST_MSG(max(abs(mat(output_cpu_b) - mat(input))) < 1e-5,
+    MY_TEST_MSG(max(abs(mat(output_cpu_b) - mat(input))) < 1e-5,
         "transpose_cpu: max(abs(mat(output_cpu_b) - mat(input))) < 1e-5");
 
 #ifdef DLIB_USE_CUDA
@@ -518,9 +527,9 @@ void test_transpose()
     output_cuda_a.copy_size(output_cpu_a);
     cuda::transpose(false, output_cuda_a, input);
     cuda::transpose(true, output_cuda_b, output_cuda_a);
-    DLIB_TEST_MSG(max(abs(mat(output_cpu_a) - mat(output_cuda_a))) < 1e-5,
+    MY_TEST_MSG(max(abs(mat(output_cpu_a) - mat(output_cuda_a))) < 1e-5,
         "transpose_cuda: max(abs(mat(output_cpu_a) - mat(output_cuda_a))) < 1e-5");
-    DLIB_TEST_MSG(max(abs(mat(output_cpu_b) - mat(output_cuda_b))) < 1e-5,
+    MY_TEST_MSG(max(abs(mat(output_cpu_b) - mat(output_cuda_b))) < 1e-5,
         "transpose_cuda: max(abs(mat(output_cpu_b) - mat(output_cuda_b))) < 1e-5");
 #endif
 }
@@ -543,15 +552,15 @@ void test_hsplit_hstack() {
     net.forward(input_tensor);
     auto& output_tensor = layer<tag1>(net).get_output();
 
-    DLIB_TEST_MSG(output_tensor.num_samples() == input_tensor.num_samples(),
+    MY_TEST_MSG(output_tensor.num_samples() == input_tensor.num_samples(),
         "hsplit_hstack: output_tensor.num_samples() == input_tensor.num_samples()");
-    DLIB_TEST_MSG(output_tensor.k() == input_tensor.k(),
+    MY_TEST_MSG(output_tensor.k() == input_tensor.k(),
         "hsplit_hstack: output_tensor.k() == input_tensor.k()");
-    DLIB_TEST_MSG(output_tensor.nr() == input_tensor.nr(),
+    MY_TEST_MSG(output_tensor.nr() == input_tensor.nr(),
         "hsplit_hstack: output_tensor.nr() == input_tensor.nr()");
-    DLIB_TEST_MSG(output_tensor.nc() == input_tensor.nc(),
+    MY_TEST_MSG(output_tensor.nc() == input_tensor.nc(),
         "hsplit_hstack: output_tensor.nc() == input_tensor.nc()");
-    DLIB_TEST_MSG(max(abs(mat(output_tensor) - mat(input_tensor))) < 1e-5,
+    MY_TEST_MSG(max(abs(mat(output_tensor) - mat(input_tensor))) < 1e-5,
         "hsplit_hstack: max(abs(mat(output_tensor) - mat(input_tensor))) < 1e-5");
 
     /*const long num_samples = 1;
@@ -589,7 +598,7 @@ void test_hsplit_hstack() {
     grad_cpu.copy_size(input);
     cpu::reorg_gradient2(false, grad_cpu, row_stride, col_stride, output_cpu2);
     DBG_INFO("reorg_gradient2_output: ", grad_cpu, true);
-    DLIB_TEST_MSG(max(abs(mat(grad_cpu) - mat(input))) < 1e-5,
+    MY_TEST_MSG(max(abs(mat(grad_cpu) - mat(input))) < 1e-5,
         "reorg_cpu: max(abs(mat(grad_cpu) - mat(input))) < 1e-5");*/
 }
 
@@ -637,7 +646,7 @@ void test_positional_encodings()
     }    
 
     auto& net_output = layer<tag1>(net).get_output();
-    DLIB_TEST_MSG(max(abs(mat(net_output) - expected_output)) < 1e-5, "positional_encodings layer");
+    MY_TEST_MSG(max(abs(mat(net_output) - expected_output)) < 1e-5, "positional_encodings layer");
 }
 
 void test_embeddings()
@@ -684,7 +693,7 @@ void test_embeddings()
         if (predicted_labels[i] == labels[i]) ++num_correct;
     
     double acc = static_cast<double>(num_correct) / labels.size();
-    DLIB_TEST_MSG(acc > 0.9, "embeddings accuracy: " + to_string(acc));
+    MY_TEST_MSG(acc > 0.9, "embeddings accuracy: " + to_string(acc));
 }
 
 void test_rms_normalize()
@@ -720,7 +729,7 @@ void test_rms_normalize()
             }
         }
     }
-    DLIB_TEST_MSG(!error_found, "Normalized values vs expected values");
+    MY_TEST_MSG(!error_found, "Normalized values vs expected values");
 
     // Check the backward pass
     resizable_tensor gradient_input(x);
@@ -757,25 +766,25 @@ void test_rms_normalize()
             }
         }
     }
-    DLIB_TEST_MSG(!backward_error_found, "Backward pass values vs expected values");
+    MY_TEST_MSG(!backward_error_found, "Backward pass values vs expected values");
 
 #ifdef DLIB_USE_CUDA
     resizable_tensor y_cuda(x);
     resizable_tensor scale_cuda;
     cuda::rms_normalize(eps, y_cuda, scale_cuda, x, gamma);
-    DLIB_TEST_MSG(max(abs(mat(y_cpu) - mat(y_cuda))) < 1e-5, "max(abs(mat(y_cpu) - mat(y_cuda))) < 1e-5");
-    DLIB_TEST_MSG(max(abs(mat(scale_cpu) - mat(scale_cuda))) < 1e-5,
+    MY_TEST_MSG(max(abs(mat(y_cpu) - mat(y_cuda))) < 1e-5, "max(abs(mat(y_cpu) - mat(y_cuda))) < 1e-5");
+    MY_TEST_MSG(max(abs(mat(scale_cpu) - mat(scale_cuda))) < 1e-5,
         "max(abs(mat(scale_cpu) - mat(scale_cuda))) < 1e-5");
 
     resizable_tensor src_grad_cuda(x), gamma_grad_cuda(1, x.k());
     resizable_tensor dscale_cuda(x.num_samples());
     src_grad_cuda = 0;
     cuda::rms_normalize_gradient(gradient_input, scale_cuda, x, gamma, src_grad_cuda, gamma_grad_cuda, dscale_cuda);
-    DLIB_TEST_MSG(max(abs(mat(src_grad_cpu) - mat(src_grad_cuda))) < 1e-5,
+    MY_TEST_MSG(max(abs(mat(src_grad_cpu) - mat(src_grad_cuda))) < 1e-5,
         "max(abs(mat(src_grad_cpu) - mat(src_grad_cuda))) < 1e-5");
-    DLIB_TEST_MSG(max(abs(mat(gamma_grad_cpu) - mat(gamma_grad_cuda))) < 1e-5,
+    MY_TEST_MSG(max(abs(mat(gamma_grad_cpu) - mat(gamma_grad_cuda))) < 1e-5,
         "max(abs(mat(gamma_grad_cpu) - mat(gamma_grad_cuda))) < 1e-5");
-    DLIB_TEST_MSG(max(abs(mat(dscale_cpu) - mat(dscale_cuda))) < 1e-5,
+    MY_TEST_MSG(max(abs(mat(dscale_cpu) - mat(dscale_cuda))) < 1e-5,
         "max(abs(mat(dscale_cpu) - mat(dscale_cuda))) < 1e-5");
 #endif
 }
@@ -815,7 +824,7 @@ void test_tril()
 
     // Compare output tensor with expected output
     auto& net_output = layer<tag1>(net).get_output();
-    DLIB_TEST_MSG(max(abs(mat(net_output) - mat(expected_output))) < 1e-5, "tril layer");
+    MY_TEST_MSG(max(abs(mat(net_output) - mat(expected_output))) < 1e-5, "tril layer");
 }
 
 void test_multm_prev()
@@ -862,7 +871,7 @@ void test_multm_prev()
     }
 
     auto& net_output = layer<tag1>(net).get_output();
-    DLIB_TEST_MSG(max(abs(mat(net_output) - mat(expected_output))) < 1e-5, "multm_prev layer");
+    MY_TEST_MSG(max(abs(mat(net_output) - mat(expected_output))) < 1e-5, "multm_prev layer");
 }
 
 void test_softmaxm()
@@ -921,7 +930,7 @@ void test_softmaxm()
 
     // Compare output tensor with expected output
     auto& net_output = layer<tag1>(net).get_output();
-    DLIB_TEST_MSG(max(abs(mat(net_output) - mat(expected_output))) < 1e-5, "softmaxm layer");
+    MY_TEST_MSG(max(abs(mat(net_output) - mat(expected_output))) < 1e-5, "softmaxm layer");
 
     // Compare CPU and CUDA utility functions
     resizable_tensor output_tensor, cpu_grad, gradient_input;
@@ -932,15 +941,15 @@ void test_softmaxm()
     randomize_parameters(gradient_input, nr + nc, rnd);
     cpu::softmax(output_tensor, input_tensor, tt::operation_mode::PLANE_WISE);    
     cpu::softmax_gradient(cpu_grad, output_tensor, gradient_input, tt::operation_mode::PLANE_WISE);
-    DLIB_TEST_MSG(max(abs(mat(output_tensor) - mat(expected_output))) < 1e-5, "softmax (cpu)");
+    MY_TEST_MSG(max(abs(mat(output_tensor) - mat(expected_output))) < 1e-5, "softmax (cpu)");
 #ifdef DLIB_USE_CUDA
     resizable_tensor cuda_grad;
     cuda_grad.copy_size(input_tensor);
     cuda_grad = 0;
     cuda::softmax(output_tensor, input_tensor, tt::operation_mode::PLANE_WISE);
     cpu::softmax_gradient(cuda_grad, output_tensor, gradient_input, tt::operation_mode::PLANE_WISE);
-    DLIB_TEST_MSG(max(abs(mat(output_tensor) - mat(expected_output))) < 1e-5, "softmax (cuda)");
-    DLIB_TEST_MSG(max(abs(mat(cuda_grad) - mat(cpu_grad))) < 1e-5, "softmax_gradient cpu-cuda");
+    MY_TEST_MSG(max(abs(mat(output_tensor) - mat(expected_output))) < 1e-5, "softmax (cuda)");
+    MY_TEST_MSG(max(abs(mat(cuda_grad) - mat(cpu_grad))) < 1e-5, "softmax_gradient cpu-cuda");
 #endif
 }
 
@@ -991,7 +1000,7 @@ void test_linear()
                 output_sample(r, c) = net_output.host()[tensor_index(net_output, i, 0, r, c)];
             }
         }
-        DLIB_TEST_MSG(max(abs(output_sample - expected_outputs[i])) < 1e-5,
+        MY_TEST_MSG(max(abs(output_sample - expected_outputs[i])) < 1e-5,
             "linear layer - sample " + std::to_string(i));
     } 
 }
@@ -1038,7 +1047,7 @@ void test_loss_cross_entropy()
             ++incorrect_predictions;
     }
 
-    DLIB_TEST_MSG(correct_predictions > incorrect_predictions,
+    MY_TEST_MSG(correct_predictions > incorrect_predictions,
         "Predicted labels (" << correct_predictions << ") do not dominate: correct="
         << correct_predictions << ", incorrect=" << incorrect_predictions);
 }
@@ -1051,7 +1060,6 @@ int main(int argc, char* argv[]) {
     long mini_batch_size = 64, iterations_without_progress_threshold = 50000, top_k = 3;
     std::vector<int> gpus = { 0 };
     set_dnn_prefer_fastest_algorithms();
-    compressed_float::disable_compression();    
        
     configure_console();
     std::cout << endl <<
@@ -1105,9 +1113,6 @@ int main(int argc, char* argv[]) {
     } catch (const po::error& e) {
         cerr << "error: " << e.what() << endl;
         return 1;
-    }
-    if (compressed_float::is_compression_enabled()) {
-        cout << "WARNING: BF16 compression is currently enabled - network weights will be stored using reduced precision (16 bits instead of 32 bits)" << endl;
     }
     // Set the signal handler for SIGINT
     signal(SIGINT, signalHandler);
@@ -1201,7 +1206,7 @@ int main(int argc, char* argv[]) {
                         labels.clear();
                     }
                     std::cout << "sequences found in source text: " << found_count << " out of " << total_tests << endl;
-                    DLIB_TEST_MSG(static_cast<double>(found_count) / total_tests > 0.9, "documents class test_0");
+                    MY_TEST_MSG(static_cast<double>(found_count) / total_tests > 0.9, "documents class test_0");
                     data.clear_all();
 
                     data.set_use_letter_tokenization(false);
@@ -1227,7 +1232,7 @@ int main(int argc, char* argv[]) {
                         labels.clear();
                     }
                     std::cout << "sequences found in source text: " << found_count << " out of " << total_tests << endl;
-                    DLIB_TEST_MSG(static_cast<double>(found_count) / total_tests > 0.9, "documents class test_1");
+                    MY_TEST_MSG(static_cast<double>(found_count) / total_tests > 0.9, "documents class test_1");
                     data.clear_all();
                 }
             }
@@ -1240,7 +1245,7 @@ int main(int argc, char* argv[]) {
             {
                 transpose_ l;
                 auto res = test_layer(l);
-                DLIB_TEST_MSG(res, " transpose test_0 layer\n" + res);
+                MY_TEST_MSG(res, " transpose test_0 layer\n" + res);
             }
         }        
 
@@ -1251,17 +1256,17 @@ int main(int argc, char* argv[]) {
             {
                 tril_<0, neg_infinity_tag> l;
                 auto res = test_layer(l);
-                DLIB_TEST_MSG(res, " tril test_0 layer\n" + res);
+                MY_TEST_MSG(res, " tril test_0 layer\n" + res);
             }
             {
                 tril_<3, zero_tag> l;
                 auto res = test_layer(l);
-                DLIB_TEST_MSG(res, " tril test_1 layer\n" + res);
+                MY_TEST_MSG(res, " tril test_1 layer\n" + res);
             }
             {
                 tril_<-5, void, 1, 2> l;
                 auto res = test_layer(l);
-                DLIB_TEST_MSG(res, " tril test_2 layer\n" + res);
+                MY_TEST_MSG(res, " tril test_2 layer\n" + res);
             }
         }
 
@@ -1272,7 +1277,7 @@ int main(int argc, char* argv[]) {
             {
                 positional_encodings_ l;
                 auto res = test_layer(l);
-                DLIB_TEST_MSG(res, " positional_encodings test layer\n" + res);
+                MY_TEST_MSG(res, " positional_encodings test layer\n" + res);
             }
         }
 
@@ -1283,7 +1288,7 @@ int main(int argc, char* argv[]) {
             {
                 embeddings_<7, 12> l;
                 auto res = test_layer(l);
-                DLIB_TEST_MSG(res, " embeddings test layer\n" + res);
+                MY_TEST_MSG(res, " embeddings test layer\n" + res);
             }
         }
 
@@ -1298,14 +1303,14 @@ int main(int argc, char* argv[]) {
             if (display_debug_info) cout << "\ntest: softmax layer\n";
             test_softmaxm();
             {
-                softmax2_< static_cast<unsigned long>(tt::operation_mode::CHANNEL_WISE)> l;
+                softmax2_<static_cast<unsigned long>(tt::operation_mode::CHANNEL_WISE)> l;
                 auto res = test_layer(l);
-                DLIB_TEST_MSG(res, " softmaxm test_0 layer\n" + res);
+                MY_TEST_MSG(res, " softmaxm test_0 layer\n" + res);
             }
             {
-                softmax2_< static_cast<unsigned long>(tt::operation_mode::PLANE_WISE)> l;
+                softmax2_<static_cast<unsigned long>(tt::operation_mode::PLANE_WISE)> l;
                 auto res = test_layer(l);
-                DLIB_TEST_MSG(res, " softmaxm test_1 layer\n" + res);
+                MY_TEST_MSG(res, " softmaxm test_1 layer\n" + res);
             }
         }
 
@@ -1420,7 +1425,7 @@ int main(int argc, char* argv[]) {
                 // Compare output tensor with expected output
                 auto& net_output = layer<tag10>(net).get_output();
                 if (display_debug_info) DBG_INFO("net_output (Z): ", net_output, true);
-                DLIB_TEST_MSG(max(abs(mat(net_output) - Z)) < 1e-5, "attention mechanism");
+                MY_TEST_MSG(max(abs(mat(net_output) - Z)) < 1e-5, "attention mechanism");
             }
         }
 
@@ -1431,12 +1436,12 @@ int main(int argc, char* argv[]) {
             {
                 linear_<4, LINEAR_NO_BIAS> l;
                 auto res = test_layer(l);
-                DLIB_TEST_MSG(res, " linear test_0 layer\n" + res);
+                MY_TEST_MSG(res, " linear test_0 layer\n" + res);
             }
             {
                 linear_<3, LINEAR_HAS_BIAS> l;
                 auto res = test_layer(l);
-                DLIB_TEST_MSG(res, " linear test_1 layer\n" + res);
+                MY_TEST_MSG(res, " linear test_1 layer\n" + res);
             }
         }
 
@@ -1447,7 +1452,7 @@ int main(int argc, char* argv[]) {
             {
                 hstack_ l;
                 auto res = test_layer(l);
-                DLIB_TEST_MSG(res, " hsplit/hstack layers\n" + res);
+                MY_TEST_MSG(res, " hsplit/hstack layers\n" + res);
             }
         }
 
@@ -1459,7 +1464,7 @@ int main(int argc, char* argv[]) {
                 {
                     rms_norm_ l;
                     auto res = test_layer(l);
-                    DLIB_TEST_MSG(res, " RMS normalize layer" + res);
+                    MY_TEST_MSG(res, " RMS normalize layer" + res);
                 }
             }
         }
@@ -1506,8 +1511,8 @@ int main(int argc, char* argv[]) {
                 label_batches.push_back(batch_labels);
             }
 
-            using train_net_a = transformer::classification_head<gelu, num_classes, embedding_dim,
-                transformer::def::transformer_block<gelu, transformer::dropout_10, embedding_dim, num_heads,
+            using train_net_a = transformer::classification_head<true, gelu, num_classes, embedding_dim,
+                transformer::def::transformer_block<gelu, transformer::dropout_10, max_seq_len, embedding_dim, num_heads,
                 transformer::positional_embeddings<num_classes, embedding_dim,
                 input<matrix<int, 0, 1>>>>>;
 
@@ -1545,7 +1550,7 @@ int main(int argc, char* argv[]) {
             int num_correct_a = 0;
             for (size_t i = 0; i < labels.size(); ++i) if (predicted_labels_a[i] == labels[i]) ++num_correct_a;
             double accuracy_a = static_cast<double>(num_correct_a) / labels.size();
-            DLIB_TEST_MSG(accuracy_a > 0.9, "multihead attention model (accuracy: " + to_string(accuracy_a) + ") - right: " + \
+            MY_TEST_MSG(accuracy_a > 0.9, "multihead attention model (accuracy: " + to_string(accuracy_a) + ") - right: " + \
                 to_string(num_correct_a) + " - wrong: " + to_string(labels.size() - num_correct_a));
         }
 
@@ -1555,10 +1560,10 @@ int main(int argc, char* argv[]) {
             if (display_debug_info) cout << "\ntest: test: \"shakespeare\" example\n";                        
             {
                 mini_batch_size = 64;
-                const long num_layers = 1;
+                const long num_layers = 2;
                 const long num_heads = 4;
-                const long embedding_dim = 128;
-                const long max_seq_len = 28;
+                const long embedding_dim = 64;
+                const long max_seq_len = 48;
                 const long num_classes = 256;
                 const long num_epochs = 3000;
                 using net_type = transformer::transformer_config<num_classes, num_layers, num_heads, embedding_dim, max_seq_len>;
@@ -1572,7 +1577,7 @@ int main(int argc, char* argv[]) {
                 data_b.generate_samples(1, samples, labels, false);                
                 size_t num_samples = (data_b.get_total_presamples() / mini_batch_size) * mini_batch_size, step = 0;
                 size_t num_batches = num_samples / mini_batch_size;                
-                // Display LLM parameters
+                // Display SLM parameters
                 cout << net_type::model_info::describe() << endl;
                 cout << "batch size: " << mini_batch_size << endl;
                 cout << "number of generated samples: " << num_samples << endl;
@@ -1599,7 +1604,7 @@ int main(int argc, char* argv[]) {
                     }
                 };                
 
-                if (!fs::exists("llm_shakespeare_model_a.dat")) {
+                if (!fs::exists("slm_shakespeare_fp32_pre_v1.dat")) {
                     using train_net = net_type::network_type<true>;
                     train_net net_b;
                     dnn_trainer<train_net, adam> trainer_b(net_b, adam(weight_decay, beta1, beta2), gpus);
@@ -1642,11 +1647,11 @@ int main(int argc, char* argv[]) {
                     data_loader2.join();
                     trainer_b.get_net();
                     net_b.clean();
-                    serialize("llm_shakespeare_model_a.dat") << net_b;
-                    cout << "shakespeare model saved: llm_shakespeare_model_a.dat" << endl;
+                    serialize("slm_shakespeare_fp32_pre_v1.dat") << net_b;
+                    cout << "shakespeare model saved: slm_shakespeare_fp32_pre_v1.dat" << endl;
                     cout << "shakespeare model parameters: " << count_parameters(net_b) << endl;
                     
-                    deserialize("llm_shakespeare_model_a.dat") >> net_b;
+                    deserialize("slm_shakespeare_fp32_pre_v1.dat") >> net_b;
                     visit_computational_layers(net_b, [](dropout_& l) { l = dropout_(0.0f); });
                     size_t num_correct_b = 0;
                     std::vector<unsigned long> predicted_labels_b = net_b(samples);
@@ -1656,7 +1661,7 @@ int main(int argc, char* argv[]) {
                         else error_indices.push_back(i);
                     }
                     double accuracy_b = static_cast<double>(num_correct_b) / labels.size();
-                    DLIB_TEST_MSG(accuracy_b > 0.9, "shakespeare model (accuracy: " + to_string(accuracy_b) + ") - right: " + \
+                    MY_TEST_MSG(accuracy_b > 0.9, "shakespeare model (accuracy: " + to_string(accuracy_b) + ") - right: " + \
                         to_string(num_correct_b) + " - wrong: " + to_string(labels.size() - num_correct_b));
                     if (!error_indices.empty()) {
                         cout << "classification error for some sequences:" << endl;
@@ -1668,10 +1673,10 @@ int main(int argc, char* argv[]) {
                 }
 
                 // Predict the next sequence of characters
-                if (fs::exists("llm_shakespeare_model_a.dat")) {
+                if (fs::exists("slm_shakespeare_fp32_pre_v1.dat")) {
                     using inference_net = net_type::network_type<false>;
                     inference_net net_b;
-                    deserialize("llm_shakespeare_model_a.dat") >> net_b;
+                    deserialize("slm_shakespeare_fp32_pre_v1.dat") >> net_b;
                     std::string extracted_sequence = input_sequence.substr(input_sequence.length() - max_seq_len);
                     dlib::matrix<int, 0, 1> input_tokens;
                     input_tokens.set_size(max_seq_len);
@@ -1699,7 +1704,7 @@ int main(int argc, char* argv[]) {
                     
                     {
                         // Extract latent vectors
-                        resizable_tensor o_tensor = layer<2>(net_b).get_output();
+                        /*resizable_tensor o_tensor = layer<2>(net_b).get_output();
                         const size_t num_samples = o_tensor.num_samples();
                         const size_t num_channels = o_tensor.k();
                         const size_t plane_size = o_tensor.nr() * o_tensor.nc();
@@ -1723,7 +1728,7 @@ int main(int argc, char* argv[]) {
                                 for (size_t i = 0; i < v.size(); ++i) cout << v[i] << " ";
                             }
                             cout << endl;
-                        }
+                        }*/
                     }
                 }
 
@@ -1737,16 +1742,16 @@ int main(int argc, char* argv[]) {
                     trainer_c.set_min_learning_rate(min_learning_rate);
                     trainer_c.set_learning_rate_shrink_factor(0.1);
                     trainer_c.set_mini_batch_size(mini_batch_size);
-                    trainer_c.set_iterations_without_progress_threshold(50000);
+                    trainer_c.set_iterations_without_progress_threshold(200000);
 
                     // Reload previous model                    
-                    if (!fs::exists("llm_shakespeare_fp32_v1.dat") && fs::exists("llm_shakespeare_model_a.dat")) {
-                        deserialize("llm_shakespeare_model_a.dat") >> net_b;
-                        cout << "shakespeare model loaded (source template): llm_shakespeare_model_a.dat" << endl;
+                    if (!fs::exists("slm_shakespeare_fp32_v1.dat") && fs::exists("slm_shakespeare_fp32_pre_v1.dat")) {
+                        deserialize("slm_shakespeare_fp32_pre_v1.dat") >> net_b;
+                        cout << "shakespeare model loaded (source template): slm_shakespeare_fp32_pre_v1.dat" << endl;
                     }
-                    else if (fs::exists("llm_shakespeare_fp32_v1.dat")) {
-                        deserialize("llm_shakespeare_fp32_v1.dat") >> net_b;
-                        cout << "shakespeare model loaded: llm_shakespeare_fp32_v1.dat" << endl;
+                    else if (fs::exists("slm_shakespeare_fp32_v1.dat")) {
+                        deserialize("slm_shakespeare_fp32_v1.dat") >> net_b;
+                        cout << "shakespeare model loaded: slm_shakespeare_fp32_v1.dat" << endl;
                     }
                     else {
                         cout << "no previous model found, starting from scratch" << endl;
@@ -1803,8 +1808,8 @@ int main(int argc, char* argv[]) {
                     // Save the new model
                     trainer_c.get_net();
                     net_b.clean();
-                    serialize("llm_shakespeare_fp32_v1.dat") << net_b;
-                    cout << "advanced shakespeare model saved: llm_shakespeare_fp32_v1.dat" << endl;
+                    serialize("slm_shakespeare_fp32_v1.dat") << net_b;
+                    cout << "advanced shakespeare model saved: slm_shakespeare_fp32_v1.dat" << endl;
                     cout << "advanced shakespeare model parameters: " << count_parameters(net_b) << endl;                    
 
                     // Test partially the new model
@@ -1818,7 +1823,7 @@ int main(int argc, char* argv[]) {
                         else error_indices.push_back(i);
                     }
                     double accuracy_b = static_cast<double>(num_correct_b) / predicted_labels.size();
-                    DLIB_TEST_MSG(accuracy_b > 0.9, "advanced shakespeare model (accuracy: " + to_string(accuracy_b) + ") - right: " + \
+                    MY_TEST_MSG(accuracy_b > 0.9, "advanced shakespeare model (accuracy: " + to_string(accuracy_b) + ") - right: " + \
                         to_string(num_correct_b) + " - wrong: " + to_string(predicted_labels.size() - num_correct_b));
 
                     // Attempting to generate a new sonnet                    
@@ -1867,7 +1872,7 @@ int main(int argc, char* argv[]) {
                         if (generated_sonnet.find(keyword) != string::npos) keyword_count++;
                     }
                     double relevance_score = static_cast<double>(keyword_count) / keywords.size();
-                    DLIB_TEST_MSG(relevance_score > 0.3, "shakespeare model relevance (score: " + to_string(relevance_score) + ")");
+                    MY_TEST_MSG(relevance_score > 0.3, "shakespeare model relevance (score: " + to_string(relevance_score) + ")");
                 }
                 else {
                     cout << "error: shakespeare.txt file not found in the current directory" << endl;
@@ -1915,7 +1920,7 @@ int main(int argc, char* argv[]) {
             concatenate_files(corpus_dir);
             return 1;
         }*/
-        std::vector<int> vocab_sizes = { 2000 };
+        std::vector<int> vocab_sizes = { 50000 };
         string corpus_files;
 
         for (const auto& entry : fs::recursive_directory_iterator(corpus_dir)) {
@@ -1932,16 +1937,17 @@ int main(int argc, char* argv[]) {
             else if (vocab_size == 4000) size_suffix = "4k";
             else if (vocab_size == 6000) size_suffix = "6k";
             else if (vocab_size == 8000) size_suffix = "8k";
-            else if (vocab_size == 10000) size_suffix = "10k";            
-            string current_vocabulary_prefix = "ernie.en.bpe." + size_suffix;
-            //string current_vocabulary_prefix = "ernie.en-fr.ung." + size_suffix;
+            else if (vocab_size == 10000) size_suffix = "10k";
+            else if (vocab_size == 25000) size_suffix = "25k";
+            else if (vocab_size == 50000) size_suffix = "50k";
+            string current_vocabulary_prefix = "ernie.en-fr.ung." + size_suffix;
 
             string train_args = "--input=" + corpus_files +
                 " --model_prefix=" + current_vocabulary_prefix +
                 " --bos_id=" + to_string(bos_id) + " --eos_id=" + to_string(eos_id) +
                 " --unk_id=" + to_string(unk_id) + " --pad_id=" + to_string(pad_id) +
                 " --user_defined_symbols=\"<rn>\"" +
-                " --model_type=bpe" +
+                " --model_type=unigram" +
                 " --character_coverage=1.0" +
                 " --max_sentence_length=16768" +
                 " --split_by_unicode_script=false" +
@@ -2072,7 +2078,7 @@ int main(int argc, char* argv[]) {
                 else error_indices.push_back(i);
             }
             double accuracy_b = static_cast<double>(num_correct) / predicted_labels.size();
-            DLIB_TEST_MSG(accuracy_b > 0.9, "model (accuracy: " + to_string(accuracy_b) + ") - right: " + \
+            MY_TEST_MSG(accuracy_b > 0.9, "model (accuracy: " + to_string(accuracy_b) + ") - right: " + \
                 to_string(num_correct) + " - wrong: " + to_string(predicted_labels.size() - num_correct));
         }
     } else if (model_prompting) {
