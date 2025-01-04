@@ -210,8 +210,8 @@ int main(int argc, char** argv)
             trainer.set_learning_rate(learning_rate);
             trainer.set_min_learning_rate(1e-6);
             trainer.set_mini_batch_size(batch_size);
-            trainer.set_iterations_without_progress_threshold(6000);
-            trainer.set_max_num_epochs(150);
+            trainer.set_iterations_without_progress_threshold(8000);
+            trainer.set_max_num_epochs(250);
             trainer.be_verbose();
 
             // 5) Train
