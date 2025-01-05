@@ -65,6 +65,28 @@ static std::vector<int> char_based_tokenize(const std::string& text)
     return tokens;
 }
 
+// Function to shuffle samples and labels in sync
+void shuffle_samples_and_labels(std::vector<dlib::matrix<int, 0, 1>>& samples, std::vector<unsigned long>& labels) {
+    std::vector<size_t> indices(samples.size());
+    std::iota(indices.begin(), indices.end(), 0); // Fill with 0, 1, 2, ..., N-1
+    std::shuffle(indices.begin(), indices.end(), std::default_random_engine{});
+
+    // Create temporary vectors to hold shuffled data
+    std::vector<dlib::matrix<int, 0, 1>> shuffled_samples(samples.size());
+    std::vector<unsigned long> shuffled_labels(labels.size());
+
+    // Apply the shuffle
+    for (size_t i = 0; i < indices.size(); ++i)
+    {
+        shuffled_samples[i] = samples[indices[i]];
+        shuffled_labels[i] = labels[indices[i]];
+    }
+
+    // Replace the original data with shuffled data
+    samples = std::move(shuffled_samples);
+    labels = std::move(shuffled_labels);
+}
+
 // ----------------------------------------------------------------------------------------
 
 int main(int argc, char** argv)
@@ -76,11 +98,12 @@ int main(int argc, char** argv)
         parser.add_option("generate", "Generate text from a previously trained model (needs shakespeare_prompt).");
         parser.add_option("learning-rate", "Set the learning rate for training (default: 1e-4).", 1);
         parser.add_option("batch-size", "Set the mini-batch size for training (default: 64).", 1);
-        parser.add_option("generation-length", "Set the length of generated text (default: 300).", 1);
+        parser.add_option("generation-length", "Set the length of generated text (default: 200).", 1);
         parser.add_option("alpha", "Set the initial learning rate for Adam optimizer (default: 0.004).", 1);
         parser.add_option("beta1", "Set the decay rate for the first moment estimate (default: 0.9).", 1);
         parser.add_option("beta2", "Set the decay rate for the second moment estimate (default: 0.999).", 1);
-        parser.add_option("max-samples", "Set the maximum number of training samples (default: 150000).", 1);
+        parser.add_option("max-samples", "Set the maximum number of training samples (default: 50000).", 1);
+        parser.add_option("shuffle", "Shuffle training sequences and labels before training (default: false).");
         parser.parse(argc, argv);
 
         if (parser.number_of_arguments() == 0 && !parser.option("train") && !parser.option("generate"))
@@ -90,22 +113,23 @@ int main(int argc, char** argv)
                 << "  --generate : Generate text from a trained model using a prompt.\n"
                 << "  --learning-rate <value> : Set the learning rate for training (default: 1e-4).\n"
                 << "  --batch-size <value>    : Set the mini-batch size for training (default: 64).\n"
-                << "  --generation-length <value> : Set the length of generated text (default: 300).\n"
+                << "  --generation-length <value> : Set the length of generated text (default: 200).\n"
                 << "  --alpha <value>        : Set the initial learning rate for Adam optimizer (default: 0.004).\n"
                 << "  --beta1 <value>        : Set the decay rate for the first moment estimate (default: 0.9).\n"
                 << "  --beta2 <value>        : Set the decay rate for the second moment estimate (default: 0.999).\n"
-                << "  --max-samples <value>  : Set the maximum number of training samples (default: 150000).\n";
+                << "  --max-samples <value>  : Set the maximum number of training samples (default: 50000).\n"
+                << "  --shuffle              : Shuffle training sequences and labels before training (default: false).\n";
             return 0;
         }
 
         // Default values
         double learning_rate = 1e-4;
         long batch_size = 64;
-        int generation_length = 300;
-        double alpha = 0.003; // Initial learning rate for Adam
-        double beta1 = 0.9;   // Decay rate for the first moment estimate
-        double beta2 = 0.999; // Decay rate for the second moment estimate
-        size_t max_samples = 150000; // Default maximum number of training samples
+        int generation_length = 200;
+        double alpha = 0.003;       // Initial learning rate for Adam
+        double beta1 = 0.9;         // Decay rate for the first moment estimate
+        double beta2 = 0.999;       // Decay rate for the second moment estimate
+        size_t max_samples = 50000; // Default maximum number of training samples
 
         // Override defaults if options are provided
         if (parser.option("learning-rate"))
@@ -199,6 +223,13 @@ int main(int argc, char** argv)
                 labels.push_back(full_tokens[start + max_seq_len]);
             }
 
+            // Shuffle samples and labels if the --shuffle option is enabled
+            if (parser.option("shuffle"))
+            {
+                std::cout << "Shuffling training sequences and labels...\n";
+                shuffle_samples_and_labels(samples, labels);
+            }
+
             // 3) Construct the network in training mode
             using net_type = my_transformer_cfg::network_type<true>;
             net_type net;
@@ -211,7 +242,7 @@ int main(int argc, char** argv)
             trainer.set_min_learning_rate(1e-6);
             trainer.set_mini_batch_size(batch_size);
             trainer.set_iterations_without_progress_threshold(15000);
-            trainer.set_max_num_epochs(400);
+            trainer.set_max_num_epochs(350);
             trainer.be_verbose();
 
             // 5) Train
