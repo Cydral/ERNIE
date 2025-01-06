@@ -15,4 +15,4 @@ The model is intentionally kept small to ensure simplicity and efficiency, makin
 
 - **`slm_defs.h`**: Contains the Transformer model definitions, including the configuration, network type, and other necessary components.
 - **`slm_data.h`**: Contains the training text (`shakespeare_text`) and the initial prompt (`shakespeare_prompt`) for text generation.
-- **`slm_transformer_train_ex.cpp`**: The main program that implements the training and text generation logic.
+- **`slm_basic_train_ex.cpp`**: The main program that implements the training and text generation logic.
