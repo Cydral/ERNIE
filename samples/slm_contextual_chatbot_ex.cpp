@@ -572,7 +572,7 @@ int main(int argc, char** argv) {
             // 2) Construct the network in training mode
             using net_type = my_transformer_cfg::network_type<true>;
             net_type net;
-            if (dlib::file_exists(model_file)) {
+            if (!dlib::file_exists(checkpoint_file) && dlib::file_exists(model_file)) {
                 std::cout << "Loading existing model...";
                 dlib::deserialize(model_file) >> net;
                 std::cout << " done\n";
@@ -615,7 +615,7 @@ int main(int argc, char** argv) {
             // 1) Load the trained model
             using net_infer = my_transformer_cfg::network_type<false>;
             net_infer net;
-            if (!dlib::file_exists(checkpoint_file) && dlib::file_exists(model_file)) {
+            if (dlib::file_exists(model_file)) {
                 dlib::deserialize(model_file) >> net;
                 std::cout << "Loaded model from " << model_file << "\n";
             } else {
