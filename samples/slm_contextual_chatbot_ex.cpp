@@ -521,8 +521,7 @@ int main(int argc, char** argv) {
         // ----------------------------------------------------------------------------------------
         // Train mode
         // ----------------------------------------------------------------------------------------
-        if (parser.option("train"))
-        {
+        if (parser.option("train")) {
             std::cout << "=== TRAIN MODE ===\n";
 
             // Load data from the specified file or directory
@@ -555,8 +554,7 @@ int main(int argc, char** argv) {
 
             // Let's create a training set of about (N) samples from the text
             const size_t N = max_sequences; // Use all available sequences
-            for (size_t start = 0; start < N; ++start)
-            {
+            for (size_t start = 0; start < N; ++start) {
                 dlib::matrix<int, 0, 1> seq(max_seq_len, 1);
                 for (long t = 0; t < max_seq_len; ++t)
                     seq(t, 0) = full_tokens[start + t];
@@ -565,8 +563,7 @@ int main(int argc, char** argv) {
             }
 
             // Shuffle samples and labels if the --shuffle option is enabled
-            if (parser.option("shuffle"))
-            {
+            if (parser.option("shuffle")) {
                 std::cout << "Shuffling training sequences and labels...";
                 shuffle_samples_and_labels(samples, labels);
                 std::cout << " done\n";
@@ -575,8 +572,7 @@ int main(int argc, char** argv) {
             // 2) Construct the network in training mode
             using net_type = my_transformer_cfg::network_type<true>;
             net_type net;
-            if (dlib::file_exists(model_file))
-            {
+            if (dlib::file_exists(model_file)) {
                 std::cout << "Loading existing model...";
                 dlib::deserialize(model_file) >> net;
                 std::cout << " done\n";
@@ -613,20 +609,16 @@ int main(int argc, char** argv) {
         // ----------------------------------------------------------------------------------------
         // Chatbot mode
         // ----------------------------------------------------------------------------------------
-        if (parser.option("chatbot"))
-        {
+        if (parser.option("chatbot")) {
             std::cout << "=== CHATBOT MODE ===\n";
 
             // 1) Load the trained model
             using net_infer = my_transformer_cfg::network_type<false>;
             net_infer net;
-            if (dlib::file_exists(model_file))
-            {
+            if (!dlib::file_exists(checkpoint_file) && dlib::file_exists(model_file)) {
                 dlib::deserialize(model_file) >> net;
                 std::cout << "Loaded model from " << model_file << "\n";
-            }
-            else
-            {
+            } else {
                 std::cerr << "Error: model file not found. Please run --train first.\n";
                 return 0;
             }
@@ -638,15 +630,13 @@ int main(int argc, char** argv) {
 
             // 3) Conversation loop
             std::string user_input;
-            while (true)
-            {
+            while (true) {
                 // Prompt the user for input
                 std::cout << "You: ";
                 std::getline(std::cin, user_input);
 
                 // Exit if the user types "bye"
-                if (user_input == "bye")
-                {
+                if (user_input == "bye") {
                     std::cout << "Chatbot: Goodbye!\n";
                     break;
                 }
@@ -657,14 +647,11 @@ int main(int argc, char** argv) {
 
                 // Truncate the conversation history to fit within max_seq_len
                 if (conversation_tokens.size() > (size_t)max_seq_len)
-                {
                     conversation_tokens.erase(conversation_tokens.begin(), conversation_tokens.end() - max_seq_len);
-                }
 
                 // Create a dlib matrix for the model input
                 dlib::matrix<int, 0, 1> input_seq(max_seq_len, 1);
-                for (long i = 0; i < max_seq_len; ++i)
-                {
+                for (long i = 0; i < max_seq_len; ++i) {
                     if ((size_t)i < conversation_tokens.size())
                         input_seq(i, 0) = conversation_tokens[i];
                     else
@@ -678,8 +665,7 @@ int main(int argc, char** argv) {
                 const size_t max_response_length = max_seq_len / 2;    // Maximum response length = half of context window
                 size_t response_length = 0;
 
-                while (!stop_generation)
-                {
+                while (!stop_generation) {
                     unsigned long next_token = net(input_seq); // Single inference
 
                     // Decode the token to a string
@@ -693,8 +679,7 @@ int main(int argc, char** argv) {
                     input_seq(max_seq_len - 1, 0) = (int)next_token;
 
                     // Check for stopping conditions
-                    if (response_length >= min_response_length)
-                    {
+                    if (response_length >= min_response_length) {
                         // Stop if a sentence-ending punctuation mark is encountered
                         if (next_word.find_first_of(".!?") != std::string::npos)
                             stop_generation = true;
@@ -714,16 +699,13 @@ int main(int argc, char** argv) {
 
                 // Truncate the conversation history again to fit within max_seq_len
                 if (conversation_tokens.size() > (size_t)max_seq_len)
-                {
                     conversation_tokens.erase(conversation_tokens.begin(), conversation_tokens.end() - max_seq_len);
-                }
             }
         }
 
         return 0;
     }
-    catch (std::exception& e)
-    {
+    catch (std::exception& e) {
         std::cerr << "Exception thrown: " << e.what() << std::endl;
         return 1;
     }
