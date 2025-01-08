@@ -416,7 +416,7 @@ int main(int argc, char** argv) {
         parser.add_option("data", "Specify a file or directory containing the training data", 1);
         parser.add_option("learning-rate", "Set the learning rate for training (default: 1e-4)", 1);
         parser.add_option("batch-size", "Set the mini-batch size for training (default: 64)", 1);
-        parser.add_option("max-epochs", "Set the maximum number of training epochs (default: 100)", 1);
+        parser.add_option("max-epochs", "Set the maximum number of training epochs (default: 50)", 1);
         parser.add_option("iterations-threshold", "Set the iterations without progress threshold (default: 5000)", 1);
         parser.add_option("min-learning-rate", "Set the minimum learning rate (default: 1e-6)", 1);
         parser.add_option("shuffle", "Shuffle training sequences and labels before training (default: false)");
@@ -432,7 +432,7 @@ int main(int argc, char** argv) {
                 << "  --data <path>    : Specify a file or directory containing the training data\n"
                 << "  --learning-rate <value> : Set the learning rate for training (default: 1e-4)\n"
                 << "  --batch-size <value>    : Set the mini-batch size for training (default: 64)\n"
-                << "  --max-epochs <value>    : Set the maximum number of training epochs (default: 100)\n"
+                << "  --max-epochs <value>    : Set the maximum number of training epochs (default: 50)\n"
                 << "  --iterations-threshold <value> : Set the iterations without progress threshold (default: 5000)\n"
                 << "  --min-learning-rate <value> : Set the minimum learning rate (default: 1e-6)\n"
                 << "  --shuffle               : Shuffle training sequences and labels before training (default: false)\n";
@@ -476,7 +476,7 @@ int main(int argc, char** argv) {
         // Default values
         double learning_rate = 1e-4;
         long batch_size = 64;
-        int max_epochs = 100;
+        int max_epochs = 50;
         int iterations_threshold = 5000;
         double min_learning_rate = 1e-6;
 
@@ -514,8 +514,9 @@ int main(int argc, char** argv) {
         // For GPU usage (if any), set gpus = {0} for a single GPU, etc.
         std::vector<int> gpus{ 0 };
 
-        // The model file to store or load
+        // The model file to store or load (and the checkpoint)
         const std::string model_file = "lm_tiktoken_50k_fp32_model.dat";
+        const std::string checkpoint_file = "checkpoint.dat";
 
         // ----------------------------------------------------------------------------------------
         // Train mode
@@ -588,6 +589,7 @@ int main(int argc, char** argv) {
             trainer.set_mini_batch_size(batch_size);
             trainer.set_iterations_without_progress_threshold(iterations_threshold);
             trainer.set_max_num_epochs(max_epochs);
+            trainer.set_synchronization_file(checkpoint_file, std::chrono::minutes(5));
             trainer.be_verbose();
 
             // 4) Train
