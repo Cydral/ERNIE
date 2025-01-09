@@ -327,6 +327,9 @@ public:
     // Get the ID of the padding token
     int get_pad_token_id() const { return pad_token_id_; }
 
+    // Get the ID of the unknown token
+    int get_unknown_token_id() const { return unknown_token_id_; }
+
 private:
     // Decode a base64 string to a string
     static std::string base64_decode(const std::string& base64_str) {
@@ -354,31 +357,86 @@ private:
 
 // ----------------------------------------------------------------------------------------
 
-std::string load_data_from_file_or_directory(const std::string& path) {
+dlib::matrix<int, 0, 1> create_sample_with_unknown_tokens(const dlib::matrix<int, 0, 1>& o_sample, int num_unknown_tokens, int unknown_token_id) {
+    dlib::matrix<int, 0, 1> new_sample = o_sample;
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<> dis(0, o_sample.size() - 1);
+
+    for (int i = 0; i < num_unknown_tokens; ++i)
+        new_sample(dis(gen)) = unknown_token_id;
+
+    return new_sample;
+}
+
+// ----------------------------------------------------------------------------------------
+
+std::pair<dlib::matrix<int, 0, 1>, int> create_reduced_sample(const dlib::matrix<int, 0, 1>& o_sample, int padding_token_id, double reduction_ratio) {
+    int new_length = o_sample.size() * (1 - reduction_ratio);
+    dlib::matrix<int, 0, 1> new_sample = o_sample;
+
+    for (int i = new_length; i < o_sample.size(); ++i)
+        new_sample(i) = padding_token_id;
+
+    return { new_sample, o_sample(new_length) };
+}
+
+// ----------------------------------------------------------------------------------------
+
+std::string load_data_from_file_or_directory(const std::string& path, size_t max_size = 50 * 1024 * 1024) {
     std::string data;
+    size_t total_size = 0;
+    bool max_size_reached = false;
+    const size_t buffer_size = 16 * 1024;
+
+    auto process_file = [&](const std::string& file_path) {
+        std::ifstream input(file_path, std::ios::binary);
+        if (input.is_open()) {
+            std::cout << "Loading file: " << file_path << std::endl;
+
+            std::vector<char> buffer(buffer_size);
+            bool first_chunk = true;
+
+            while (input.read(buffer.data(), buffer_size) || input.gcount() > 0) {
+                size_t bytes_read = input.gcount();
+
+                if (!max_size_reached) {
+                    size_t remaining_space = max_size - total_size;
+                    size_t bytes_to_add = std::min(remaining_space, bytes_read);
+
+                    if (bytes_to_add > 0) {
+                        if (!first_chunk && !data.empty()) data += "\n\n";
+                        data.append(buffer.data(), bytes_to_add);
+                        total_size += bytes_to_add;
+                        first_chunk = false;
+                    }
+
+                    if (total_size >= max_size) {
+                        max_size_reached = true;
+                        std::cout << "Max size limit reached. Further content will be ignored." << std::endl;
+                        break;
+                    }
+                }
+                else {
+                    break;  // No need to continue reading if max size is reached
+                }
+            }
+        }
+        };
 
     try {
         dlib::directory dir(path);
         std::vector<dlib::file> files = dir.get_files();
         for (const auto& file : files) {
-            std::ifstream input(file.full_name());
-            if (input.is_open()) {
-                std::cout << "Loading file: " << file.full_name() << std::endl;
-                std::string content((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
-                if (!data.empty()) data += "\n\n";
-                data += content;
-            }            
+            if (max_size_reached) break;
+            process_file(file.full_name());
         }
     }
     catch (const dlib::directory::dir_not_found) {
-        dlib::file file(path);
-        std::ifstream input(file.full_name());
-        if (input.is_open()) {
-            std::cout << "Loading file: " << file.full_name() << std::endl;
-            data.assign((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
-        }            
+        process_file(path);
     }
-        
+
+    std::cout << "Total data size: " << total_size << " bytes" << std::endl;
     return data;
 }
 
@@ -494,10 +552,10 @@ int main(int argc, char** argv) {
 
         // Minimal configiguration for our Transformer mmodel
         const long vocab_size = VOCAB_SIZE;
-        const long num_layers = 6;
-        const long num_heads = 4;
-        const long embedding_dim = 64;
-        const long max_seq_len = 200;
+        const long num_layers = 4;
+        const long num_heads = 8;
+        const long embedding_dim = 96;
+        const long max_seq_len = 100;
         const bool use_squeezing = false;
 
         using my_transformer_cfg = transformer::transformer_config<
@@ -543,7 +601,7 @@ int main(int argc, char** argv) {
                 : 0;
 
             // Display the size of the training text and the number of sequences
-            std::cout << "Training text size: " << full_tokens.size() << " tokens\n";
+            std::cout << "Training model on " << full_tokens.size() << " tokens\n";
             std::cout << "Maximum number of sequences: " << max_sequences << "\n";
 
             // Check if the text is too short
@@ -552,22 +610,55 @@ int main(int argc, char** argv) {
             std::vector<dlib::matrix<int, 0, 1>> samples;
             std::vector<unsigned long> labels;
 
-            // Let's create a training set of about (N) samples from the text
-            const size_t N = max_sequences; // Use all available sequences
-            for (size_t start = 0; start < N; ++start) {
+            // Let's create a training set of about (N) samples from the data
+            for (size_t start = 0; start < max_sequences; ++start) {
                 dlib::matrix<int, 0, 1> seq(max_seq_len, 1);
-                for (long t = 0; t < max_seq_len; ++t)
-                    seq(t, 0) = full_tokens[start + t];
+                for (long t = 0; t < max_seq_len; ++t) seq(t, 0) = full_tokens[start + t];
                 samples.push_back(seq);
                 labels.push_back(full_tokens[start + max_seq_len]);
             }
 
-            // Shuffle samples and labels if the --shuffle option is enabled
-            if (parser.option("shuffle")) {
-                std::cout << "Shuffling training sequences and labels...";
-                shuffle_samples_and_labels(samples, labels);
-                std::cout << " done\n";
+            // Calculate the number of additional samples (15% of the original dataset)
+            size_t additional_samples = max_sequences * 0.15;
+
+            // Initialize random number generation
+            std::random_device rd;
+            std::mt19937 gen(rd());
+
+            // Define distributions for random sampling
+            std::uniform_int_distribution<> dis_sample(0, samples.size() - 1);  // For selecting original samples
+            std::uniform_int_distribution<> dis_unknown(1, 3);  // For selecting number of unknown tokens (1 to 3)
+            std::uniform_real_distribution<> dis_reduction(0.05, 0.4);  // For selecting reduction ratio (5% to 40%)
+
+            // Generate additional samples
+            for (size_t i = 0; i < additional_samples; ++i) {
+                // Randomly select an original sample
+                int o_index = dis_sample(gen);
+                if (i % 2 == 0) {
+                    // Create a sample with unknown tokens (50% of additional samples)
+                    dlib::matrix<int, 0, 1> new_sample = create_sample_with_unknown_tokens(
+                        samples[o_index],
+                        dis_unknown(gen),
+                        tokenizer.get_unknown_token_id()
+                    );
+                    samples.push_back(new_sample);
+                    labels.push_back(labels[o_index]);
+                } else {
+                    // Create a reduced sample (50% of additional samples)
+                    double reduction_ratio = dis_reduction(gen);
+                    std::pair<dlib::matrix<int, 0, 1>, int> result = create_reduced_sample(
+                        samples[o_index],
+                        tokenizer.get_pad_token_id(),
+                        reduction_ratio
+                    );
+                    samples.push_back(result.first);
+                    labels.push_back(result.second);
+                }
             }
+
+            // Update the total number of sequences after augmentation
+            max_sequences = samples.size();
+            std::cout << "Number of sequences after augmentation: " << max_sequences << "\n";
 
             // 2) Construct the network in training mode
             using net_type = my_transformer_cfg::network_type<true>;
@@ -582,14 +673,30 @@ int main(int argc, char** argv) {
             dlib::dnn_trainer<net_type, dlib::adam> trainer(net, dlib::adam(learning_rate, 0.9, 0.999), gpus);
             trainer.set_learning_rate(learning_rate);
             trainer.set_min_learning_rate(min_learning_rate);
-            trainer.set_mini_batch_size(batch_size);
             trainer.set_iterations_without_progress_threshold(iterations_threshold);
-            trainer.set_max_num_epochs(max_epochs);
             trainer.set_synchronization_file(checkpoint_file, std::chrono::minutes(5));
-            trainer.be_verbose();
+            trainer.be_quiet();
 
-            // 4) Train
-            trainer.train(samples, labels);
+            // 4) Main train loop
+            for (size_t epoch = 0; epoch < max_epochs; ++epoch) {
+                // Shuffle samples and labels if the --shuffle option is enabled
+                if (parser.option("shuffle")) shuffle_samples_and_labels(samples, labels);
+
+                // Calculate the number of complete batches
+                size_t num_complete_batches = samples.size() / batch_size;
+
+                // Iterate on complete batches only
+                for (size_t i = 0; i < num_complete_batches * batch_size; i += batch_size) {
+                    std::vector<dlib::matrix<int, 0, 1>> batch_samples(samples.begin() + i, samples.begin() + i + batch_size);
+                    std::vector<unsigned long> batch_labels(labels.begin() + i, labels.begin() + i + batch_size);
+                    trainer.train_one_step(batch_samples, batch_labels);
+                }
+                std::cout << "epoch[MAX]#: " << (epoch + 1) << "[" << max_epochs << "]\t" << " learning rate : " <<
+                    trainer.get_learning_rate() << "\taverage loss: " <<
+                    trainer.get_average_loss() << "\tsteps without progress: " <<
+                    trainer.get_steps_without_progress() << std::endl;
+                if (trainer.get_learning_rate() < trainer.get_min_learning_rate()) break;
+            }
 
             // 5) Evaluate quickly on the training set
             auto predicted = net(samples);
@@ -604,6 +711,10 @@ int main(int argc, char** argv) {
             net.clean();
             dlib::serialize(model_file) << net;
             std::cout << "Model saved to " << model_file << "\n";
+
+            // 7) Remove checkpoints
+            std::remove(checkpoint_file.c_str());
+            std::remove((checkpoint_file + "_").c_str());
         }
 
         // ----------------------------------------------------------------------------------------
