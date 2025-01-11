@@ -607,7 +607,7 @@ int main(int argc, char** argv) {
             // Load data from the specified file or directory
             std::string training_data;
             if (parser.option("data"))
-                training_data = load_data_from_file_or_directory(parser.option("data").argument(), 10 * 1024 * 1024);
+                training_data = load_data_from_file_or_directory(parser.option("data").argument(), 50 * 1024 * 1024);
             else                
                 training_data = shakespeare_text_parts[0]; // Fallback to the default data from slm_data.h
 
@@ -699,21 +699,14 @@ int main(int argc, char** argv) {
             trainer.set_synchronization_file(checkpoint_file, std::chrono::minutes(5));
             trainer.be_quiet();
 
-            // 4) Main train loop
+            // 4) Main train loop            
             for (size_t epoch = 0; epoch < max_epochs
                 && !g_interrupt_signal_received.load(std::memory_order_relaxed); ++epoch) {
                 // Shuffle samples and labels if the --shuffle option is enabled
                 if (parser.option("shuffle")) shuffle_samples_and_labels(samples, labels);
 
-                // Decode a sequence to follow the training
-                std::string decoded_sequence;
-                for (long t = 0; t < (max_seq_len < 10L ? max_seq_len : 10L); ++t)
-                    decoded_sequence += tokenizer.decode(samples[0](t, 0));
-                std::string decoded_label = tokenizer.decode(labels[0]);
-                std::cout << "(training) " << decoded_sequence << "(...) => " << decoded_label << "\n";
-
                 // Calculate the number of complete batches
-                size_t num_complete_batches = samples.size() / batch_size;
+                size_t num_complete_batches = samples.size() / batch_size;                
 
                 // Iterate on complete batches only
                 auto last_print_time = std::chrono::steady_clock::now();
@@ -725,6 +718,15 @@ int main(int argc, char** argv) {
                     // Display the progress
                     auto current_time = std::chrono::steady_clock::now();
                     if (std::chrono::duration_cast<std::chrono::seconds>(current_time - last_print_time).count() >= 30) {
+                        std::random_device rd;
+                        std::mt19937 gen(rd());
+                        std::uniform_int_distribution<> dis(0, samples.size() - 1);
+                        size_t random_index = dis(gen);
+                        std::string decoded_sequence;
+                        for (long t = 0; t < (max_seq_len < 10L ? max_seq_len : 10L); ++t)
+                            decoded_sequence += tokenizer.decode(samples[random_index](t, 0));
+                        std::string decoded_label = tokenizer.decode(labels[random_index]);
+                        std::cout << "(sample#" << random_index << ") " << decoded_sequence << "(...) = > " << decoded_label << "\n";
                         std::cout << "epoch: " << (epoch + 1) << "/" << max_epochs
                             << "\tstep: " << trainer.get_train_one_step_calls()
                             << "\tlearning rate: " << trainer.get_learning_rate()
