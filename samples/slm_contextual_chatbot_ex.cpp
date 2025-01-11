@@ -9,6 +9,9 @@
 #include <cmath>
 #include <random>
 #include <regex>
+#ifdef _WIN32
+#include <csignal>
+#endif
 #include <dlib/data_io.h>
 #include <dlib/cmd_line_parser.h>
 #include <dlib/misc_api.h>
@@ -22,7 +25,18 @@
 //   const std::string shakespeare_text;
 #include "slm_data.h"
 
-const size_t VOCAB_SIZE = 5000;
+const size_t VOCAB_SIZE = 10000;
+
+// ----------------------------------------------------------------------------------------
+std::atomic<bool> g_interrupt_signal_received{ false };
+#ifdef _WIN32
+void signalHandler(int signal) {
+    if (signal == SIGINT) {
+        g_interrupt_signal_received.store(true, std::memory_order_relaxed);
+        std::cout << "\ninterrupt detected (CTRL+C), cleaning up and closing the program" << std::endl;
+    }
+}
+#endif
 
 // ----------------------------------------------------------------------------------------
 class bpe {
@@ -383,11 +397,11 @@ std::pair<dlib::matrix<int, 0, 1>, int> create_reduced_sample(const dlib::matrix
 
 // ----------------------------------------------------------------------------------------
 
-std::string load_data_from_file_or_directory(const std::string& path, size_t max_size = 50 * 1024 * 1024) {
+std::string load_data_from_file_or_directory(const std::string& path, size_t max_size = 0.05 * 1024 * 1024) {
     std::string data;
     size_t total_size = 0;
     bool max_size_reached = false;
-    const size_t buffer_size = 16 * 1024;
+    const size_t buffer_size = 4 * 1024;
 
     auto process_file = [&](const std::string& file_path) {
         std::ifstream input(file_path, std::ios::binary);
@@ -444,23 +458,21 @@ std::string load_data_from_file_or_directory(const std::string& path, size_t max
 
 // Function to shuffle samples and labels in sync
 void shuffle_samples_and_labels(std::vector<dlib::matrix<int, 0, 1>>& samples, std::vector<unsigned long>& labels) {
+    unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
+    std::default_random_engine generator(seed);
     std::vector<size_t> indices(samples.size());
     std::iota(indices.begin(), indices.end(), 0); // Fill with 0, 1, 2, ..., N-1
-    std::shuffle(indices.begin(), indices.end(), std::default_random_engine{});
-
-    // Create temporary vectors to hold shuffled data
-    std::vector<dlib::matrix<int, 0, 1>> shuffled_samples(samples.size());
-    std::vector<unsigned long> shuffled_labels(labels.size());
+    std::shuffle(indices.begin(), indices.end(), generator);
 
     // Apply the shuffle
     for (size_t i = 0; i < indices.size(); ++i) {
-        shuffled_samples[i] = samples[indices[i]];
-        shuffled_labels[i] = labels[indices[i]];
+        while (i != indices[i]) {
+            size_t j = indices[i];
+            std::swap(samples[i], samples[j]);
+            std::swap(labels[i], labels[j]);
+            std::swap(indices[i], indices[j]);
+        }
     }
-
-    // Replace the original data with shuffled data
-    samples = std::move(shuffled_samples);
-    labels = std::move(shuffled_labels);
 }
 
 // ----------------------------------------------------------------------------------------
@@ -474,34 +486,29 @@ int main(int argc, char** argv) {
         parser.add_option("data", "Specify a file or directory containing the training data", 1);
         parser.add_option("learning-rate", "Set the learning rate for training (default: 1e-4)", 1);
         parser.add_option("batch-size", "Set the mini-batch size for training (default: 64)", 1);
-        parser.add_option("max-epochs", "Set the maximum number of training epochs (default: 50)", 1);
-        parser.add_option("iterations-threshold", "Set the iterations without progress threshold (default: 5000)", 1);
+        parser.add_option("max-epochs", "Set the maximum number of training epochs (default: 100)", 1);
+        parser.add_option("iterations-threshold", "Set the iterations without progress threshold (default: 15000)", 1);
         parser.add_option("min-learning-rate", "Set the minimum learning rate (default: 1e-6)", 1);
         parser.add_option("shuffle", "Shuffle training sequences and labels before training (default: false)");
+        parser.add_option("temperature", "Set the temperature for text generation (default: 1.0)", 1);
         parser.parse(argc, argv);
 
         if (parser.number_of_arguments() == 0 && !parser.option("train")
             && !parser.option("chatbot")
             && !parser.option("train-tokenizer")) {
             std::cout << "Usage:\n"
-                << "  --train    : Train a small transformer model on the Shakespeare text\n"
+                << "  --train    : Train a Dlib transformer model on specific text\n"
                 << "  --chatbot  : Engage in an interactive chatbot session using a trained model\n"
                 << "  --train-tokenizer : Train the TikToken-like tokenizer\n"
                 << "  --data <path>    : Specify a file or directory containing the training data\n"
                 << "  --learning-rate <value> : Set the learning rate for training (default: 1e-4)\n"
                 << "  --batch-size <value>    : Set the mini-batch size for training (default: 64)\n"
-                << "  --max-epochs <value>    : Set the maximum number of training epochs (default: 50)\n"
-                << "  --iterations-threshold <value> : Set the iterations without progress threshold (default: 5000)\n"
+                << "  --max-epochs <value>    : Set the maximum number of training epochs (default: 100)\n"
+                << "  --iterations-threshold <value> : Set the iterations without progress threshold (default: 15000)\n"
                 << "  --min-learning-rate <value> : Set the minimum learning rate (default: 1e-6)\n"
-                << "  --shuffle               : Shuffle training sequences and labels before training (default: false)\n";
+                << "  --shuffle               : Shuffle training sequences and labels before training (default: false)\n"
+                << "  --temperature           : Set the temperature for text generation (default: 1.0)\n";
             return 0;
-        }
-
-        // Load the tokenizer
-        tiktoken_tokenizer tokenizer;
-        if (!tokenizer.load_vocab("r5k_base.tiktoken")) {
-            std::cerr << "Failed to load vocabulary file!" << std::endl;
-            return 1;
         }
 
         // Test the tokenizer
@@ -509,10 +516,10 @@ int main(int argc, char** argv) {
             tiktoken_tokenizer c_tokenizer;
 
             // Learn a new vocabulary from a corpus
-            std::string corpus = parser.option("data") ? load_data_from_file_or_directory(parser.option("data").argument()) : "";
+            std::string corpus = parser.option("data") ? load_data_from_file_or_directory(parser.option("data").argument(), 500 * 1024 * 1024) : "";
             if (corpus.empty()) return 0;
             c_tokenizer.learn_bpe(corpus, VOCAB_SIZE);
-            c_tokenizer.save_vocab("r5k_base.tiktoken");
+            c_tokenizer.save_vocab("r10k_base.tiktoken");
 
             // Test the tokenizer
             std::string input = "<|endoftext|>The quick brown fox jumps over the lazy dog, and the dog barks loudly!<|endoftext|>";
@@ -534,9 +541,10 @@ int main(int argc, char** argv) {
         // Default values
         double learning_rate = 1e-4;
         long batch_size = 64;
-        int max_epochs = 50;
-        int iterations_threshold = 5000;
+        int max_epochs = 100;
+        int iterations_threshold = 15000;
         double min_learning_rate = 1e-6;
+        double temperature = 1.0;
 
         // Override defaults if options are provided
         if (parser.option("learning-rate"))
@@ -549,13 +557,15 @@ int main(int argc, char** argv) {
             iterations_threshold = std::stoi(parser.option("iterations-threshold").argument());
         if (parser.option("min-learning-rate"))
             min_learning_rate = std::stod(parser.option("min-learning-rate").argument());
+        if (parser.option("temperature"))
+            temperature = std::stod(parser.option("temperature").argument());
 
         // Minimal configiguration for our Transformer mmodel
         const long vocab_size = VOCAB_SIZE;
-        const long num_layers = 4;
+        const long num_layers = 10;
         const long num_heads = 8;
-        const long embedding_dim = 96;
-        const long max_seq_len = 100;
+        const long embedding_dim = 72;
+        const long max_seq_len = 80;
         const bool use_squeezing = false;
 
         using my_transformer_cfg = transformer::transformer_config<
@@ -576,16 +586,28 @@ int main(int argc, char** argv) {
         const std::string model_file = "lm_tiktoken_50k_fp32_model.dat";
         const std::string checkpoint_file = "checkpoint.dat";
 
+        // Load the tokenizer
+        tiktoken_tokenizer tokenizer;
+        if (!tokenizer.load_vocab("r10k_base.tiktoken")) {
+            std::cerr << "Failed to load vocabulary file (r10k_base.tiktoken)!" << std::endl;
+            return 1;
+        }
+
         // ----------------------------------------------------------------------------------------
         // Train mode
         // ----------------------------------------------------------------------------------------
         if (parser.option("train")) {
             std::cout << "=== TRAIN MODE ===\n";
 
+            // Set the signal handler for SIGINT
+#ifdef _WIN32
+            signal(SIGINT, signalHandler);
+#endif
+
             // Load data from the specified file or directory
             std::string training_data;
             if (parser.option("data"))
-                training_data = load_data_from_file_or_directory(parser.option("data").argument());
+                training_data = load_data_from_file_or_directory(parser.option("data").argument(), 10 * 1024 * 1024);
             else                
                 training_data = shakespeare_text_parts[0]; // Fallback to the default data from slm_data.h
 
@@ -678,34 +700,51 @@ int main(int argc, char** argv) {
             trainer.be_quiet();
 
             // 4) Main train loop
-            for (size_t epoch = 0; epoch < max_epochs; ++epoch) {
+            for (size_t epoch = 0; epoch < max_epochs
+                && !g_interrupt_signal_received.load(std::memory_order_relaxed); ++epoch) {
                 // Shuffle samples and labels if the --shuffle option is enabled
                 if (parser.option("shuffle")) shuffle_samples_and_labels(samples, labels);
+
+                // Decode a sequence to follow the training
+                std::string decoded_sequence;
+                for (long t = 0; t < (max_seq_len < 10L ? max_seq_len : 10L); ++t)
+                    decoded_sequence += tokenizer.decode(samples[0](t, 0));
+                std::string decoded_label = tokenizer.decode(labels[0]);
+                std::cout << "(training) " << decoded_sequence << "(...) => " << decoded_label << "\n";
 
                 // Calculate the number of complete batches
                 size_t num_complete_batches = samples.size() / batch_size;
 
                 // Iterate on complete batches only
-                for (size_t i = 0; i < num_complete_batches * batch_size; i += batch_size) {
+                auto last_print_time = std::chrono::steady_clock::now();
+                for (size_t i = 0; i < (num_complete_batches * batch_size) && !g_interrupt_signal_received.load(std::memory_order_relaxed); i += batch_size) {
                     std::vector<dlib::matrix<int, 0, 1>> batch_samples(samples.begin() + i, samples.begin() + i + batch_size);
                     std::vector<unsigned long> batch_labels(labels.begin() + i, labels.begin() + i + batch_size);
                     trainer.train_one_step(batch_samples, batch_labels);
+
+                    // Display the progress
+                    auto current_time = std::chrono::steady_clock::now();
+                    if (std::chrono::duration_cast<std::chrono::seconds>(current_time - last_print_time).count() >= 30) {
+                        std::cout << "epoch: " << (epoch + 1) << "/" << max_epochs
+                            << "\tstep: " << trainer.get_train_one_step_calls()
+                            << "\tlearning rate: " << trainer.get_learning_rate()
+                            << "\taverage loss: " << trainer.get_average_loss()
+                            << "\tsteps without progress: " << trainer.get_steps_without_progress() << std::endl;
+                        last_print_time = current_time;                        
+                    }
                 }
-                std::cout << "epoch[MAX]#: " << (epoch + 1) << "[" << max_epochs << "]\t" << " learning rate : " <<
-                    trainer.get_learning_rate() << "\taverage loss: " <<
-                    trainer.get_average_loss() << "\tsteps without progress: " <<
-                    trainer.get_steps_without_progress() << std::endl;
                 if (trainer.get_learning_rate() < trainer.get_min_learning_rate()) break;
             }
 
             // 5) Evaluate quickly on the training set
+            if (samples.size() > 5000) samples.resize(5000);
             auto predicted = net(samples);
             size_t correct = 0;
-            for (size_t i = 0; i < labels.size(); ++i)
-                if (predicted[i] == labels[i])
-                    correct++;
-            double accuracy = (double)correct / labels.size();
-            std::cout << "Training accuracy (on this sample set): " << accuracy << "\n";
+            for (size_t i = 0; i < samples.size(); ++i)
+                if (predicted[i] == labels[i]) correct++;
+            double accuracy = (double)correct / samples.size();
+            std::cout << "Training accuracy (on this sample set): " << accuracy << 
+                " (correct: " << correct << " - error: " << (samples.size() - correct) << ")\n";
 
             // 6) Save the model
             net.clean();
@@ -726,6 +765,8 @@ int main(int argc, char** argv) {
             // 1) Load the trained model
             using net_infer = my_transformer_cfg::network_type<false>;
             net_infer net;
+            dlib::softmax<dlib::multiply<net_infer::subnet_type>> gen(dlib::multiply_(1.0 / temperature));
+
             if (dlib::file_exists(model_file)) {
                 dlib::deserialize(model_file) >> net;
                 std::cout << "Loaded model from " << model_file << "\n";
@@ -736,8 +777,9 @@ int main(int argc, char** argv) {
             std::cout << my_transformer_cfg::model_info::describe() << std::endl;
             std::cout << "Model parameters: " << count_parameters(net) << std::endl << std::endl;
 
-            // 2) Initialize the conversation history
+            // 2) Initialize the conversation history and generator
             std::vector<int> conversation_tokens;
+            gen.subnet().subnet() = net.subnet();
 
             // 3) Conversation loop
             std::string user_input;
@@ -777,7 +819,8 @@ int main(int argc, char** argv) {
                 size_t response_length = 0;
 
                 while (!stop_generation) {
-                    unsigned long next_token = net(input_seq); // Single inference
+                    auto logits = dlib::mat(gen(input_seq)); // Single inference
+                    unsigned long next_token = dlib::index_of_max(logits);
 
                     // Decode the token to a string
                     std::string next_word = tokenizer.decode(next_token);
