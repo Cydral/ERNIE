@@ -27,6 +27,10 @@
 
 const size_t VOCAB_SIZE = 10000;
 
+// Initialize random number generation
+std::random_device rd;
+std::mt19937 gen(rd());
+
 // ----------------------------------------------------------------------------------------
 std::atomic<bool> g_interrupt_signal_received{ false };
 #ifdef _WIN32
@@ -373,8 +377,6 @@ private:
 
 dlib::matrix<int, 0, 1> create_sample_with_unknown_tokens(const dlib::matrix<int, 0, 1>& o_sample, int num_unknown_tokens, int unknown_token_id) {
     dlib::matrix<int, 0, 1> new_sample = o_sample;
-    std::random_device rd;
-    std::mt19937 gen(rd());
     std::uniform_int_distribution<> dis(0, o_sample.size() - 1);
 
     for (int i = 0; i < num_unknown_tokens; ++i)
@@ -491,23 +493,25 @@ int main(int argc, char** argv) {
         parser.add_option("min-learning-rate", "Set the minimum learning rate (default: 1e-6)", 1);
         parser.add_option("shuffle", "Shuffle training sequences and labels before training (default: false)");
         parser.add_option("temperature", "Set the temperature for text generation (default: 1.0)", 1);
+        parser.add_option("top-k", "Set the number of top tokens to considere for response initialization (default: 1)", 1);
         parser.parse(argc, argv);
 
         if (parser.number_of_arguments() == 0 && !parser.option("train")
             && !parser.option("chatbot")
             && !parser.option("train-tokenizer")) {
             std::cout << "Usage:\n"
-                << "  --train    : Train a Dlib transformer model on specific text\n"
-                << "  --chatbot  : Engage in an interactive chatbot session using a trained model\n"
-                << "  --train-tokenizer : Train the TikToken-like tokenizer\n"
-                << "  --data <path>    : Specify a file or directory containing the training data\n"
-                << "  --learning-rate <value> : Set the learning rate for training (default: 1e-4)\n"
-                << "  --batch-size <value>    : Set the mini-batch size for training (default: 64)\n"
-                << "  --max-epochs <value>    : Set the maximum number of training epochs (default: 100)\n"
-                << "  --iterations-threshold <value> : Set the iterations without progress threshold (default: 15000)\n"
-                << "  --min-learning-rate <value> : Set the minimum learning rate (default: 1e-6)\n"
-                << "  --shuffle               : Shuffle training sequences and labels before training (default: false)\n"
-                << "  --temperature           : Set the temperature for text generation (default: 1.0)\n";
+                << "  --train: Train a Dlib transformer model on specific text\n"
+                << "  --chatbot: Engage in an interactive chatbot session using a trained model\n"
+                << "  --train-tokenizer: Train the TikToken-like tokenizer\n"
+                << "  --data <path>: Specify a file or directory containing the training data\n"
+                << "  --learning-rate <value>: Set the learning rate for training (default: 1e-4)\n"
+                << "  --batch-size <value>: Set the mini-batch size for training (default: 64)\n"
+                << "  --max-epochs <value>: Set the maximum number of training epochs (default: 100)\n"
+                << "  --iterations-threshold <value>: Set the iterations without progress threshold (default: 15000)\n"
+                << "  --min-learning-rate <value>: Set the minimum learning rate (default: 1e-6)\n"
+                << "  --shuffle: Shuffle training sequences and labels before training (default: false)\n"
+                << "  --temperature: Set the temperature for text generation (default: 1.0)\n"
+                << "  --top-k: Set the number of top tokens to considere for response initialization (default: 1)\n";
             return 0;
         }
 
@@ -545,6 +549,7 @@ int main(int argc, char** argv) {
         int iterations_threshold = 15000;
         double min_learning_rate = 1e-6;
         double temperature = 1.0;
+        int top_k = 1;
 
         // Override defaults if options are provided
         if (parser.option("learning-rate"))
@@ -559,6 +564,8 @@ int main(int argc, char** argv) {
             min_learning_rate = std::stod(parser.option("min-learning-rate").argument());
         if (parser.option("temperature"))
             temperature = std::stod(parser.option("temperature").argument());
+        if (parser.option("top-k"))
+            top_k = std::stoi(parser.option("top-k").argument());
 
         // Minimal configiguration for our Transformer mmodel
         const long vocab_size = VOCAB_SIZE;
@@ -643,14 +650,10 @@ int main(int argc, char** argv) {
             // Calculate the number of additional samples (15% of the original dataset)
             size_t additional_samples = max_sequences * 0.15;
 
-            // Initialize random number generation
-            std::random_device rd;
-            std::mt19937 gen(rd());
-
             // Define distributions for random sampling
             std::uniform_int_distribution<> dis_sample(0, samples.size() - 1);  // For selecting original samples
-            std::uniform_int_distribution<> dis_unknown(1, 3);  // For selecting number of unknown tokens (1 to 3)
-            std::uniform_real_distribution<> dis_reduction(0.05, 0.4);  // For selecting reduction ratio (5% to 40%)
+            std::uniform_int_distribution<> dis_unknown(1, 4);  // For selecting number of unknown tokens (1 to 4)
+            std::uniform_real_distribution<> dis_reduction(0.1, 0.8);  // For selecting reduction ratio (10% to 80%)
 
             // Generate additional samples
             for (size_t i = 0; i < additional_samples; ++i) {
@@ -718,8 +721,6 @@ int main(int argc, char** argv) {
                     // Display the progress
                     auto current_time = std::chrono::steady_clock::now();
                     if (std::chrono::duration_cast<std::chrono::seconds>(current_time - last_print_time).count() >= 30) {
-                        std::random_device rd;
-                        std::mt19937 gen(rd());
                         std::uniform_int_distribution<> dis(0, samples.size() - 1);
                         size_t random_index = dis(gen);
                         std::string decoded_sequence;
@@ -767,7 +768,7 @@ int main(int argc, char** argv) {
             // 1) Load the trained model
             using net_infer = my_transformer_cfg::network_type<false>;
             net_infer net;
-            dlib::softmax<dlib::multiply<net_infer::subnet_type>> gen(dlib::multiply_(1.0 / temperature));
+            dlib::softmax<dlib::multiply<net_infer::subnet_type>> chatbot(dlib::multiply_(1.0 / temperature));
 
             if (dlib::file_exists(model_file)) {
                 dlib::deserialize(model_file) >> net;
@@ -781,9 +782,10 @@ int main(int argc, char** argv) {
 
             // 2) Initialize the conversation history and generator
             std::vector<int> conversation_tokens;
-            gen.subnet().subnet() = net.subnet();
+            chatbot.subnet().subnet() = net.subnet();
 
             // 3) Conversation loop
+            const float top_k_threshold = 0.05f; // 5% threshold to consider a token as a candidate
             std::string user_input;
             while (true) {
                 // Prompt the user for input
@@ -821,8 +823,33 @@ int main(int argc, char** argv) {
                 size_t response_length = 0;
 
                 while (!stop_generation) {
-                    auto logits = dlib::mat(gen(input_seq)); // Single inference
-                    unsigned long next_token = dlib::index_of_max(logits);
+                    auto logits = dlib::mat(chatbot(input_seq)); // Single inference
+                    
+                    // Apply the top-k mechanism for the first token
+                    unsigned long next_token;
+                    if (response_length == 0 && top_k > 1) {
+                        // Find the top-k tokens
+                        std::vector<std::pair<float, unsigned long>> token_probs;
+                        for (long i = 0; i < logits.nc(); ++i)
+                            token_probs.emplace_back(logits(0, i), i);                        
+                        std::partial_sort(token_probs.begin(), token_probs.begin() + top_k, token_probs.end(),
+                            [](const auto& a, const auto& b) { return a.first > b.first; });
+
+                        // Find the number of tokens that exceed the threshold
+                        size_t valid_tokens = 0;
+                        for (size_t i = 0; i < top_k; ++i) {
+                            if (token_probs[i].first >= top_k_threshold) valid_tokens++;                            
+                            else break; // Stop when we find a token below the threshold
+                        }
+
+                        // If no tokens exceed the threshold, just use the top token
+                        if (valid_tokens == 0) next_token = token_probs[0].second;
+                        else {
+                            // Randomly select from the valid tokens
+                            std::uniform_int_distribution<> dist(0, valid_tokens - 1);
+                            next_token = token_probs[dist(gen)].second;
+                        }
+                    } else next_token = dlib::index_of_max(logits);
 
                     // Decode the token to a string
                     std::string next_word = tokenizer.decode(next_token);
