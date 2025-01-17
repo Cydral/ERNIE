@@ -94,8 +94,8 @@ public:
             if (new_token_length > MAX_TOKEN_LENGTH) {
                 if (verbose) {
                     std::cout << "\r"
-                        << std::setw(100) << std::left
-                        << "Skipping merge " << std::to_string(i + 1) << "/" << std::to_string(num_merges) << ": ("
+                        << std::setw(100) << std::flush
+                        << "\rskipping merge " << std::to_string(i + 1) << "/" << std::to_string(num_merges) << ": ("
                         << std::to_string(pair.first) << "," << std::to_string(pair.second) << ") -> new token length "
                         << std::to_string(new_token_length) << " exceeds limit of " << std::to_string(MAX_TOKEN_LENGTH)
                         << std::flush;
@@ -111,8 +111,8 @@ public:
 
             if (verbose) {
                 std::cout << "\r"
-                    << std::setw(100) << std::left
-                    << "merge " << std::to_string(i + 1) << "/" << std::to_string(num_merges) << ": ("
+                    << std::setw(100) << std::flush
+                    << "\rmerge " << std::to_string(i + 1) << "/" << std::to_string(num_merges) << ": ("
                     << std::to_string(pair.first) << "," << std::to_string(pair.second) << ") -> " << std::to_string(idx)
                     << " (" << bytes_to_string(vocab[idx]) << ") had "
                     << std::to_string(stats[pair]) << " occurrences"
@@ -431,7 +431,7 @@ int main(int argc, char** argv) {
         dlib::command_line_parser parser;
         parser.add_option("train", "Train a small transformer on the built-in Shakespeare text");
         parser.add_option("chatbot", "Engage in an interactive chatbot session using a trained model");
-        parser.add_option("train-tokenizer", "Train the BPE tokenizer");
+        parser.add_option("test-tokenizer", "Test the BPE tokenizer");
         parser.add_option("data", "Specify a file or directory containing the training data", 1);
         parser.add_option("learning-rate", "Set the learning rate for training (default: 1e-4)", 1);
         parser.add_option("batch-size", "Set the mini-batch size for training (default: 64)", 1);
@@ -445,11 +445,11 @@ int main(int argc, char** argv) {
 
         if (parser.number_of_arguments() == 0 && !parser.option("train")
             && !parser.option("chatbot")
-            && !parser.option("train-tokenizer")) {
+            && !parser.option("test-tokenizer")) {
             std::cout << "Usage:\n"
                 << "  --train: Train a Dlib transformer model on specific text\n"
                 << "  --chatbot: Engage in an interactive chatbot session using a trained model\n"
-                << "  --train-tokenizer: Train the BPE tokenizer\n"
+                << "  --test-tokenizer: Test the BPE tokenizer\n"
                 << "  --data <path>: Specify a file or directory containing the training data\n"
                 << "  --learning-rate <value>: Set the learning rate for training (default: 1e-4)\n"
                 << "  --batch-size <value>: Set the mini-batch size for training (default: 64)\n"
@@ -463,15 +463,9 @@ int main(int argc, char** argv) {
         }
 
         // Test the tokenizer
-        if (parser.option("train-tokenizer")) {
+        if (parser.option("test-tokenizer")) {
             bpe_tokenizer c_tokenizer;
-
-            // Learn a new vocabulary from a corpus
-            std::string corpus = parser.option("data") ? load_data_from_file_or_directory(parser.option("data").argument(), 500 * 1024 * 1024) : "";
-            if (corpus.empty()) return 0;
-            c_tokenizer.train(corpus, VOCAB_SIZE, true);
-            c_tokenizer.save("dlib_r1k_base");
-            c_tokenizer.load("dlib_r1k_base");
+            c_tokenizer.load("dlib_t1k_base");
 
             // Test the tokenizer
             std::string input = "The quick brown fox jumps over the lazy dog, and the dog barks loudly!";
@@ -542,8 +536,8 @@ int main(int argc, char** argv) {
 
         // Load the tokenizer
         bpe_tokenizer tokenizer;
-        if (!tokenizer.load("dlib_r1k_base")) {
-            std::cerr << "Failed to load vocabulary file (dlib_r1k_base.[model|vocab])!" << std::endl;
+        if (!tokenizer.load("dlib_t1k_base")) {
+            std::cerr << "Failed to load vocabulary file (dlib_t1k_base.[model|vocab])!" << std::endl;
             return 1;
         } else {
             std::cout << "Vocab size: " << std::to_string(tokenizer.get_vocab_size()) << " - Model config: "
