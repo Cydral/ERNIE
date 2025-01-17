@@ -1,4 +1,5 @@
 #include <iostream>
+#include <iomanip>
 #include <string>
 #include <locale>
 #include <codecvt>
@@ -25,7 +26,8 @@
 //   const std::string shakespeare_text;
 #include "slm_data.h"
 
-const size_t VOCAB_SIZE = 10000;
+const size_t VOCAB_SIZE = 1000;
+const size_t NUM_SPECIAL_TOKENS = 3;
 
 // Initialize random number generation
 std::random_device rd;
@@ -43,334 +45,279 @@ void signalHandler(int signal) {
 #endif
 
 // ----------------------------------------------------------------------------------------
-class bpe {
+// BPE Tokenizer class
+class bpe_tokenizer {
 public:
-    static const std::string REGEX_PATTERN;
-
-    explicit bpe(size_t vocab_size) : target_vocab_size_(vocab_size) {}
-
-    void learn(const std::string& corpus) {
-        // Tokenize the corpus using the regex pattern
-        std::regex regex_pattern(REGEX_PATTERN, std::regex_constants::icase);
-        std::vector<std::string> tokens;
-        auto words_begin = std::sregex_iterator(corpus.begin(), corpus.end(), regex_pattern);
-        auto words_end = std::sregex_iterator();
-
-        for (std::sregex_iterator it = words_begin; it != words_end; ++it)
-            tokens.push_back(it->str());
-
-        // Initialize token frequencies and vocabulary
-        std::unordered_map<std::string, int> token_frequencies;
-        std::set<std::string> initial_vocab;
-        for (const std::string& token : tokens) {
-            if (token.substr(0, 2) == "<|" && token.substr(token.length() - 2) == "|>") {
-                token_frequencies[token]++;
-                initial_vocab.insert(token);
-            } else {
-                token_frequencies[token]++;
-                for (char c : token) initial_vocab.insert(std::string(1, c));
-            }
+    bpe_tokenizer() : vocab_size(BASE_VOCAB_SIZE) {
+        // Initialize the base vocabulary with single bytes
+        for (int i = 0; i < BASE_VOCAB_SIZE; ++i) {
+            vocab[i] = std::vector<uint8_t>{ static_cast<uint8_t>(i) };
         }
-
-        // Check if the requested vocab size is smaller than the initial vocab
-        if (target_vocab_size_ <= initial_vocab.size()) {
-            vocab_ = std::vector<std::string>(initial_vocab.begin(), initial_vocab.end());
-            vocab_.resize(target_vocab_size_);
-            std::cout << "Warning: Requested vocabulary size is smaller than or equal to the initial character set." << std::endl;
-            std::cout << "Final vocabulary size: " << vocab_.size() << std::endl;
-            return;
-        }
-
-        std::unordered_map<std::string, int> vocab;
-        for (const auto& c : initial_vocab) vocab[c] = 0;  // Initialize with 0 frequency, will be updated later
-
-        // Initialize pair frequencies
-        std::unordered_map<std::pair<std::string, std::string>, int, PairHash> pair_frequencies;
-        for (const auto& entry : token_frequencies) {
-            const std::string& token = entry.first;
-            std::vector<std::string> parts;
-            for (char c : token) parts.push_back(std::string(1, c));
-            update_pair_frequencies(parts, entry.second, pair_frequencies);
-        }
-
-        // Main BPE loop
-        size_t prev_vocab_size = vocab.size();
-        size_t stagnant_iterations = 0;
-        const size_t max_stagnant_iterations = 5;
-
-        while (vocab.size() < target_vocab_size_) {
-            // Find the most frequent pair
-            auto best_pair = std::max_element(
-                pair_frequencies.begin(), pair_frequencies.end(),
-                [](const auto& a, const auto& b) { return a.second < b.second; }
-            );
-
-            if (best_pair == pair_frequencies.end()) {
-                std::cout << "\nWarning: No more pairs to merge. Vocabulary size might be smaller than requested." << std::endl;
-                break;
-            }
-
-            std::string new_token = best_pair->first.first + best_pair->first.second;
-            vocab[new_token] = best_pair->second;
-
-            // Update tokens and frequencies
-            for (auto& entry : token_frequencies) {
-                std::string token = entry.first;
-                int freq = entry.second;
-                std::vector<std::string> new_parts;
-                std::vector<std::string> parts;
-                for (char c : token) parts.push_back(std::string(1, c));
-
-                for (size_t i = 0; i < parts.size(); ++i) {
-                    if (i < parts.size() - 1 && parts[i] == best_pair->first.first
-                        && parts[i + 1] == best_pair->first.second) {
-                        new_parts.push_back(new_token);
-                        ++i;
-                    } else new_parts.push_back(parts[i]);
-                }
-
-                // Update pair frequencies
-                if (parts != new_parts) {
-                    update_pair_frequencies(parts, -freq, pair_frequencies);
-                    update_pair_frequencies(new_parts, freq, pair_frequencies);
-                    token = join(new_parts);
-                }
-            }
-
-            // Remove the merged pair from pair frequencies
-            pair_frequencies.erase(best_pair->first);
-
-            // Check for stagnation
-            if (vocab.size() - prev_vocab_size < 3) {
-                stagnant_iterations++;
-                if (stagnant_iterations >= max_stagnant_iterations) {
-                    std::cout << "\nWarning: Vocabulary size stagnated. Stopping early." << std::endl;
-                    break;
-                }
-            } else stagnant_iterations = 0;
-            prev_vocab_size = vocab.size();
-        }
-
-        // Build the final vocabulary
-        vocab_.clear();
-        for (const auto& entry : vocab) vocab_.push_back(entry.first);
-
-        // If we still haven't reached the desired vocab size, add the most frequent tokens
-        if (vocab_.size() < target_vocab_size_) {
-            std::vector<std::pair<std::string, int>> sorted_tokens(token_frequencies.begin(), token_frequencies.end());
-            std::sort(sorted_tokens.begin(), sorted_tokens.end(),
-                [](const auto& a, const auto& b) { return a.second > b.second; });
-
-            for (const auto& token : sorted_tokens) {
-                if (std::find(vocab_.begin(), vocab_.end(), token.first) == vocab_.end()) {
-                    vocab_.push_back(token.first);
-                    if (vocab_.size() == target_vocab_size_) break;
-                }
-            }
-        }
-
-        // Update the actual vocabulary size
-        target_vocab_size_ = vocab_.size();
-        std::cout << "\nFinal vocabulary size: " << target_vocab_size_ << std::endl;
-    }
-
-    const std::vector<std::string>& get_vocab() const {
-        return vocab_;
-    }
-
-private:
-    // Hash function for pairs
-    struct PairHash {
-        size_t operator()(const std::pair<std::string, std::string>& p) const {
-            return std::hash<std::string>()(p.first) ^ std::hash<std::string>()(p.second);
-        }
-    };
-
-    void update_pair_frequencies(const std::vector<std::string>& parts, int freq,
-        std::unordered_map<std::pair<std::string, std::string>, int, PairHash>& pair_frequencies) {
-        for (size_t i = 0; i < parts.size() - 1; ++i) {
-            std::pair<std::string, std::string> pair = { parts[i], parts[i + 1] };
-            pair_frequencies[pair] += freq;
-            if (pair_frequencies[pair] <= 0) pair_frequencies.erase(pair);
-        }
-    }
-
-    std::string join(const std::vector<std::string>& parts) {
-        std::string result;
-        for (const auto& part : parts) result += part;
-        return result;
-    }
-
-    size_t target_vocab_size_;
-    std::vector<std::string> vocab_;
-};
-
-// Define the regex pattern
-const std::string bpe::REGEX_PATTERN =
-    R"(<\|[^|]+\|>|'s|'t|'re|'ve|'m|'ll|'d|[[:alpha:]]+|[[:digit:]]+|\s+|\S)";
-
-class tiktoken_tokenizer {
-public:
-    // Constructor initializes special token IDs to -1 (invalid)
-    tiktoken_tokenizer() : unknown_token_id_(-1), pad_token_id_(-1) {}
-
-    // Load vocabulary from a file
-    bool load_vocab(const std::string& filepath) {
-        std::ifstream file(filepath);
-        if (!file.is_open()) {
-            std::cerr << "Failed to open vocab file: " << filepath << std::endl;
-            return false;
-        }
-
-        std::string line;
-        while (std::getline(file, line)) {
-            size_t space_pos = line.find(' ');
-            if (space_pos == std::string::npos) continue; // Skip malformed lines
-
-            // Extract token (base64) and ID
-            std::string base64_token = line.substr(0, space_pos);
-            int id = std::stoi(line.substr(space_pos + 1));
-
-            // Decode base64 token to string
-            std::string token = base64_decode(base64_token);
-
-            // Store mapping
-            encoder_[token] = id;
-            if (id >= decoder_.size()) decoder_.resize(id + 1);
-            decoder_[id] = token;
-            if (token == "<|unknown|>") unknown_token_id_ = id;
-            else if (token == "<|padding|>") pad_token_id_ = id;
-        }
-
-        return true;
-    }
-
-    // Learn BPE vocabulary from a text corpus
-    void learn_bpe(const std::string& corpus, size_t vocab_size) {
-        std::vector<std::string> special_tokens = {
-            "<|unknown|>", "<|padding|>", "<|endoftext|>", "<|fim_prefix|>", "<|fim_middle|>",
-            "<|fim_suffix|>", "<|endofprompt|>", "<|im_start|>", "<|im_end|>"
+        // Initialize special tokens with sequential IDs
+        special_tokens = {
+            {"<|endoftext|>", BASE_VOCAB_SIZE},
+            {"<|unk|>", (BASE_VOCAB_SIZE + 1)},
+            {"<|pad|>", (BASE_VOCAB_SIZE + 2)}
         };
-
-        bpe c_bpe(vocab_size - special_tokens.size());
-        c_bpe.learn(corpus);
-        const std::vector<std::string>& vocab = c_bpe.get_vocab();
-
-        // Build the vocabulary
-        for (size_t i = 0; i < vocab.size(); ++i) {
-            encoder_[vocab[i]] = i;
-            if (i >= decoder_.size()) decoder_.resize(i + 1);
-            decoder_[i] = vocab[i];
-        }
-
-        // Add special tokens
-        for (const auto& token : special_tokens) {
-            if (encoder_.find(token) == encoder_.end()) {
-                size_t token_id = decoder_.size();
-                decoder_.push_back(token);
-                encoder_[token] = token_id;
-            }
-        }
-        unknown_token_id_ = encoder_["<|unknown|>"];
-        pad_token_id_ = encoder_["<|padding|>"];
     }
 
-    // Save the learned vocabulary to a file
-    bool save_vocab(const std::string& filepath) const {
-        std::ofstream file(filepath);
-        if (!file.is_open()) {
-            std::cerr << "Failed to open vocab file for writing: " << filepath << std::endl;
-            return false;
-        }
+    // Train the tokenizer on the given text
+    void train(const std::string& text, int vocab_size, bool verbose = false) {
+        assert(vocab_size >= BASE_VOCAB_SIZE);
+        this->vocab_size = vocab_size;
+        int num_merges = vocab_size - BASE_VOCAB_SIZE;
 
-        for (const auto& entry : encoder_) {
-            std::string base64_token = base64_encode(entry.first);
-            file << base64_token << " " << entry.second << "\n";
-        }
-
-        return true;
-    }
-
-    // Encode a string into a sequence of token IDs
-    std::vector<int> encode(const std::string& str) const {
+        // Convert text to byte IDs
         std::vector<int> ids;
-        if (str.empty()) return ids;
+        for (char c : text) {
+            ids.push_back(static_cast<uint8_t>(c));
+        }
 
-        std::regex regex_pattern(bpe::REGEX_PATTERN, std::regex_constants::icase);
-        auto words_begin = std::sregex_iterator(str.begin(), str.end(), regex_pattern);
-        auto words_end = std::sregex_iterator();
+        // Perform BPE merges
+        for (int i = 0; i < num_merges; ++i) {
+            auto stats = get_stats(ids);
+            if (stats.empty()) break;
 
-        for (std::sregex_iterator it = words_begin; it != words_end; ++it) {
-            std::string chunk = it->str();
+            // Find the most frequent pair that does not exceed MAX_TOKEN_LENGTH
+            auto pair = std::max_element(stats.begin(), stats.end(),
+                [this](const std::pair<std::pair<int, int>, int>& a, const std::pair<std::pair<int, int>, int>& b) {
+                    // Check if the resulting token would exceed MAX_TOKEN_LENGTH
+                    size_t a_length = vocab[a.first.first].size() + vocab[a.first.second].size();
+                    size_t b_length = vocab[b.first.first].size() + vocab[b.first.second].size();
+                    if (a_length > MAX_TOKEN_LENGTH) return true;  // Skip pair a
+                    if (b_length > MAX_TOKEN_LENGTH) return false; // Skip pair b
+                    return a.second < b.second;
+                })->first;
 
-            // Check if the chunk is a special token
-            auto special_token_it = encoder_.find(chunk);
-            if (special_token_it != encoder_.end()) {
-                ids.push_back(special_token_it->second);
-                continue;
-            }
-
-            // Tokenize non-special tokens
-            size_t start = 0;
-            while (start < chunk.length()) {
-                size_t end = chunk.length();
-                bool found = false;
-                while (end > start && !found) {
-                    std::string substr = chunk.substr(start, end - start);
-                    auto it = encoder_.find(substr);
-                    if (it != encoder_.end()) {
-                        ids.push_back(it->second);
-                        found = true;
-                    } else end--;
+            // Check if the resulting token would exceed MAX_TOKEN_LENGTH
+            size_t new_token_length = vocab[pair.first].size() + vocab[pair.second].size();
+            if (new_token_length > MAX_TOKEN_LENGTH) {
+                if (verbose) {
+                    std::cout << "\r"
+                        << std::setw(100) << std::left
+                        << "Skipping merge " << std::to_string(i + 1) << "/" << std::to_string(num_merges) << ": ("
+                        << std::to_string(pair.first) << "," << std::to_string(pair.second) << ") -> new token length "
+                        << std::to_string(new_token_length) << " exceeds limit of " << std::to_string(MAX_TOKEN_LENGTH)
+                        << std::flush;
                 }
-                if (!found) {
-                    // If no token is found, treat the character as unknown
-                    ids.push_back(unknown_token_id_);
-                    start++;
-                } else start = end;
+                continue; // Skip this merge
             }
+
+            int idx = (BASE_VOCAB_SIZE + (int)special_tokens.size()) + i;
+            ids = merge(ids, pair, idx);
+            merges[pair] = idx;
+            vocab[idx].insert(vocab[idx].end(), vocab[pair.first].begin(), vocab[pair.first].end());
+            vocab[idx].insert(vocab[idx].end(), vocab[pair.second].begin(), vocab[pair.second].end());
+
+            if (verbose) {
+                std::cout << "\r"
+                    << std::setw(100) << std::left
+                    << "merge " << std::to_string(i + 1) << "/" << std::to_string(num_merges) << ": ("
+                    << std::to_string(pair.first) << "," << std::to_string(pair.second) << ") -> " << std::to_string(idx)
+                    << " (" << bytes_to_string(vocab[idx]) << ") had "
+                    << std::to_string(stats[pair]) << " occurrences"
+                    << std::flush;
+            }
+        }
+        std::cout << "\ntraining done\n";
+    }
+
+    // Encode the given text into subword tokens
+    std::vector<int> encode(const std::string& text) {
+        std::vector<int> ids;
+        for (char c : text) {
+            ids.push_back(static_cast<uint8_t>(c));
+        }
+
+        while (ids.size() >= 2) {
+            auto stats = get_stats(ids);
+            auto pair = std::min_element(stats.begin(), stats.end(),
+                [this](const std::pair<std::pair<int, int>, int>& a, const std::pair<std::pair<int, int>, int>& b) {
+                    return merges.count(a.first) ? (merges.at(a.first) < (merges.count(b.first) ? merges.at(b.first) : INT_MAX)) : false;
+                })->first;
+
+            if (!merges.count(pair)) break;
+            int idx = merges[pair];
+            ids = merge(ids, pair, idx);
         }
 
         return ids;
     }
 
-    // Decode a token ID into a string
-    std::string decode(int id) const {
-        return (id < 0 || id >= decoder_.size()) ? "<|unknown|>" : decoder_[id];
+    // Decode a single token ID back into text
+    std::string decode(int id) {
+        for (const auto& token : special_tokens) {
+            if (token.second == id) {
+                return token.first;
+            }
+        }
+        auto& token = vocab.at(id);
+        return std::string(token.begin(), token.end());
     }
 
-    // Get the total vocabulary size (including special tokens)
-    size_t get_vocab_size() const { return decoder_.size(); }
+    // Decode a sequence of token IDs back into text
+    std::string decode(const std::vector<int>& ids) {
+        std::vector<uint8_t> bytes;
+        for (int id : ids) {
+            bool is_special_token = false;
+            for (const auto& token : special_tokens) {
+                if (token.second == id) {
+                    bytes.insert(bytes.end(), token.first.begin(), token.first.end());
+                    is_special_token = true;
+                    break;
+                }
+            }
+            if (!is_special_token) {
+                auto& token = vocab.at(id);
+                bytes.insert(bytes.end(), token.begin(), token.end());
+            }
+        }
+        return std::string(bytes.begin(), bytes.end());
+    }
 
-    // Get the ID of the padding token
-    int get_pad_token_id() const { return pad_token_id_; }
+    // Save the tokenizer model and vocabulary to files
+    void save(const std::string& file_prefix) {
+        std::ofstream model_file(file_prefix + ".model");
+        model_file << "bpe-tokenizer v1\n";
 
-    // Get the ID of the unknown token
-    int get_unknown_token_id() const { return unknown_token_id_; }
+        for (int idx = BASE_VOCAB_SIZE; idx < vocab_size; ++idx) {
+            for (const auto& merge_pair : merges) {
+                if (merge_pair.second == idx) {
+                    model_file << merge_pair.first.first << " " << merge_pair.first.second << "\n";
+                    break;
+                }
+            }
+        }
+
+        std::ofstream vocab_file(file_prefix + ".vocab");
+        for (const auto& v : vocab) {
+            vocab_file << "[" << bytes_to_string(v.second) << "] " << v.first << "\n";
+        }
+    }
+
+    // Load the tokenizer model and vocabulary from files
+    bool load(const std::string& model_file) {
+        std::ifstream file(model_file + ".model");
+        if (!file.is_open()) {
+            std::cerr << "Error: Unable to open model file: " << model_file + ".model" << "\n";
+            return false;
+        }
+
+        std::string line;
+        std::getline(file, line); // Version
+
+        merges.clear();
+        vocab.clear();
+        for (int i = 0; i < BASE_VOCAB_SIZE; ++i) {
+            vocab[i] = std::vector<uint8_t>{ static_cast<uint8_t>(i) };
+        }
+
+        int idx = BASE_VOCAB_SIZE + (int)special_tokens.size();
+        while (std::getline(file, line)) {
+            std::istringstream iss(line);
+            int a, b;
+            iss >> a >> b;
+            merges[{a, b}] = idx;
+
+            vocab[idx].insert(vocab[idx].end(), vocab[a].begin(), vocab[a].end());
+            vocab[idx].insert(vocab[idx].end(), vocab[b].begin(), vocab[b].end());
+            idx++;
+        }
+
+        std::ifstream vocab_file(model_file + ".vocab");
+        if (!vocab_file.is_open()) {
+            std::cerr << "Error: Unable to open vocab file: " << model_file + ".vocab" << "\n";
+            return false;
+        }
+        while (std::getline(vocab_file, line)) {
+            size_t start = line.find('[');
+            size_t end = line.find(']');
+            if (start != std::string::npos && end != std::string::npos) {
+                std::string token_str = line.substr(start + 1, end - start - 1);
+                int id = std::stoi(line.substr(end + 2));
+                vocab[id] = string_to_bytes(token_str);
+            }
+        }
+        return true;
+    }
+
+    // Get the ID of a special token
+    int get_special_token_id(const std::string& token) const {
+        auto it = special_tokens.find(token);
+        if (it != special_tokens.end()) {
+            return it->second;
+        }
+        throw std::runtime_error("Special token not found: " + token);
+    }
+
+    // Get the total vocabulary size
+    size_t get_vocab_size(void) const {
+        return (vocab.size() + special_tokens.size());
+    }
 
 private:
-    // Decode a base64 string to a string
-    static std::string base64_decode(const std::string& base64_str) {
-        dlib::base64 decoder;
-        std::istringstream sin(base64_str);
-        std::ostringstream sout;
-        decoder.decode(sin, sout);
-        return sout.str();
+    std::map<std::string, int> special_tokens;
+    std::map<std::pair<int, int>, int> merges;
+    std::map<int, std::vector<uint8_t>> vocab;
+    int vocab_size;
+
+    static const size_t MAX_TOKEN_LENGTH = 8;
+    static const int BASE_VOCAB_SIZE = 256;
+
+    // Get frequency statistics of adjacent token pairs
+    std::map<std::pair<int, int>, int> get_stats(const std::vector<int>& ids) {
+        std::map<std::pair<int, int>, int> stats;
+        for (size_t i = 0; i < ids.size() - 1; ++i) {
+            stats[{ids[i], ids[i + 1]}]++;
+        }
+        return stats;
     }
 
-    // Encode a string into base64
-    static std::string base64_encode(const std::string& str) {
-        dlib::base64 encoder;
-        std::ostringstream sout;
-        std::istringstream sin(str);
-        encoder.encode(sin, sout);
-        return sout.str();
+    // Merge the most frequent pair in the token sequence
+    std::vector<int> merge(const std::vector<int>& ids, std::pair<int, int> pair, int idx) {
+        std::vector<int> new_ids;
+        for (size_t i = 0; i < ids.size(); ++i) {
+            if (i < ids.size() - 1 && ids[i] == pair.first && ids[i + 1] == pair.second) {
+                new_ids.push_back(idx);
+                i++;
+            }
+            else new_ids.push_back(ids[i]);
+        }
+        return new_ids;
     }
 
-    std::unordered_map<std::string, int> encoder_; // string token -> ID
-    std::vector<std::string> decoder_;             // ID -> string token
-    int unknown_token_id_;                         // ID for unknown tokens
-    int pad_token_id_;                             // ID for padding tokens
+    // Convert a sequence of bytes to a readable string
+    std::string bytes_to_string(const std::vector<uint8_t>& bytes) {
+        std::string result;
+        for (uint8_t byte : bytes) {
+            if (byte >= 32 && byte <= 126) {
+                result += static_cast<char>(byte);
+            }
+            else {
+                char buf[5];
+                snprintf(buf, sizeof(buf), "\\x%02x", byte);
+                result += buf;
+            }
+        }
+        return result;
+    }
+
+    // Convert a string representation of bytes back to bytes
+    std::vector<uint8_t> string_to_bytes(const std::string& str) {
+        std::vector<uint8_t> bytes;
+        for (size_t i = 0; i < str.length(); ++i) {
+            if (str[i] == '\\' && i + 3 < str.length() && str[i + 1] == 'x') {
+                char hex[3] = { str[i + 2], str[i + 3], '\0' };
+                uint8_t byte = static_cast<uint8_t>(std::stoul(hex, nullptr, 16));
+                bytes.push_back(byte);
+                i += 3;
+            }
+            else {
+                bytes.push_back(static_cast<uint8_t>(str[i]));
+            }
+        }
+        return bytes;
+    }
 };
 
 // ----------------------------------------------------------------------------------------
@@ -484,7 +431,7 @@ int main(int argc, char** argv) {
         dlib::command_line_parser parser;
         parser.add_option("train", "Train a small transformer on the built-in Shakespeare text");
         parser.add_option("chatbot", "Engage in an interactive chatbot session using a trained model");
-        parser.add_option("train-tokenizer", "Train the TikToken tokenizer");
+        parser.add_option("train-tokenizer", "Train the BPE tokenizer");
         parser.add_option("data", "Specify a file or directory containing the training data", 1);
         parser.add_option("learning-rate", "Set the learning rate for training (default: 1e-4)", 1);
         parser.add_option("batch-size", "Set the mini-batch size for training (default: 64)", 1);
@@ -502,7 +449,7 @@ int main(int argc, char** argv) {
             std::cout << "Usage:\n"
                 << "  --train: Train a Dlib transformer model on specific text\n"
                 << "  --chatbot: Engage in an interactive chatbot session using a trained model\n"
-                << "  --train-tokenizer: Train the TikToken-like tokenizer\n"
+                << "  --train-tokenizer: Train the BPE tokenizer\n"
                 << "  --data <path>: Specify a file or directory containing the training data\n"
                 << "  --learning-rate <value>: Set the learning rate for training (default: 1e-4)\n"
                 << "  --batch-size <value>: Set the mini-batch size for training (default: 64)\n"
@@ -517,27 +464,27 @@ int main(int argc, char** argv) {
 
         // Test the tokenizer
         if (parser.option("train-tokenizer")) {
-            tiktoken_tokenizer c_tokenizer;
+            bpe_tokenizer c_tokenizer;
 
             // Learn a new vocabulary from a corpus
             std::string corpus = parser.option("data") ? load_data_from_file_or_directory(parser.option("data").argument(), 500 * 1024 * 1024) : "";
             if (corpus.empty()) return 0;
-            c_tokenizer.learn_bpe(corpus, VOCAB_SIZE);
-            c_tokenizer.save_vocab("r10k_base.tiktoken");
+            c_tokenizer.train(corpus, VOCAB_SIZE, true);
+            c_tokenizer.save("dlib_r1k_base");
+            c_tokenizer.load("dlib_r1k_base");
 
             // Test the tokenizer
-            std::string input = "<|endoftext|>The quick brown fox jumps over the lazy dog, and the dog barks loudly!<|endoftext|>";
-            std::vector<int> encoded = c_tokenizer.encode(input);
+            std::string input = "The quick brown fox jumps over the lazy dog, and the dog barks loudly!";
+            auto encoded = c_tokenizer.encode(input);
             std::cout << "Encoded tokens: ";
             for (int id : encoded) std::cout << id << " ";
             std::cout << std::endl;
+            encoded[3] = c_tokenizer.get_special_token_id("<|unk|>");
+            encoded.push_back(c_tokenizer.get_special_token_id("<|endoftext|>"));
+            encoded.push_back(c_tokenizer.get_special_token_id("<|pad|>"));
 
-            std::string decoded;
-            for (int id : encoded) decoded += c_tokenizer.decode(id);
+            std::string decoded = c_tokenizer.decode(encoded);
             std::cout << "Decoded string: " << decoded << std::endl;
-
-            std::cout << "Total vocabulary size (including special tokens): "
-                << c_tokenizer.get_vocab_size() << std::endl;
 
             return 0;
         }
@@ -568,7 +515,7 @@ int main(int argc, char** argv) {
             top_k = std::stoi(parser.option("top-k").argument());
 
         // Minimal configiguration for our Transformer mmodel
-        const long vocab_size = VOCAB_SIZE;
+        const long vocab_size = (VOCAB_SIZE + NUM_SPECIAL_TOKENS);
         const long num_layers = 10;
         const long num_heads = 8;
         const long embedding_dim = 72;
@@ -590,14 +537,17 @@ int main(int argc, char** argv) {
         std::vector<int> gpus{ 0 };
 
         // The model file to store or load (and the checkpoint)
-        const std::string model_file = "lm_tiktoken_50k_fp32_model.dat";
+        const std::string model_file = "lm_chatbot_en_35M_fp32_model.dat";
         const std::string checkpoint_file = "checkpoint.dat";
 
         // Load the tokenizer
-        tiktoken_tokenizer tokenizer;
-        if (!tokenizer.load_vocab("r10k_base.tiktoken")) {
-            std::cerr << "Failed to load vocabulary file (r10k_base.tiktoken)!" << std::endl;
+        bpe_tokenizer tokenizer;
+        if (!tokenizer.load("dlib_r1k_base")) {
+            std::cerr << "Failed to load vocabulary file (dlib_r1k_base.[model|vocab])!" << std::endl;
             return 1;
+        } else {
+            std::cout << "Vocab size: " << std::to_string(tokenizer.get_vocab_size()) << " - Model config: "
+                << std::to_string(VOCAB_SIZE + NUM_SPECIAL_TOKENS) << std::endl;
         }
 
         // ----------------------------------------------------------------------------------------
@@ -647,13 +597,13 @@ int main(int argc, char** argv) {
                 labels.push_back(full_tokens[start + max_seq_len]);
             }
 
-            // Calculate the number of additional samples (15% of the original dataset)
-            size_t additional_samples = max_sequences * 0.15;
+            // Calculate the number of additional samples (25% of the original dataset)
+            size_t additional_samples = max_sequences * 0.25;
 
             // Define distributions for random sampling
             std::uniform_int_distribution<> dis_sample(0, samples.size() - 1);  // For selecting original samples
-            std::uniform_int_distribution<> dis_unknown(1, 4);  // For selecting number of unknown tokens (1 to 4)
-            std::uniform_real_distribution<> dis_reduction(0.1, 0.8);  // For selecting reduction ratio (10% to 80%)
+            std::uniform_int_distribution<> dis_unknown(1, 5);  // For selecting number of unknown tokens (1 to 5)
+            std::uniform_real_distribution<> dis_reduction(0.15, 0.85);  // For selecting reduction ratio (15% to 85%)
 
             // Generate additional samples
             for (size_t i = 0; i < additional_samples; ++i) {
@@ -664,7 +614,7 @@ int main(int argc, char** argv) {
                     dlib::matrix<int, 0, 1> new_sample = create_sample_with_unknown_tokens(
                         samples[o_index],
                         dis_unknown(gen),
-                        tokenizer.get_unknown_token_id()
+                        tokenizer.get_special_token_id("<|unk|>")
                     );
                     samples.push_back(new_sample);
                     labels.push_back(labels[o_index]);
@@ -673,7 +623,7 @@ int main(int argc, char** argv) {
                     double reduction_ratio = dis_reduction(gen);
                     std::pair<dlib::matrix<int, 0, 1>, int> result = create_reduced_sample(
                         samples[o_index],
-                        tokenizer.get_pad_token_id(),
+                        tokenizer.get_special_token_id("<|pad|>"),
                         reduction_ratio
                     );
                     samples.push_back(result.first);
@@ -720,19 +670,20 @@ int main(int argc, char** argv) {
 
                     // Display the progress
                     auto current_time = std::chrono::steady_clock::now();
-                    if (std::chrono::duration_cast<std::chrono::seconds>(current_time - last_print_time).count() >= 30) {
+                    if (std::chrono::duration_cast<std::chrono::seconds>(current_time - last_print_time).count() >= 15) {
                         std::uniform_int_distribution<> dis(0, samples.size() - 1);
                         size_t random_index = dis(gen);
                         std::string decoded_sequence;
-                        for (long t = 0; t < (max_seq_len < 10L ? max_seq_len : 10L); ++t)
+                        for (long t = 0; t < (max_seq_len < 20L ? max_seq_len : 20L); ++t)
                             decoded_sequence += tokenizer.decode(samples[random_index](t, 0));
                         std::string decoded_label = tokenizer.decode(labels[random_index]);
-                        std::cout << "(sample#" << random_index << ") " << decoded_sequence << "(...) = > " << decoded_label << "\n";
+                        std::cout << "(sample#" << random_index << ") \"" << decoded_sequence << "(...)\" => \"" << decoded_label << "\"\n";
                         std::cout << "epoch: " << (epoch + 1) << "/" << max_epochs
                             << "\tstep: " << trainer.get_train_one_step_calls()
                             << "\tlearning rate: " << trainer.get_learning_rate()
                             << "\taverage loss: " << trainer.get_average_loss()
-                            << "\tsteps without progress: " << trainer.get_steps_without_progress() << std::endl;
+                            << "\tsteps without progress: " << trainer.get_steps_without_progress()
+                            << std::flush << std::endl;
                         last_print_time = current_time;                        
                     }
                 }
@@ -740,7 +691,7 @@ int main(int argc, char** argv) {
             }
 
             // 5) Evaluate quickly on the training set
-            if (samples.size() > 5000) samples.resize(5000);
+            if (samples.size() > 20000) samples.resize(20000);
             auto predicted = net(samples);
             size_t correct = 0;
             for (size_t i = 0; i < samples.size(); ++i)
@@ -812,7 +763,7 @@ int main(int argc, char** argv) {
                     if ((size_t)i < conversation_tokens.size())
                         input_seq(i, 0) = conversation_tokens[i];
                     else
-                        input_seq(i, 0) = tokenizer.get_pad_token_id(); // Use the padding token ID
+                        input_seq(i, 0) = tokenizer.get_special_token_id("<|pad|>"); // Use the padding token ID
                 }
 
                 // Generate a response
@@ -874,7 +825,7 @@ int main(int argc, char** argv) {
                 }
 
                 // Display the chatbot's response
-                std::cout << "Chatbot: " << generated_text << "\n";
+                std::cout << "Chatbot: " << generated_text << std::flush << std::endl;
 
                 // Append the chatbot's response to the conversation history
                 std::vector<int> response_tokens = tokenizer.encode(generated_text + "\n");
