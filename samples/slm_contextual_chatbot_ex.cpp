@@ -26,7 +26,7 @@
 //   const std::string shakespeare_text;
 #include "slm_data.h"
 
-const size_t VOCAB_SIZE = 1000;
+const size_t VOCAB_SIZE = 3000;
 const size_t NUM_SPECIAL_TOKENS = 3;
 
 // Initialize random number generation
@@ -79,15 +79,7 @@ public:
             if (stats.empty()) break;
 
             // Find the most frequent pair that does not exceed MAX_TOKEN_LENGTH
-            auto pair = std::max_element(stats.begin(), stats.end(),
-                [this](const std::pair<std::pair<int, int>, int>& a, const std::pair<std::pair<int, int>, int>& b) {
-                    // Check if the resulting token would exceed MAX_TOKEN_LENGTH
-                    size_t a_length = vocab[a.first.first].size() + vocab[a.first.second].size();
-                    size_t b_length = vocab[b.first.first].size() + vocab[b.first.second].size();
-                    if (a_length > MAX_TOKEN_LENGTH) return true;  // Skip pair a
-                    if (b_length > MAX_TOKEN_LENGTH) return false; // Skip pair b
-                    return a.second < b.second;
-                })->first;
+            auto pair = get_most_frequent_pair(stats);
 
             // Check if the resulting token would exceed MAX_TOKEN_LENGTH
             size_t new_token_length = vocab[pair.first].size() + vocab[pair.second].size();
@@ -208,9 +200,8 @@ public:
 
         merges.clear();
         vocab.clear();
-        for (int i = 0; i < BASE_VOCAB_SIZE; ++i) {
+        for (int i = 0; i < BASE_VOCAB_SIZE; ++i)
             vocab[i] = std::vector<uint8_t>{ static_cast<uint8_t>(i) };
-        }
 
         int idx = BASE_VOCAB_SIZE + (int)special_tokens.size();
         while (std::getline(file, line)) {
@@ -230,12 +221,19 @@ public:
             return false;
         }
         while (std::getline(vocab_file, line)) {
+            // Find the first '[' and the last ']' in the line
             size_t start = line.find('[');
-            size_t end = line.find(']');
+            size_t end = line.rfind(']');  // Use rfind to find the last ']'
             if (start != std::string::npos && end != std::string::npos) {
                 std::string token_str = line.substr(start + 1, end - start - 1);
-                int id = std::stoi(line.substr(end + 2));
-                vocab[id] = string_to_bytes(token_str);
+                try {
+                    idx = std::stoi(line.substr(end + 2));
+                    vocab[idx] = string_to_bytes(token_str);
+                }
+                catch (const std::invalid_argument& /* e */) {
+                    std::cerr << "Error: Invalid token ID in vocab file: " << line << "\n";
+                    continue;
+                }
             }
         }
         return true;
@@ -265,12 +263,69 @@ private:
     static const int BASE_VOCAB_SIZE = 256;
 
     // Get frequency statistics of adjacent token pairs
-    std::map<std::pair<int, int>, int> get_stats(const std::vector<int>& ids) {
-        std::map<std::pair<int, int>, int> stats;
-        for (size_t i = 0; i < ids.size() - 1; ++i) {
-            stats[{ids[i], ids[i + 1]}]++;
+    struct pair_hash {
+        template <class T1, class T2>
+        std::size_t operator()(const std::pair<T1, T2>& p) const {
+            auto hash1 = std::hash<T1>{}(p.first);
+            auto hash2 = std::hash<T2>{}(p.second);
+            return hash1 ^ (hash2 << 1);
         }
-        return stats;
+    };
+    std::unordered_map<std::pair<int, int>, int, pair_hash> get_stats(const std::vector<int>& ids) {
+        std::unordered_map<std::pair<int, int>, int, pair_hash> global_stats;
+        std::mutex global_stats_mutex;
+
+        auto worker = [&](size_t start, size_t end) {
+            std::unordered_map<std::pair<int, int>, int, pair_hash> local_stats;
+            for (size_t i = start; i < end - 1; ++i) {
+                local_stats[{ids[i], ids[i + 1]}]++;
+            }
+
+            std::lock_guard<std::mutex> lock(global_stats_mutex);
+            for (const auto& pair : local_stats) {
+                global_stats[pair.first] += pair.second;
+            }
+            };
+
+        size_t num_threads = std::thread::hardware_concurrency();
+        size_t segment_size = ids.size() / num_threads;
+        std::vector<std::thread> threads;
+
+        for (size_t t = 0; t < num_threads; ++t) {
+            size_t start = t * segment_size;
+            size_t end = (t == num_threads - 1) ? ids.size() : start + segment_size;
+            threads.emplace_back(worker, start, end);
+        }
+
+        for (auto& thread : threads) thread.join();
+
+        return global_stats;
+    }
+
+    // Finds the most frequent pair of tokens in the given statistics map that does not exceed the maximum token length
+    std::pair<int, int> get_most_frequent_pair(const std::unordered_map<std::pair<int, int>, int, pair_hash>& stats) {
+        std::pair<int, int> best_pair = { -1, -1 }; // Initialize the best pair to an invalid value
+        int max_count = 0; // Initialize the maximum frequency count to 0
+
+        // Iterate over all pairs in the statistics map
+        for (const auto& stat : stats) {
+            const std::pair<int, int>& pair = stat.first; // Extract the token pair
+            int count = stat.second; // Extract the frequency count
+
+            // Check if the new token formed by merging the pair would exceed the maximum allowed length
+            size_t new_token_length = vocab[pair.first].size() + vocab[pair.second].size();
+            if (new_token_length > MAX_TOKEN_LENGTH) {
+                continue; // Skip this pair if it exceeds the maximum token length
+            }
+
+            // Update the best pair if the current pair has a higher frequency
+            if (count > max_count) {
+                best_pair = pair;
+                max_count = count;
+            }
+        }
+
+        return best_pair; // Return the most frequent valid pair
     }
 
     // Merge the most frequent pair in the token sequence
@@ -465,7 +520,7 @@ int main(int argc, char** argv) {
         // Test the tokenizer
         if (parser.option("test-tokenizer")) {
             bpe_tokenizer c_tokenizer;
-            c_tokenizer.load("dlib_t1k_base");
+            c_tokenizer.load("dlib_t3k_base");
 
             // Test the tokenizer
             std::string input = "The quick brown fox jumps over the lazy dog, and the dog barks loudly!";
@@ -485,28 +540,28 @@ int main(int argc, char** argv) {
 
         // Default values
         double learning_rate = 1e-4;
-        long batch_size = 64;
-        int max_epochs = 100;
-        int iterations_threshold = 15000;
+        unsigned long batch_size = 64;
+        long max_epochs = 100;
+        unsigned long iterations_threshold = 15000;
         double min_learning_rate = 1e-6;
         double temperature = 1.0;
-        int top_k = 1;
+        unsigned long top_k = 1;
 
         // Override defaults if options are provided
         if (parser.option("learning-rate"))
             learning_rate = std::stod(parser.option("learning-rate").argument());
         if (parser.option("batch-size"))
-            batch_size = std::stol(parser.option("batch-size").argument());
+            batch_size = std::stoul(parser.option("batch-size").argument());
         if (parser.option("max-epochs"))
-            max_epochs = std::stoi(parser.option("max-epochs").argument());
+            max_epochs = std::stoul(parser.option("max-epochs").argument());
         if (parser.option("iterations-threshold"))
-            iterations_threshold = std::stoi(parser.option("iterations-threshold").argument());
+            iterations_threshold = std::stoul(parser.option("iterations-threshold").argument());
         if (parser.option("min-learning-rate"))
             min_learning_rate = std::stod(parser.option("min-learning-rate").argument());
         if (parser.option("temperature"))
             temperature = std::stod(parser.option("temperature").argument());
         if (parser.option("top-k"))
-            top_k = std::stoi(parser.option("top-k").argument());
+            top_k = std::stoul(parser.option("top-k").argument());
 
         // Minimal configiguration for our Transformer mmodel
         const long vocab_size = (VOCAB_SIZE + NUM_SPECIAL_TOKENS);
@@ -536,8 +591,8 @@ int main(int argc, char** argv) {
 
         // Load the tokenizer
         bpe_tokenizer tokenizer;
-        if (!tokenizer.load("dlib_t1k_base")) {
-            std::cerr << "Failed to load vocabulary file (dlib_t1k_base.[model|vocab])!" << std::endl;
+        if (!tokenizer.load("dlib_t3k_base")) {
+            std::cerr << "Failed to load vocabulary file (dlib_t3k_base.[model|vocab])!" << std::endl;
             return 1;
         } else {
             std::cout << "Vocab size: " << std::to_string(tokenizer.get_vocab_size()) << " - Model config: "
