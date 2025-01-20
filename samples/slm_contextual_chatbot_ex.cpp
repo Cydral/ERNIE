@@ -116,21 +116,55 @@ public:
 
     // Encode the given text into subword tokens
     std::vector<int> encode(const std::string& text) {
+        // Convert text to byte IDs
         std::vector<int> ids;
+        ids.reserve(text.size()); // Reserve space to avoid reallocations
         for (char c : text) {
             ids.push_back(static_cast<uint8_t>(c));
         }
 
-        while (ids.size() >= 2) {
-            auto stats = get_stats(ids);
-            auto pair = std::min_element(stats.begin(), stats.end(),
-                [this](const std::pair<std::pair<int, int>, int>& a, const std::pair<std::pair<int, int>, int>& b) {
-                    return merges.count(a.first) ? (merges.at(a.first) < (merges.count(b.first) ? merges.at(b.first) : INT_MAX)) : false;
-                })->first;
+        // Precompute valid pairs and their merge order
+        auto stats = get_stats(ids); // Compute initial statistics
+        std::priority_queue<std::pair<int, std::pair<int, int>>> pq; // Min-heap based on merge order
 
-            if (!merges.count(pair)) break;
-            int idx = merges[pair];
-            ids = merge(ids, pair, idx);
+        // Initialize the priority queue with valid pairs
+        for (const auto& stat : stats) {
+            const std::pair<int, int>& pair = stat.first;
+            if (merges.count(pair)) {
+                pq.push({ merges.at(pair), pair }); // Use merge order as the key
+            }
+        }
+
+        // Merge pairs in order of their merge priority
+        while (!pq.empty()) {
+            // Replace C++17 structured binding with traditional access
+            const auto& top_element = pq.top(); // Get the pair with the smallest merge order
+            int merge_order = top_element.first;
+            const std::pair<int, int>& pair = top_element.second;
+            pq.pop();
+
+            // Check if the pair still exists in the current ids sequence
+            bool pair_found = false;
+            for (size_t i = 0; i < ids.size() - 1; ++i) {
+                if (ids[i] == pair.first && ids[i + 1] == pair.second) {
+                    pair_found = true;
+                    break;
+                }
+            }
+            if (!pair_found) continue; // Skip if the pair no longer exists
+
+            // Merge the pair
+            int idx = merges.at(pair);
+            ids = merge(ids, pair, idx); // Use an optimized merge function
+
+            // Update statistics and priority queue with new pairs formed after merging
+            stats = get_stats(ids);
+            for (const auto& stat : stats) {
+                const std::pair<int, int>& new_pair = stat.first;
+                if (merges.count(new_pair)) {
+                    pq.push({ merges.at(new_pair), new_pair });
+                }
+            }
         }
 
         return ids;
@@ -329,15 +363,18 @@ private:
     }
 
     // Merge the most frequent pair in the token sequence
-    std::vector<int> merge(const std::vector<int>& ids, std::pair<int, int> pair, int idx) {
+    std::vector<int> merge(std::vector<int>& ids, const std::pair<int, int>& pair, int idx) {
         std::vector<int> new_ids;
+        new_ids.reserve(ids.size()); // Reserve space to avoid reallocations
+
         for (size_t i = 0; i < ids.size(); ++i) {
             if (i < ids.size() - 1 && ids[i] == pair.first && ids[i + 1] == pair.second) {
-                new_ids.push_back(idx);
-                i++;
+                new_ids.push_back(idx); // Replace the pair with the new token ID
+                i++; // Skip the next token
             }
-            else new_ids.push_back(ids[i]);
+            else new_ids.push_back(ids[i]); // Keep the current token
         }
+
         return new_ids;
     }
 
