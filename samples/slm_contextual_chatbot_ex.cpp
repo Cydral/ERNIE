@@ -22,12 +22,11 @@
 // Include Transformer definitions
 #include "slm_defs.h"
 
-// This header "slm_data.h" is assumed to contain at least:
-//   const std::string shakespeare_text;
-#include "slm_data.h"
+// Include at least data for the training
+#include "slm_contextual_chatbot_data.h"
 
 const size_t VOCAB_SIZE = 3000;
-const size_t NUM_SPECIAL_TOKENS = 3;
+const size_t NUM_SPECIAL_TOKENS = 6;
 
 // Initialize random number generation
 std::random_device rd;
@@ -55,9 +54,12 @@ public:
         }
         // Initialize special tokens with sequential IDs
         special_tokens = {
-            {"<|endoftext|>", BASE_VOCAB_SIZE},
-            {"<|unk|>", (BASE_VOCAB_SIZE + 1)},
-            {"<|pad|>", (BASE_VOCAB_SIZE + 2)}
+            {"<|startoftext|>", BASE_VOCAB_SIZE},
+            {"<|endoftext|>", BASE_VOCAB_SIZE + 1},
+            {"<|question|>", BASE_VOCAB_SIZE + 2},
+            {"<|response|>", BASE_VOCAB_SIZE + 3},
+            {"<|unk|>", (BASE_VOCAB_SIZE + 4)},
+            {"<|pad|>", (BASE_VOCAB_SIZE + 5)}
         };
     }
 
@@ -137,7 +139,6 @@ public:
 
         // Merge pairs in order of their merge priority
         while (!pq.empty()) {
-            // Replace C++17 structured binding with traditional access
             const auto& top_element = pq.top(); // Get the pair with the smallest merge order
             int merge_order = top_element.first;
             const std::pair<int, int>& pair = top_element.second;
@@ -206,7 +207,7 @@ public:
         std::ofstream model_file(file_prefix + ".model");
         model_file << "bpe-tokenizer v1\n";
 
-        for (int idx = BASE_VOCAB_SIZE; idx < vocab_size; ++idx) {
+        for (int idx = BASE_VOCAB_SIZE + (int)special_tokens.size(); idx < vocab_size; ++idx) {
             for (const auto& merge_pair : merges) {
                 if (merge_pair.second == idx) {
                     model_file << merge_pair.first.first << " " << merge_pair.first.second << "\n";
@@ -228,24 +229,15 @@ public:
             std::cerr << "Error: Unable to open model file: " << model_file + ".model" << "\n";
             return false;
         }
-
         std::string line;
         std::getline(file, line); // Version
 
+        int idx = BASE_VOCAB_SIZE + (int)special_tokens.size(), a, b;
         merges.clear();
-        vocab.clear();
-        for (int i = 0; i < BASE_VOCAB_SIZE; ++i)
-            vocab[i] = std::vector<uint8_t>{ static_cast<uint8_t>(i) };
-
-        int idx = BASE_VOCAB_SIZE + (int)special_tokens.size();
         while (std::getline(file, line)) {
             std::istringstream iss(line);
-            int a, b;
             iss >> a >> b;
             merges[{a, b}] = idx;
-
-            vocab[idx].insert(vocab[idx].end(), vocab[a].begin(), vocab[a].end());
-            vocab[idx].insert(vocab[idx].end(), vocab[b].begin(), vocab[b].end());
             idx++;
         }
 
@@ -254,6 +246,7 @@ public:
             std::cerr << "Error: Unable to open vocab file: " << model_file + ".vocab" << "\n";
             return false;
         }
+        vocab.clear();
         while (std::getline(vocab_file, line)) {
             // Find the first '[' and the last ']' in the line
             size_t start = line.find('[');
@@ -276,9 +269,7 @@ public:
     // Get the ID of a special token
     int get_special_token_id(const std::string& token) const {
         auto it = special_tokens.find(token);
-        if (it != special_tokens.end()) {
-            return it->second;
-        }
+        if (it != special_tokens.end()) return it->second;
         throw std::runtime_error("Special token not found: " + token);
     }
 
@@ -426,6 +417,29 @@ dlib::matrix<int, 0, 1> create_sample_with_unknown_tokens(const dlib::matrix<int
 
 // ----------------------------------------------------------------------------------------
 
+// Function to build the training corpus with special tokens
+std::vector<int> build_qa_tokens(const std::vector<std::pair<std::string, std::string>>& qa_pairs, bpe_tokenizer& tokenizer) {
+    std::vector<int> tokens;
+
+    for (const auto& qa_pair : qa_pairs) {
+        // Encode the question and add the question token
+        std::vector<int> q_tokens = tokenizer.encode(qa_pair.first);
+        q_tokens.insert(q_tokens.begin(), tokenizer.get_special_token_id("<|question|>"));
+
+        // Encode the response and add the response token
+        std::vector<int> r_tokens = tokenizer.encode(qa_pair.second);
+        r_tokens.insert(r_tokens.begin(), tokenizer.get_special_token_id("<|response|>"));
+        r_tokens.push_back(tokenizer.get_special_token_id("<|endoftext|>"));
+
+        // Combine the question and response tokens
+        tokens.insert(tokens.end(), q_tokens.begin(), q_tokens.end());
+        tokens.insert(tokens.end(), r_tokens.begin(), r_tokens.end());
+    }
+
+    return tokens;
+}
+// ----------------------------------------------------------------------------------------
+
 std::pair<dlib::matrix<int, 0, 1>, int> create_reduced_sample(const dlib::matrix<int, 0, 1>& o_sample, int padding_token_id, double reduction_ratio) {
     int new_length = o_sample.size() * (1 - reduction_ratio);
     dlib::matrix<int, 0, 1> new_sample = o_sample;
@@ -438,7 +452,7 @@ std::pair<dlib::matrix<int, 0, 1>, int> create_reduced_sample(const dlib::matrix
 
 // ----------------------------------------------------------------------------------------
 
-std::string load_data_from_file_or_directory(const std::string& path, size_t max_size = 0.05 * 1024 * 1024) {
+std::string load_data_from_file_or_directory(const std::string& path, size_t max_size = 0.1 * 1024 * 1024) {
     std::string data;
     size_t total_size = 0;
     bool max_size_reached = false;
@@ -525,6 +539,7 @@ int main(int argc, char** argv) {
         parser.add_option("chatbot", "Engage in an interactive chatbot session using a trained model");
         parser.add_option("test-tokenizer", "Test the BPE tokenizer");
         parser.add_option("data", "Specify a file or directory containing the training data", 1);
+        parser.add_option("data-size", "Set the size of data to load in MB (default: 10 MB)", 1);
         parser.add_option("learning-rate", "Set the learning rate for training (default: 1e-4)", 1);
         parser.add_option("batch-size", "Set the mini-batch size for training (default: 64)", 1);
         parser.add_option("max-epochs", "Set the maximum number of training epochs (default: 100)", 1);
@@ -533,6 +548,7 @@ int main(int argc, char** argv) {
         parser.add_option("shuffle", "Shuffle training sequences and labels before training (default: false)");
         parser.add_option("temperature", "Set the temperature for text generation (default: 1.0)", 1);
         parser.add_option("top-k", "Set the number of top tokens to considere for response initialization (default: 1)", 1);
+        parser.add_option("qna", "Enable Q&A mode for chatbot inference (default: false)");
         parser.parse(argc, argv);
 
         if (parser.number_of_arguments() == 0 && !parser.option("train")
@@ -542,15 +558,17 @@ int main(int argc, char** argv) {
                 << "  --train: Train a Dlib transformer model on specific text\n"
                 << "  --chatbot: Engage in an interactive chatbot session using a trained model\n"
                 << "  --test-tokenizer: Test the BPE tokenizer\n"
-                << "  --data <path>: Specify a file or directory containing the training data\n"
+                << "  --data <value>: Specify a file or directory containing the training data\n"
+                << "  --data-size <value>: Set the size of data to load in MB (default: 10 MB)\n"
                 << "  --learning-rate <value>: Set the learning rate for training (default: 1e-4)\n"
                 << "  --batch-size <value>: Set the mini-batch size for training (default: 64)\n"
                 << "  --max-epochs <value>: Set the maximum number of training epochs (default: 100)\n"
                 << "  --iterations-threshold <value>: Set the iterations without progress threshold (default: 15000)\n"
                 << "  --min-learning-rate <value>: Set the minimum learning rate (default: 1e-6)\n"
                 << "  --shuffle: Shuffle training sequences and labels before training (default: false)\n"
-                << "  --temperature: Set the temperature for text generation (default: 1.0)\n"
-                << "  --top-k: Set the number of top tokens to considere for response initialization (default: 1)\n";
+                << "  --temperature <value>: Set the temperature for text generation (default: 1.0)\n"
+                << "  --top-k <value>: Set the number of top tokens to considere for response initialization (default: 1)\n"
+                << "  --qna: Enable Q&A mode for chatbot inference (default: false)\n";
             return 0;
         }
 
@@ -583,6 +601,7 @@ int main(int argc, char** argv) {
         double min_learning_rate = 1e-6;
         double temperature = 1.0;
         unsigned long top_k = 1;
+        unsigned long data_size = 10 * 1024 * 1024;
 
         // Override defaults if options are provided
         if (parser.option("learning-rate"))
@@ -599,6 +618,8 @@ int main(int argc, char** argv) {
             temperature = std::stod(parser.option("temperature").argument());
         if (parser.option("top-k"))
             top_k = std::stoul(parser.option("top-k").argument());
+        if (parser.option("data-size"))
+            data_size = std::stoul(parser.option("data-size").argument()) * 1024 * 1024;
 
         // Minimal configiguration for our Transformer mmodel
         const long vocab_size = (VOCAB_SIZE + NUM_SPECIAL_TOKENS);
@@ -623,7 +644,7 @@ int main(int argc, char** argv) {
         std::vector<int> gpus{ 0 };
 
         // The model file to store or load (and the checkpoint)
-        const std::string model_file = "lm_chatbot_en_35M_fp32_model.dat";
+        const std::string model_file = "lm_chatbot_en_46M_fp32_model.dat";
         const std::string checkpoint_file = "checkpoint.dat";
 
         // Load the tokenizer
@@ -650,13 +671,11 @@ int main(int argc, char** argv) {
             // Load data from the specified file or directory
             std::string training_data;
             if (parser.option("data"))
-                training_data = load_data_from_file_or_directory(parser.option("data").argument(), 50 * 1024 * 1024);
-            else                
-                training_data = shakespeare_text_parts[0]; // Fallback to the default data from slm_data.h
+                training_data = load_data_from_file_or_directory(parser.option("data").argument(), data_size);            
 
             // 1) Tokenize the Shakespeare text
             std::cout << "Encoding sequences in progress...";
-            std::vector<int> full_tokens = tokenizer.encode(training_data);
+            std::vector<int> full_tokens = training_data.empty() ? build_qa_tokens(QA_PAIRS, tokenizer) : tokenizer.encode(training_data);
             std::cout << " done\n";
             if (full_tokens.empty()) return 0;
 
@@ -756,7 +775,7 @@ int main(int argc, char** argv) {
 
                     // Display the progress
                     auto current_time = std::chrono::steady_clock::now();
-                    if (std::chrono::duration_cast<std::chrono::seconds>(current_time - last_print_time).count() >= 15) {
+                    if (std::chrono::duration_cast<std::chrono::seconds>(current_time - last_print_time).count() >= 25) {
                         std::uniform_int_distribution<> dis(0, samples.size() - 1);
                         size_t random_index = dis(gen);
                         std::string decoded_sequence;
@@ -768,7 +787,7 @@ int main(int argc, char** argv) {
                             << "\tstep: " << trainer.get_train_one_step_calls()
                             << "\tlearning rate: " << trainer.get_learning_rate()
                             << "\taverage loss: " << trainer.get_average_loss()
-                            << "\tsteps without progress: " << trainer.get_steps_without_progress()
+                            << "\tsteps w/o progress: " << trainer.get_steps_without_progress()
                             << std::flush << std::endl;
                         last_print_time = current_time;                        
                     }
@@ -800,7 +819,8 @@ int main(int argc, char** argv) {
         // Chatbot mode
         // ----------------------------------------------------------------------------------------
         if (parser.option("chatbot")) {
-            std::cout << "=== CHATBOT MODE ===\n";
+            bool qna_mode = parser.option("qna"); // Check if QnA mode is enabled
+            std::cout << "=== CHATBOT MODE " << (qna_mode ? "(QnA mode activated) " : "") << "===\n";
 
             // 1) Load the trained model
             using net_infer = my_transformer_cfg::network_type<false>;
@@ -822,7 +842,7 @@ int main(int argc, char** argv) {
             chatbot.subnet().subnet() = net.subnet();
 
             // 3) Conversation loop
-            const float top_k_threshold = 0.05f; // 5% threshold to consider a token as a candidate
+            const float top_k_threshold = 0.05f; // 5% threshold to consider a token as a candidate            
             std::string user_input;
             while (true) {
                 // Prompt the user for input
@@ -836,7 +856,8 @@ int main(int argc, char** argv) {
                 }
 
                 // Append the user's input to the conversation history
-                std::vector<int> user_tokens = tokenizer.encode(user_input + "\n");
+                std::vector<int> user_tokens = tokenizer.encode(user_input);
+                if (qna_mode) user_tokens.insert(user_tokens.begin(), tokenizer.get_special_token_id("<|question|>"));
                 conversation_tokens.insert(conversation_tokens.end(), user_tokens.begin(), user_tokens.end());
 
                 // Truncate the conversation history to fit within max_seq_len
@@ -854,10 +875,13 @@ int main(int argc, char** argv) {
 
                 // Generate a response
                 std::string generated_text;
-                bool stop_generation = false;
-                const size_t min_response_length = user_tokens.size(); // Minimum response length = user input length
-                const size_t max_response_length = max_seq_len / 2;    // Maximum response length = half of context window
+                bool stop_generation = false, found_response_start = false;
+                const size_t min_response_length = user_tokens.size();  // Minimum response length = user input length
+                const size_t max_response_length = max_seq_len / 2;  // Maximum response length = half of context window
                 size_t response_length = 0;
+                float response_confidence = 1.0f;  // Confidence score for the generated response
+                const size_t max_search_length = 20;  // Maximum tokens to search for a response start
+                const float min_confidence_threshold = 0.7f;  // Minimum confidence threshold for a reliable response
 
                 while (!stop_generation) {
                     auto logits = dlib::mat(chatbot(input_seq)); // Single inference
@@ -888,9 +912,20 @@ int main(int argc, char** argv) {
                         }
                     } else next_token = dlib::index_of_max(logits);
 
+                    // Update response confidence
+                    response_confidence += std::log(logits(0, next_token));
+
                     // Decode the token to a string
                     std::string next_word = tokenizer.decode(next_token);
-                    generated_text += next_word;
+                    if (qna_mode) {
+                        if (next_token == tokenizer.get_special_token_id("<|response|>")) {
+                            found_response_start = true;
+                        }
+                        else if (next_token == tokenizer.get_special_token_id("<|endoftext|>")) {
+                            stop_generation = true;
+                        }
+                    } else found_response_start = true;
+                    if (found_response_start && !stop_generation) generated_text += next_word;
                     response_length++;
 
                     // Shift the input sequence to the left
@@ -899,9 +934,12 @@ int main(int argc, char** argv) {
                     input_seq(max_seq_len - 1, 0) = (int)next_token;
 
                     // Check for stopping conditions
-                    if (response_length >= min_response_length) {
+                    if (qna_mode && !found_response_start && response_length >= max_search_length)
+                        stop_generation = true;
+                    if (response_length >= min_response_length) {                                              
                         // Stop if a sentence-ending punctuation mark is encountered
-                        if (next_word.find_first_of(".!?") != std::string::npos)
+                        if (next_word.find_first_of(".!?") != std::string::npos ||
+                            next_token == tokenizer.get_special_token_id("<|endoftext|>"))
                             stop_generation = true;
                     }
 
@@ -909,13 +947,20 @@ int main(int argc, char** argv) {
                     if (response_length >= max_response_length)
                         stop_generation = true;
                 }
+                float n_confidence = std::exp(response_confidence / (response_length + 1));
+                std::cout << "(confidence level: " << std::to_string(n_confidence) << ")" << std::endl;
 
                 // Display the chatbot's response
-                std::cout << "Chatbot: " << generated_text << std::flush << std::endl;
+                if (generated_text.empty() || n_confidence < min_confidence_threshold)
+                    std::cout << "Chatbot: " << get_random_fallback_response() << std::flush << std::endl;
+                else
+                    std::cout << "Chatbot: " << generated_text << std::flush << std::endl;
 
                 // Append the chatbot's response to the conversation history
-                std::vector<int> response_tokens = tokenizer.encode(generated_text + "\n");
-                conversation_tokens.insert(conversation_tokens.end(), response_tokens.begin(), response_tokens.end());
+                if (!generated_text.empty()) {
+                    std::vector<int> response_tokens = tokenizer.encode(" " + generated_text + " ");
+                    conversation_tokens.insert(conversation_tokens.end(), response_tokens.begin(), response_tokens.end());
+                }
 
                 // Truncate the conversation history again to fit within max_seq_len
                 if (conversation_tokens.size() > (size_t)max_seq_len)
