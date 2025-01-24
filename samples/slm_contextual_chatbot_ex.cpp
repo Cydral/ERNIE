@@ -25,7 +25,13 @@
 // Include at least data for the training
 #include "slm_contextual_chatbot_data.h"
 
-const size_t VOCAB_SIZE = 3000;
+// The model files to store or load (and the checkpoint)
+const std::string model_file = "lm_chatbot_en_fp32_model.dat";
+const std::string tok_file = "dlib_t1k_base";
+const std::string checkpoint_file = "checkpoint.dat";
+
+// Constants defining the vocabulary size and the number of special tokens
+const size_t VOCAB_SIZE = 1000;
 const size_t NUM_SPECIAL_TOKENS = 6;
 
 // Initialize random number generation
@@ -71,9 +77,7 @@ public:
 
         // Convert text to byte IDs
         std::vector<int> ids;
-        for (char c : text) {
-            ids.push_back(static_cast<uint8_t>(c));
-        }
+        for (char c : text) ids.push_back(static_cast<uint8_t>(c));
 
         // Perform BPE merges
         for (int i = 0; i < num_merges; ++i) {
@@ -330,7 +334,7 @@ private:
     // Finds the most frequent pair of tokens in the given statistics map that does not exceed the maximum token length
     std::pair<int, int> get_most_frequent_pair(const std::unordered_map<std::pair<int, int>, int, pair_hash>& stats) {
         std::pair<int, int> best_pair = { -1, -1 }; // Initialize the best pair to an invalid value
-        int max_count = 0; // Initialize the maximum frequency count to 0
+        double max_score = 0; // Initialize the maximum score to 0
 
         // Iterate over all pairs in the statistics map
         for (const auto& stat : stats) {
@@ -339,18 +343,19 @@ private:
 
             // Check if the new token formed by merging the pair would exceed the maximum allowed length
             size_t new_token_length = vocab[pair.first].size() + vocab[pair.second].size();
-            if (new_token_length > MAX_TOKEN_LENGTH) {
-                continue; // Skip this pair if it exceeds the maximum token length
-            }
+            if (new_token_length > MAX_TOKEN_LENGTH) continue; // Skip this pair if it exceeds the maximum token length
 
-            // Update the best pair if the current pair has a higher frequency
-            if (count > max_count) {
+            // Calculate the score for this pair (frequency * length)
+            double score = count * new_token_length;
+
+            // Update the best pair if the current pair has a higher score
+            if (score > max_score) {
                 best_pair = pair;
-                max_count = count;
+                max_score = score;
             }
         }
 
-        return best_pair; // Return the most frequent valid pair
+        return best_pair; // Return the pair with the highest score
     }
 
     // Merge the most frequent pair in the token sequence
@@ -485,10 +490,7 @@ std::string load_data_from_file_or_directory(const std::string& path, size_t max
                         std::cout << "Max size limit reached. Further content will be ignored." << std::endl;
                         break;
                     }
-                }
-                else {
-                    break;  // No need to continue reading if max size is reached
-                }
+                } else break;  // No need to continue reading if max size is reached
             }
         }
         };
@@ -528,6 +530,30 @@ void shuffle_samples_and_labels(std::vector<dlib::matrix<int, 0, 1>>& samples, s
             std::swap(indices[i], indices[j]);
         }
     }
+}
+
+// ----------------------------------------------------------------------------------------
+
+// Formats a string by trimming whitespace, capitalizing the first letter, etc.
+std::string format_string(const std::string& input) {
+    if (input.empty()) return input; // Return an empty string if the input is empty
+
+    // Use regex to remove leading and trailing whitespace (including \n, \r, \t)
+    std::regex whitespace_pattern(R"(^\s+|\s+$)");
+    std::string trimmed = std::regex_replace(input, whitespace_pattern, "");
+
+    // Capitalize the first letter of the string
+    if (!trimmed.empty()) trimmed[0] = std::toupper(trimmed[0]);
+
+    // Add a period at the end if the string doesn't end with '.', '?', or '!'
+    if (!trimmed.empty()) {
+        char last_char = trimmed.back();
+        if (last_char != '.' && last_char != '?' && last_char != '!') {
+            trimmed += '.';
+        }
+    }
+
+    return trimmed;
 }
 
 // ----------------------------------------------------------------------------------------
@@ -575,7 +601,7 @@ int main(int argc, char** argv) {
         // Test the tokenizer
         if (parser.option("test-tokenizer")) {
             bpe_tokenizer c_tokenizer;
-            c_tokenizer.load("dlib_t3k_base");
+            c_tokenizer.load(tok_file);
 
             // Test the tokenizer
             std::string input = "The quick brown fox jumps over the lazy dog, and the dog barks loudly!";
@@ -583,12 +609,12 @@ int main(int argc, char** argv) {
             std::cout << "Encoded tokens: ";
             for (int id : encoded) std::cout << id << " ";
             std::cout << std::endl;
+
+            std::cout << "Decoded string: " << c_tokenizer.decode(encoded) << std::endl;
             encoded[3] = c_tokenizer.get_special_token_id("<|unk|>");
             encoded.push_back(c_tokenizer.get_special_token_id("<|endoftext|>"));
             encoded.push_back(c_tokenizer.get_special_token_id("<|pad|>"));
-
-            std::string decoded = c_tokenizer.decode(encoded);
-            std::cout << "Decoded string: " << decoded << std::endl;
+            std::cout << "Decoded string (with special tokens): " << c_tokenizer.decode(encoded) << std::endl;
 
             return 0;
         }
@@ -625,8 +651,8 @@ int main(int argc, char** argv) {
         const long vocab_size = (VOCAB_SIZE + NUM_SPECIAL_TOKENS);
         const long num_layers = 10;
         const long num_heads = 8;
-        const long embedding_dim = 72;
-        const long max_seq_len = 80;
+        const long embedding_dim = /*72*/112;
+        const long max_seq_len = 100;
         const bool use_squeezing = false;
 
         using my_transformer_cfg = transformer::transformer_config<
@@ -643,14 +669,10 @@ int main(int argc, char** argv) {
         // For GPU usage (if any), set gpus = {0} for a single GPU, etc.
         std::vector<int> gpus{ 0 };
 
-        // The model file to store or load (and the checkpoint)
-        const std::string model_file = "lm_chatbot_en_46M_fp32_model.dat";
-        const std::string checkpoint_file = "checkpoint.dat";
-
         // Load the tokenizer
         bpe_tokenizer tokenizer;
-        if (!tokenizer.load("dlib_t3k_base")) {
-            std::cerr << "Failed to load vocabulary file (dlib_t3k_base.[model|vocab])!" << std::endl;
+        if (!tokenizer.load(tok_file)) {
+            std::cerr << "Failed to load vocabulary file (" << tok_file << ".[model | vocab])!" << std::endl;
             return 1;
         } else {
             std::cout << "Vocab size: " << std::to_string(tokenizer.get_vocab_size()) << " - Model config: "
@@ -757,7 +779,8 @@ int main(int argc, char** argv) {
             trainer.set_synchronization_file(checkpoint_file, std::chrono::minutes(5));
             trainer.be_quiet();
 
-            // 4) Main train loop            
+            // 4) Main train loop
+            auto last_print_time = std::chrono::steady_clock::now();
             for (size_t epoch = 0; epoch < max_epochs
                 && !g_interrupt_signal_received.load(std::memory_order_relaxed); ++epoch) {
                 // Shuffle samples and labels if the --shuffle option is enabled
@@ -766,8 +789,7 @@ int main(int argc, char** argv) {
                 // Calculate the number of complete batches
                 size_t num_complete_batches = samples.size() / batch_size;                
 
-                // Iterate on complete batches only
-                auto last_print_time = std::chrono::steady_clock::now();
+                // Iterate on complete batches only                
                 for (size_t i = 0; i < (num_complete_batches * batch_size) && !g_interrupt_signal_received.load(std::memory_order_relaxed); i += batch_size) {
                     std::vector<dlib::matrix<int, 0, 1>> batch_samples(samples.begin() + i, samples.begin() + i + batch_size);
                     std::vector<unsigned long> batch_labels(labels.begin() + i, labels.begin() + i + batch_size);
@@ -775,7 +797,7 @@ int main(int argc, char** argv) {
 
                     // Display the progress
                     auto current_time = std::chrono::steady_clock::now();
-                    if (std::chrono::duration_cast<std::chrono::seconds>(current_time - last_print_time).count() >= 25) {
+                    if (std::chrono::duration_cast<std::chrono::seconds>(current_time - last_print_time).count() >= 15) {
                         std::uniform_int_distribution<> dis(0, samples.size() - 1);
                         size_t random_index = dis(gen);
                         std::string decoded_sequence;
@@ -954,7 +976,7 @@ int main(int argc, char** argv) {
                 if (generated_text.empty() || n_confidence < min_confidence_threshold)
                     std::cout << "Chatbot: " << get_random_fallback_response() << std::flush << std::endl;
                 else
-                    std::cout << "Chatbot: " << generated_text << std::flush << std::endl;
+                    std::cout << "Chatbot: " << format_string(generated_text) << std::flush << std::endl;
 
                 // Append the chatbot's response to the conversation history
                 if (!generated_text.empty()) {
